@@ -152,7 +152,9 @@ if requires("type mapping through a thunk, live", :libJLCS, :clangxx)
     @testset "what was emitted" begin
         @test occursin(r"^function tmap_color_out\(c::Ref\{Color\}\)"m, wsrc)
         @test occursin(r"^function tmap_color_is\(c::Ref\{Color\}, d::Any\)"m, wsrc)
-        @test occursin("Bool, c, UInt8(d))", typemap_body(wsrc, "tmap_color_is"))
+        # The reference is passed as an address (`pointer_arg`), the by-value
+        # enum as its integer.
+        @test occursin("Bool, RepliBuild.JITManager.pointer_arg(Ptr{Color}, c), UInt8(d))", typemap_body(wsrc, "tmap_color_is"))
         @test !occursin("UInt8(c)", wsrc)
         @test occursin(r"^primitive type byte <: RepliBuild\.OpenEnums\.OpenEnum\{UInt8\} 8 end"m, wsrc)
         @test occursin(r"^primitive type Handle <: RepliBuild\.OpenEnums\.OpenEnum\{UInt32\} 32 end"m, wsrc)
