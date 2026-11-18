@@ -193,10 +193,12 @@ if requires("a class taken by value through a thunk, live", :libJLCS, :clangxx)
         const J = RepliBuild.JLCSIRGenerator
         function J.generate_jlcs_ir(vt::RepliBuild.DWARFParser.VtableInfo, md::AbstractDict; kw...)
             ir = invoke(J.generate_jlcs_ir, Tuple{RepliBuild.DWARFParser.VtableInfo, Any}, vt, md; kw...)
-            i = findfirst("// Constructors and destructors of by-value temporaries", ir)
-            i === nothing && return ir
-            j = findnext("\\n\\n", ir, i.stop)
-            return ir[1:prevind(ir, i.start)] * ir[j.stop:end]
+            # Every declaration of two callees the scopes name, wherever it was
+            # written: the by-value block declares them when the wrapper binds
+            # C2/D2, their own thunks do when it binds C1/D1. Cutting only the
+            # block left the module whole in the second case, the JIT came up,
+            # and the call below ran for real on a null object.
+            return replace(ir, r"^[ \\t]*func\\.func private @(?:_ZN3ResD1Ev|_ZN4UniqC1EOS_)\\(.*\\n"m => "")
         end
         const M = include($(repr(wrapper)))
         check(name, ok, detail) = println("PROBE ", name, ": ", ok ? "PASS" : "FAIL " * string(detail))
@@ -205,7 +207,9 @@ if requires("a class taken by value through a thunk, live", :libJLCS, :clangxx)
         check("init_failed_not_crashed", eng.init_error !== nothing && eng.jit_engine === nothing, msg)
         check("names_the_symbols", occursin("never declares", msg) && occursin("_ZN3ResD1Ev", msg) &&
                                    occursin("_ZN4UniqC1EOS_", msg), msg)
-        err = try
+        # Only with the engine down: with it up this is a real call that copies
+        # from a null object.
+        err = eng.init_error === nothing ? "not called: the JIT initialised" : try
             M.take_res(M.Res(C_NULL)); "returned"
         catch e
             sprint(showerror, e)
