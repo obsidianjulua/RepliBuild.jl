@@ -147,13 +147,15 @@ end
             "enumerators" => Any[ent("VK_NONE", 0), ent("VK_F0", 256), ent("VK_FMAX", 511)])))
     code = OE_W.generate_introspective_module_c(cfg, libref, meta, "OeC", OE_W.create_type_registry(cfg), false)
     @test occursin("primitive type vkey <: RepliBuild.OpenEnums.OpenEnum{Cint} 32 end", code)
-    @test occursin(r"^function abs\(k::vkey\)::vkey"m, code)
+    # A by-value enum parameter takes an integer too (C converts one).
+    @test occursin(r"^function abs\(k::Union\{vkey, Integer\}\)::vkey"m, code)
     holder = Module(:OeCHolder)
     Base.include_string(holder, code)
     M = _g(holder, :OeC)
     vkey = _g(M, :vkey)
     r = Base.invokelatest(_g(M, :abs), vkey(-257))
     @test r === vkey(257)                           # an undeclared value went in and came back
+    @test Base.invokelatest(_g(M, :abs), -257) === vkey(257)   # an integer, converted to the enum
     @test string(r) == "vkey(257)"
     @test Base.invokelatest(_g(M, :abs), _g(M, :VK_F0)) === _g(M, :VK_F0)
 end

@@ -105,7 +105,8 @@ end
         m2 = Base.invokelatest(M.get_m2, r3)
         @test m2 isa M.R1
         @test getfield(m2, 1) == (0xaa, 0x00, 0x00, 0x00)
-        @test Base.invokelatest(M.get_m1, m2) == 0xaa
+        # `int m1:8` holding 0xaa: a signed field reads sign-extended.
+        @test Base.invokelatest(M.get_m1, m2) === Cint(-86)
     end
 
     @testset "X6: bitfields wider than 32 bits read and write" begin
