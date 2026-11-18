@@ -10327,8 +10327,8 @@ function _library_variables(die_order, type_refs::AbstractDict,
             continue
         end
         spec = get(info, "specification", nothing)
-        decl = spec === nothing ? nothing : get(type_refs, spec, get(static_member_decls, spec, nothing))
-        decl isa AbstractDict || (decl = nothing)
+        decl = spec === nothing ? nothing : get(static_member_decls, spec, get(type_refs, spec, nothing))
+        (decl isa AbstractDict && get(decl, "kind", nothing) == "variable") || (decl = nothing)
         spec === nothing || push!(defined, spec)
         at = decl === nothing ? info : decl
         (get(info, "external", false) == true || get(at, "external", false) == true) || continue
