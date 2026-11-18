@@ -160,6 +160,8 @@ const TESTS = TestFile[
     T("test_compile_never_ran.jl", :unit, [:build]),
     T("test_toolchain_switch.jl", :unit, [:build, :c]),
     T("test_noexcept_routing.jl", :unit, [:cpp]),
+    T("test_c_linkage_unwind.jl", :unit, [:build, :c, :cpp]),
+    T("test_alias_signatures.jl", :unit, [:build, :c, :cpp]),
     T("test_by_value_crossing.jl", :unit, [:dialect, :cpp]),
     T("test_byvalue_class_temporaries.jl", :unit, [:dialect, :cpp]),
     T("test_packed_layout.jl", :unit, [:dialect, :cpp]),
@@ -243,6 +245,11 @@ const TESTS = TestFile[
     T("test_cpp_finalizers_live.jl", :dev, [:cpp], locks = ["finalizer_test"]),
     T("test_virtual_classes_live.jl", :dev, [:dwarf, :cpp, :dialect], locks = ["virtual_class_test"]),
     T("test_toolchain_byvalue_live.jl", :dev, [:dwarf, :cpp], locks = ["toolchain_byvalue_test"]),
+    # Which functions a call may reach at all: C linkage that may throw, and
+    # symbols with no debug information.
+    T("test_c_linkage_unwind_live.jl", :dev, [:build, :cpp, :dialect], locks = ["c_linkage_unwind_test"]),
+    T("test_alias_signatures_live.jl", :dev, [:build, :c, :cpp],
+      locks = ["alias_signature_test", "alias_signature_cpp_test"]),
     T("test_convenience_overloads.jl", :dev, [:cpp], locks = ["convenience_overload_test"]),
     T("test_anonymous_unions.jl", :dev, [:c], locks = ["c_abomination_test"], after = ["fixture:c_abomination_test"]),
     # Graph mode.

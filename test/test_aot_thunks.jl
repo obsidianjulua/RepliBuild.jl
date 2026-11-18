@@ -15,7 +15,7 @@
 #   1. cold — build compiles no thunks, and the first wrap compiles exactly the
 #      set it derived. AOT used to run at build, before any wrap had derived
 #      that set, and guessed it: every function in the metadata. Here the guess
-#      compiled, with thunks for the Tier-3 extern "C" factories no wrapper
+#      compiled, with thunks for the Tier-3 extern "C" deleters no wrapper
 #      binds. A package whose guess did not compile or link got a refused or
 #      JIT first wrap and needed a second build and wrap;
 #   2. again — a second build and wrap derive and compile the same set.
@@ -69,6 +69,9 @@ const AOT_EXPECTED_THUNKS = [
     "_Z11make_squared",
     "_Z9vec2_unit4Vec2",
     "_Z9throw_inti",
+    "aot_new_accumulator",               # extern "C" and not `nounwind`: `new` may throw
+    "aot_new_shape",
+    "aot_new_square_as_shape",
 ]
 
 # Every case probe_aot.jl prints. `check_aot_probe` also requires the reverse —
@@ -195,11 +198,11 @@ end
 
             # Exactly the set this wrap derived, on its first run. The build-time
             # pass guessed instead, and its guess also emitted thunks for the
-            # Tier-3 extern "C" factories, which no wrapper binds.
+            # Tier-3 extern "C" deleters, which no wrapper binds.
             built = Set(n for n in aot_exported_names(aot_thunks_path(lib))
                         if startswith(n, "_mlir_ciface_"))
             @test built == Set(aot_ciface(m) for m in aot_manifest_set(lib))
-            @test !any(n -> occursin("aot_new_", n), built)
+            @test !any(n -> occursin("aot_free_", n), built)
             check_aot_probe(wrapper)
         end
 

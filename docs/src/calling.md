@@ -109,9 +109,10 @@ that defines `Base.unsafe_convert(Ptr{Cvoid}, x)`; the table under Arguments
 says which goes where.
 
 **ABI traps.** A function the wrapper cannot call correctly on this host — a
-`long double` by value, a record whose layout DWARF does not settle — is still
-defined, and calling it throws an error that starts `ABI Safety Trap` and
-names the reason. The rest of the module is unaffected.
+`long double` by value, a record whose layout DWARF does not settle, a symbol
+the library has no debug information for — is still defined, and calling it
+throws an error that starts `ABI Safety Trap` and names the reason. The rest
+of the module is unaffected.
 
 ## Arguments
 
@@ -229,9 +230,9 @@ neither, which is any class without a virtual destructor and without a deleter
 function, gets no `ManagedThing`. Give `ManagedThing(ptr)` only a pointer that
 deleter may free: never storage from `Libc.malloc` or a Julia array. The
 deleting destructor is called directly, so the object must be a `Thing`, not an
-object of a subclass. When a function the wrapper calls through `ccall` (in
-C++, a `noexcept` one) returns `Thing*` and there is a `ManagedThing`, the
-wrapper also emits `<function>_safe(…) -> ManagedThing`. Keep a raw pointer when
+object of a subclass. When an `extern "C"` function, or a `noexcept` C++ one
+the wrapper calls through `ccall`, returns `Thing*` and there is a `ManagedThing`,
+the wrapper also emits `<function>_safe(…) -> ManagedThing`. Keep a raw pointer when
 the library retains ownership (a `b2Body*` owned by its world).
 
 **Factories.** A free function named `create_`, `new_`, `make_`, `alloc_`,
@@ -341,7 +342,8 @@ the buffer it was built in.
 
 **Exceptions.** A C++ exception that escapes the callee arrives as
 `RepliBuild.JITManager.CxxException` with the original `what()` string. Catch it
-like any Julia exception.
+like any Julia exception. That holds for an `extern "C"` function of a C++
+library too.
 
 ## A graph module
 

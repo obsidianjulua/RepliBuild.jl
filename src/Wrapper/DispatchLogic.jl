@@ -89,11 +89,82 @@ end
 
 Check if a function has C++ linkage (Itanium ABI mangled name starting with `_Z`).
 C++ functions may throw exceptions unless marked `noexcept`.
-Plain C functions (unmangled names) never throw C++ exceptions.
+An unmangled name says nothing either way: see `_is_nounwind`.
 """
 function _is_cpp_function(func_info)::Bool
     mangled = get(func_info, "mangled", "")
     return startswith(mangled, "_Z")
+end
+
+"""
+    _is_nounwind(func_info) -> Bool
+
+Whether the function's own definition is `nounwind` in the IR the library was
+linked from (metadata `nounwind`, recorded by `Compiler._mark_noexcept!` from
+`_nounwind_definitions`), so no exception can leave it. `is_noexcept` is that
+proof plus a `noexcept` in the sources, and implies it.
+
+This is the question for a function with C linkage in a C++ library.
+`extern "C"` changes the name, not the language of the body: `extern "C" int
+f(int x) { if (x < 0) throw std::runtime_error("…"); return x; }` throws, and
+through a plain `ccall` there is no landing pad, so the process ends in
+`std::terminate` (2026-11-17). Metadata without the key (built before it was
+recorded, or with no IR to read) proves nothing, and the function takes the
+thunk, like any C++ function that may throw.
+"""
+function _is_nounwind(func_info)::Bool
+    return get(func_info, "nounwind", false) === true || _is_noexcept(func_info)
+end
+
+"""
+    _lacks_debug_info(func_info) -> Bool
+
+Whether no DIE describes this symbol: its return type was not read from DWARF
+(`return_type_source == "inferred"`, set by `extract_compilation_metadata` when
+neither the symbol nor an exported function sharing its address has one). What the
+metadata holds for it then is a guess from its name, which for a C symbol is no
+parameters and `Cint`. Both generators emit `_no_debug_info_stub` for it
+instead of a call. A function with a DIE and no prototype (K&R `int f()`) has
+its return type from DWARF and is not one of these.
+"""
+_lacks_debug_info(func_info)::Bool = get(func_info, "return_type_source", "") == "inferred"
+
+"""
+    _no_debug_info_stub(julia_name, mangled, demangled, metadata, generate_docs) -> String
+
+The chunk both generators emit for a function `_lacks_debug_info` names: a
+method taking anything that raises, saying the library has no debug
+information for the symbol. Its parameters are unknown, so it has no typed
+signature a call could match instead.
+"""
+function _no_debug_info_stub(julia_name::AbstractString, mangled::AbstractString,
+                             demangled::AbstractString, metadata, generate_docs::Bool)::String
+    msg = "ABI Safety Trap: cannot call '$julia_name'. The library exports `$mangled` and has no " *
+          "debug information for it: no DWARF entry describes that symbol, or an exported function " *
+          "at its address, so its parameters and return type are unknown and no call could pass them " *
+          "correctly. Compile the file that defines it with `-g`, or keep it out with " *
+          "[wrap] exclude_symbols."
+    get(metadata, "alias_signatures", false) === true ||
+        (msg *= " This metadata was written before an alias took the signature of the function " *
+                "it shares an address with: if `$mangled` is one, rebuild the package (delete " *
+                ".replibuild_cache/project_hash) and wrap again.")
+    doc = generate_docs ? """
+    \"\"\"
+        $julia_name(args...)
+
+    `$demangled` has no debug information in this library, so its signature is
+    unknown. Calling it raises an error.
+
+    # Metadata
+    - Mangled symbol: `$mangled`
+    \"\"\"
+    """ : ""
+    return doc * """
+    function $julia_name(args...)
+        Base.error($(repr(msg)))
+    end
+
+    """
 end
 
 """
@@ -104,6 +175,7 @@ Returns false (→ route to MLIR Tier 2) if any of:
 
 **Exception safety:**
 - C++ function not marked `noexcept` (may throw → needs MLIR try_call)
+- C-linkage function whose definition is not proven `nounwind` (`_is_nounwind`)
 
 **Return type:**
 - STL container by value
@@ -130,8 +202,10 @@ function is_ccall_safe(func_info, dwarf_structs; record_abi=Dict{String,Any}())
     # ── -1. Exception safety: C++ functions that may throw ───────────────
     # Conservative: all C++ functions (mangled _Z* names) may throw unless
     # noexcept. Route to MLIR Tier 2 for exception-safe thunks.
-    # Plain C functions (unmangled) never throw C++ exceptions.
-    if _is_cpp_function(func_info) && !_is_noexcept(func_info)
+    # A function with C linkage is C++ too here (only GeneratorCpp asks), and
+    # reaches ccall only when its definition is proven `nounwind`
+    # (`_is_nounwind`).
+    if _is_cpp_function(func_info) ? !_is_noexcept(func_info) : !_is_nounwind(func_info)
         return false
     end
 
