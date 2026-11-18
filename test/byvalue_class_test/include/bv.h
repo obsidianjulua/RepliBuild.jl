@@ -34,6 +34,8 @@ struct Holder { Res r; int id; explicit Holder(int v); ~Holder(); };
 struct Tracked { int v; int *self; explicit Tracked(int x); Tracked(const Tracked &o); ~Tracked(); bool ok() const; };
 // The destructor is virtual.
 struct Poly { int v; explicit Poly(int x); Poly(const Poly &o); virtual ~Poly(); virtual int get() const; };
+// A member aligned to 16: the temporary is an object, and aligned as one.
+struct Wide { alignas(16) long long a; long long b; explicit Wide(int x); Wide(const Wide &o); ~Wide(); };
 // A nested class: `Outer::Inner` to its functions, `Inner` to a parameter.
 struct Outer {
     struct Inner { int *p; explicit Inner(int v); Inner(const Inner &o); ~Inner(); };
@@ -67,6 +69,7 @@ Dflt    make_dflt(int v);
 Holder  make_holder(int v);
 Tracked make_tracked(int v);
 Poly    make_poly(int v);
+Wide    make_wide(int v);
 Outer::Inner make_inner(int v);
 one::Twin    make_twin(int v);
 
@@ -79,6 +82,7 @@ int take_dflt(Dflt d);
 int take_holder(Holder h);
 int take_tracked(Tracked t);            // t.ok() ? t.v : -999
 int take_poly(Poly p);
+int take_wide(Wide w);                  // w.a when the temporary is 16-aligned, else -1
 int take_inner(Outer::Inner i);
 int take_twin(one::Twin t);
 int take_both(Res a, int k, Uniq b);    // a.get() * k + b.get()

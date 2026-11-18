@@ -133,6 +133,14 @@ probe("virtual_destructor") do p
     check(p, "tally (1 copy, 1 destructor)", M.tally(), 101)
 end
 
+# The temporary is aligned as the object: the callee sees its own address.
+probe("aligned_temporary") do p
+    w = M.make_wide(33)
+    M.reset_tally()
+    check(p, "take_wide", M.take_wide(w), 33)
+    check(p, "tally (1 copy, 1 destructor)", M.tally(), 101)
+end
+
 probe("nested_class") do p
     i = M.make_inner(31)
     l0 = M.live()

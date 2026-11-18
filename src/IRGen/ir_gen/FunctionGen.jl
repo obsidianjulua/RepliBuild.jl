@@ -462,6 +462,24 @@ end
 
 const _NO_FACTS = Dict{String,Any}()
 
+"""
+    _temporary_align(key, structs) -> Int
+
+The alignment of a by-value temporary of the record `key`: what `operator new`
+gives any object (16), or the record's own where DWARF says more
+(`_sysv_record_align`: `alignas(32)`, a wide vector member). The temporary is
+an `alloca` of bytes, whose alignment is 1 unless stated, and a constructor
+that stores a 16-byte vector with an aligned move faults on anything less.
+"""
+function _temporary_align(key, structs)::Int
+    own = try
+        _sysv_record_align(String(key), structs)
+    catch
+        nothing
+    end
+    return max(16, own isa Integer ? Int(own) : 1)
+end
+
 function _first_row(pred, rows)
     for r in rows
         r isa AbstractDict && pred(r) && return r
@@ -1087,6 +1105,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     # `how` is "copy", "move" or "bits": a class with "none"
                     # trapped above (`:uncopyable`).
                     raii_specs[pi] = (cls = lookup_key, size = bsz,
+                                      align = _temporary_align(lookup_key, structs),
                                       dtor = life[:dtor], how = life[:temp],
                                       ctor = get(life, :ctor, ""))
                     mlir_t = "!llvm.ptr"   # Itanium: pass address of the temporary
@@ -1306,7 +1325,10 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             println(io, "  %raii_one = llvm.mlir.constant(1 : i64) : i64")
             for (pi, spec) in enumerate(raii_specs)
                 isnothing(spec) && continue
-                println(io, "  %raii_tmp_$(pi) = llvm.alloca %raii_one x !llvm.array<$(spec.size) x i8> : (i64) -> !llvm.ptr")
+                # Aligned as the object is (`_temporary_align`): the array's own
+                # alignment is 1, and the class's constructor is compiled for an
+                # aligned `this`.
+                println(io, "  %raii_tmp_$(pi) = llvm.alloca %raii_one x !llvm.array<$(spec.size) x i8> {alignment = $(spec.align)} : (i64) -> !llvm.ptr")
             end
             raii_ret_slot_type = ret_sret ? "" : (is_packed_ret ? ret_packed_type : func_ret)
             if raii_ret_slot_type != ""

@@ -39,7 +39,7 @@ const BYVALUE_CLASS_PROBE = joinpath(BYVALUE_CLASS_DIR, "probe_bv.jl")
 const BYVALUE_CLASS_PROBES = ["thunks_loaded", "copy_keeps_the_callers", "move_consumes_once",
     "no_copy_no_move_is_refused", "private_copy_is_refused", "trivial_copy_is_bytes",
     "defaulted_copy_is_bytes", "implicit_nontrivial_copy_is_refused", "copy_constructor_runs",
-    "virtual_destructor", "nested_class", "namespaced_copy", "namespaced_move", "template_class",
+    "virtual_destructor", "aligned_temporary", "nested_class", "namespaced_copy", "namespaced_move", "template_class",
     "shared_name_is_refused", "two_temporaries"]
 
 # Regenerated each run: it holds absolute, machine-local paths.
@@ -108,7 +108,7 @@ if requires("a class taken by value through a thunk, live", :libJLCS, :clangxx)
     @testset "the wrapper: a call where a temporary can be made, a trap that says why where it cannot" begin
         body(name) = (m = match(Regex("\nfunction " * name * "\\([^\n]*\n(.*?)\nend\n", "s"), txt);
                       m === nothing ? "no function $name" : String(m.captures[1]))
-        for name in ("take_res", "consume_uniq", "take_plain", "take_dflt", "take_tracked", "take_poly",
+        for name in ("take_res", "consume_uniq", "take_plain", "take_dflt", "take_tracked", "take_poly", "take_wide",
                      "take_inner", "ns_take_nres", "ns_consume_nuniq", "ns_take_box", "take_both")
             @test (name, occursin("ABI Safety Trap", body(name)), occursin("_mlir_ciface_", body(name))) == (name, false, true)
         end
@@ -137,6 +137,7 @@ if requires("a class taken by value through a thunk, live", :libJLCS, :clangxx)
         # makes a temporary of. Itanium names, on every host.
         want = Set(["_ZN3ResC1ERKS_", "_ZN3ResD1Ev", "_ZN4UniqC1EOS_", "_ZN4UniqD1Ev", "_ZN5PlainD1Ev", "_ZN4DfltD1Ev",
                     "_ZN7TrackedC1ERKS_", "_ZN7TrackedD1Ev", "_ZN4PolyC1ERKS_", "_ZN4PolyD1Ev",
+                    "_ZN4WideC1ERKS_", "_ZN4WideD1Ev",
                     "_ZN5Outer5InnerC1ERKS0_", "_ZN5Outer5InnerD1Ev", "_ZN2ns4NResC1ERKS0_", "_ZN2ns4NResD1Ev",
                     "_ZN2ns5NUniqC1EOS0_", "_ZN2ns5NUniqD1Ev", "_ZN2ns3BoxIiEC1ERKS1_", "_ZN2ns3BoxIiED1Ev"])
         for needed in (manifest, nothing)
@@ -146,6 +147,11 @@ if requires("a class taken by value through a thunk, live", :libJLCS, :clangxx)
             counts = [(s, count("func.func private @$(s)(", ir) + count("llvm.func @$(s)(", ir)) for s in sort!(collect(want))]
             @test counts == [(s, 1) for s in sort!(collect(want))]
         end
+        # Every temporary is aligned as an object: 16 where DWARF says no more.
+        ir = J.generate_jlcs_ir(vt, deepcopy(md); needed_symbols = copy(manifest))
+        allocas = [String(m.match) for m in eachmatch(r"%raii_tmp_\d+ = llvm\.alloca [^\n]*", ir)]
+        @test length(allocas) >= length(want) ÷ 2
+        @test all(a -> occursin("{alignment = 16}", a), allocas)
         # Each is the library's own, which is what the pre-flight asks.
         own = RepliBuild.Compiler._runtime_symbol_names(lib)
         @test own !== nothing && issubset(want, own)

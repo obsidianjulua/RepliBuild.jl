@@ -355,6 +355,12 @@ end
         ir = _BVT_J.generate_jlcs_ir(_BVT_EMPTY_VT, _BVT_METADATA; needed_symbols = copy(_BVT_MANIFEST), abi = :sysv)
         t = _bvt_thunk(ir, "_Z8take_res3Res")
         @test occursin("jlcs.scope(%raii_tmp_1 : !llvm.ptr) dtors([@_ZN3ResD1Ev]) {", t)
+        # The temporary is an object, aligned as `operator new` aligns one, or
+        # as the record asks where that is more. Bytes alone are aligned to 1.
+        @test occursin("%raii_tmp_1 = llvm.alloca %raii_one x !llvm.array<8 x i8> {alignment = 16} : (i64) -> !llvm.ptr", t)
+        @test _BVT_FG._temporary_align("Res", _BVT_STRUCTS) == 16
+        @test _BVT_FG._temporary_align("Wide", Dict{String,Any}("Wide" => merge(_bvt_owner(), Dict{String,Any}("alignment" => 32)))) == 32
+        @test _BVT_FG._temporary_align("Missing", _BVT_STRUCTS) == 16
         @test occursin("jlcs.ctor_call @_ZN3ResC1ERKS_(%raii_tmp_1, %val_ptr_1) : (!llvm.ptr, !llvm.ptr) -> ()", t)
         # Move-only: the move constructor, from the argument's storage, and
         # never the bytes.
