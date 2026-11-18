@@ -21,7 +21,7 @@ registered release, which can be older than what is described here;
   compiled IR. For a registered package, call `use(name; force_rebuild=true)`
   once. The notes below say when a release has such fixes.
 - **On Windows**, build the JLCS dialect again: the new version lives in a new
-  folder ([Install](install.md#The-JLCS-dialect)).
+  folder ([Set up](install.md#Building-libJLCS-yourself)).
 
 ## v4.5.0 (2026-11-14)
 

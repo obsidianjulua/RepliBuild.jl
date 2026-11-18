@@ -1,31 +1,36 @@
-# API Reference
+# API
 
 ```@meta
 CurrentModule = RepliBuild
 ```
 
-The public API is the verbs below. Everything else — compiler, generators,
-DWARF parser, MLIR bindings — is internal. Contributors: [Developer](developer.md).
+The functions you call. Each takes the path of a `replibuild.toml`, or of the
+folder that holds one, and does nothing when its inputs have not changed.
 
-Every entry point takes a path to a `replibuild.toml` (or a project directory
-that contains one) and is idempotent: unchanged inputs hit the content-hash
-cache and return.
+## Check the machine
 
-## Build lifecycle
-
-```julia
-toml = RepliBuild.discover("path/to/project")   # scan → replibuild.toml
-RepliBuild.build(toml)                           # clang → .so
-RepliBuild.wrap(toml)                            # .so → julia/<Module>.jl
+```@docs
+check_environment
 ```
 
-`discover(..., build=true, wrap=true)` runs the whole pipeline; on a project
-that already has a `replibuild.toml` it keeps that file and runs `build` and
-`wrap`. `discover(force=true)` regenerates the config but **preserves** the
-hand-edited keys listed in
-[Edit the TOML](config.md#1.-How-the-file-is-created-and-maintained).
-`build(clean=true)` deletes `build/`, `julia/` and `.replibuild_cache/` first,
-then builds from nothing.
+`status.ready` is true when C libraries can be wrapped, and
+`status.tier2_ready` when C++ libraries can. [Set up](install.md) explains the
+report.
+
+## Build and wrap
+
+```julia
+toml = RepliBuild.discover("path/to/project")   # write replibuild.toml
+RepliBuild.build(toml)                           # compile the library
+RepliBuild.wrap(toml)                            # write julia/<Name>.jl
+```
+
+- `discover(path; build = true, wrap = true)` does all three and registers the
+  result.
+- `discover` keeps an existing `replibuild.toml`. `discover(path; force = true)`
+  rewrites it, keeping only [some keys](config.md#What-a-forced-discover-keeps).
+- `build(toml; clean = true)` deletes everything built first.
+- `clean(toml; deps = false)` keeps downloaded sources.
 
 ```@docs
 discover
@@ -35,79 +40,58 @@ clean
 info
 ```
 
-## Registry
-
-A project builds where it lives. `register` builds and wraps it in place, vendors
-the build to `~/.replibuild/builds/<hash>/`, and adds a Julia package around it to
-a Julia environment (`env`, default the `@v#.#` environment). `use("name")` loads
-the vendored build, or rebuilds the project in place after an edit. A fresh
-install has an empty registry — there is no Hub fallback.
+## Register and load
 
 ```julia
-RepliBuild.register("replibuild.toml")   # also: env=:active, env="path", env=nothing, build=false
-RepliBuild.use("myproject")              # name from [project].name
-using MyProject                          # from the Julia environment register added it to
-RepliBuild.list_registry()
-RepliBuild.search("xml")                 # browse Hub TOML names; does not register
+RepliBuild.register("replibuild.toml")
+M = RepliBuild.use("myproject")
 ```
 
-`REPLIBUILD_HOME` relocates `~/.replibuild/`. `REPLIBUILD_JULIA_ENV`
-(`default`, `active`, `none`, or a path) changes where `register` adds packages.
-`REPLIBUILD_HUB_URL` points `search` at a private index mirror. The vendored
-build's hash includes RepliBuild's version, so after an upgrade `use` wraps each
-registered package again, once; a fix in what `build` extracts also needs
-`use(name; force_rebuild=true)`. See [Registry](use.md).
+[Load it anywhere](use.md) explains what each does.
 
 ```@docs
 register
 use
-search
 list_registry
 unregister
+search
 scaffold_package
 ```
 
-## Ingest (experimental, C only)
+| Environment variable | Effect |
+|:---------------------|:-------|
+| `REPLIBUILD_HOME` | Where registered builds are kept. Default `~/.replibuild`. |
+| `REPLIBUILD_JULIA_ENV` | Which Julia environment `register` adds packages to: `default`, `active`, `none`, or a path. |
+| `REPLIBUILD_HUB_URL` | Where `search` reads the list of recipes from. |
 
-For C libraries whose build system the source pipeline cannot reproduce. Build
-the `.so` yourself with `-g`. C++ API surfaces are **not** supported.
+## Helpers for writing a recipe
 
-```julia
-toml = RepliBuild.ingest("/path/to/libfoo.so",
-                         headers=["/path/to/include"],
-                         name="foo", language=:c,
-                         build=true, wrap=true)
-```
+| Function | Use |
+|:---------|:----|
+| `RepliBuild.VisibilityProbe.visibility_probe(toml)` | Says whether `[compile] visibility = "hidden"` is safe for this library, and which functions it would drop. [Leaving things out](toml.md#Leaving-things-out) |
+| `RepliBuild.SysConfigGen.cmake_probe(source_dir; args)` | Runs a library's CMake configure step to find the headers it generates. [Headers the build system generates](toml.md#Headers-the-build-system-generates) |
+| `RepliBuild.SysConfigGen.capture_config(probe, dir)` | Copies those headers into `dir`. |
+| `RepliBuild.SysConfigGen.toml_fragment(probe)` | Prints suggested `[compile]` and `exclude` entries. |
 
-As with `discover`, only `build=true, wrap=true` registers (after wrapping);
-`register=false` skips it, and a bare call writes the TOML only.
+## In every generated module
+
+Not exported; call them with the module's name. [Call the wrapper](calling.md#Sizes-and-offsets)
+
+| Name | Gives |
+|:-----|:------|
+| `struct_size(name)` | A struct's size in bytes |
+| `member_offset(name, member)` | A member's offset in bytes |
+| `STRUCT_SIZES`, `STRUCT_OFFSETS` | All of them, as `Dict`s |
+| `libc_free(ptr)` | Frees memory the library got from `malloc` |
+| `LIBRARY_PATH` | The library file the module calls |
+| `LIBRARY_SHA`, `BUILD_GENERATOR` | The library's SHA-256, and the RepliBuild version that wrote the module |
+
+## Ingest
+
+Wraps a C library you compiled yourself with `-g`, without building it from
+source. It is experimental and does not support C++. Prefer `discover`,
+`build` and `wrap` whenever the source builds.
 
 ```@docs
 ingest
 ```
-
-## Environment
-
-```@docs
-check_environment
-```
-
-`status.ready` — C builds will work. `status.tier2_ready` — C++ and the hard
-ABI path will work. See [Install](install.md).
-
-## What a generated wrapper exposes
-
-Not exported. Qualified access only. Full usage: [Call a wrapper](calling.md#Introspection).
-
-| Name | What it answers |
-|------|-----------------|
-| `struct_size(name)` | Byte size of a wrapped struct |
-| `member_offset(name, member)` | Byte offset of a member |
-| `STRUCT_SIZES` / `STRUCT_OFFSETS` | Every size and member offset those two read, as `Dict`s |
-| `LIBRARY_PATH` | The library the wrapper calls (the copy beside the wrapper first, else the build-time path) |
-| `LIBRARY_SHA` / `BUILD_TARGET` / `BUILD_GENERATOR` | SHA-256 of the library it was generated against, the target triple, and the RepliBuild version that wrote it |
-| `dispatch_tier(f)` | Which path `f` will actually take (`:tier1` / `:tier2` / `:tier3`, or `:unknown` / `:mixed` / `:deferred`) |
-| `DISPATCH_TIER` | What the generator emitted |
-
-`dispatch_tier` and `DISPATCH_TIER` exist only in a wrapper that mixes tiers or
-has Tier 1 kernels; a single-tier wrapper names its tier in a comment instead.
