@@ -346,7 +346,7 @@ end
         (code, thunks) = generate(rows)
         for (name, sym) in (("Animal_rank", "_ZNK6Animal4rankEv"), ("Dog_rank", "_ZNK3Dog4rankEv"))
             b = body(code, name)
-            @test (name, occursin("RepliBuild.JITManager.invoke(\"_mlir_ciface_$(sym)_thunk\", Cint, this)", b)) == (name, true)
+            @test (name, occursin("RepliBuild.JITManager.invoke(\"_mlir_ciface_$(sym)_thunk\", Cint, RepliBuild.JITManager.pointer_arg(", b)) == (name, true)
             @test (name, occursin("ccall(", b)) == (name, false)
             @test (name, sym in thunks) == (name, true)
         end

@@ -495,13 +495,15 @@ end
     res = _TM_W.generate_introspective_module_cpp(cfg, _tm_libref(), meta, "TmCpp",
                                                   _TM_W.create_type_registry(cfg), false)
     code = res isa Tuple ? res[1] : res
-    # A reference: annotated like `ref_int(x::Ref{Cint})`, and passed as it is.
+    # A reference: annotated like `ref_int(x::Ref{Cint})`, and passed as an
+    # address (`pointer_arg`, the one conversion of a Tier 2 pointer position),
+    # never as the enum's integer.
     @test occursin(r"^function ref_int\(x::Ref\{Cint\}\)"m, code)
     @test occursin(r"^function color_out\(c::Ref\{Color\}\)"m, code)
-    @test occursin("_Z9color_outR5Color_thunk\", c)", _tm_body(code, "color_out"))
+    @test occursin("_Z9color_outR5Color_thunk\", RepliBuild.JITManager.pointer_arg(Ptr{Color}, c))", _tm_body(code, "color_out"))
     # The reference is the address; only the by-value enum is converted to its integer.
     @test occursin(r"^function color_is\(c::Ref\{Color\}, d::Any\)"m, code)
-    @test occursin("Bool, c, UInt8(d))", _tm_body(code, "color_is"))
+    @test occursin("Bool, RepliBuild.JITManager.pointer_arg(Ptr{Color}, c), UInt8(d))", _tm_body(code, "color_is"))
     @test !occursin("UInt8(c)", code)
     # On the ccall path the types say the same.
     @test occursin("(Ptr{Level},), out)", _tm_body(code, "level_out"))
@@ -612,7 +614,9 @@ end
     meta = Dict{String,Any}(
         "functions" => Any[
             _tm_fn("odd_take", "_Z8odd_takeo", "odd_take(unsigned __int256)", "int", "Cint", odd; noexcept = true),
-            _tm_fn("c_take", "c_take", "c_take", "int", "Cint", odd),
+            # C linkage reaches ccall only with a `nounwind` definition
+            # (`DispatchLogic._is_nounwind`); without the key it takes a thunk.
+            merge!(_tm_fn("c_take", "c_take", "c_take", "int", "Cint", odd), Dict{String,Any}("nounwind" => true)),
             _tm_fn("plain", "_Z5plaini", "plain(int)", "int", "Cint", _tm_param("a", "int", "Cint"); noexcept = true)],
         "globals" => Dict{String,Any}(), "struct_definitions" => Dict{String,Any}(),
         "record_abi" => Dict{String,Any}())
