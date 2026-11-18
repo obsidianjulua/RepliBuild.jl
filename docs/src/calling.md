@@ -94,7 +94,11 @@ variadic callback, or a pointer to one, has no example; its docstring shows the
 DWARF signature instead, such as `function_ptr(int; const char*, ...)*`.
 
 **Globals.** A value accessor plus a `_ptr` accessor. Unprovable types get the
-pointer only.
+pointer only. A C++ global outside the global namespace, and a public static
+data member, is named with its scope as a method is: `cfg::depth` is
+`cfg_depth()`, `geo::Vec3::live_count` is `geo_Vec3_live_count()`. Private and
+protected static members get no accessor, and neither does a `constexpr`
+member, which has no storage to read.
 
 **`char*` returns.** Default is `Union{String,Nothing}` — NULL is `nothing`,
 anything else is copied into a Julia `String`. Declare malloc'd returns in
