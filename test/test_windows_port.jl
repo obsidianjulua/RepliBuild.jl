@@ -188,7 +188,9 @@ const LE = RepliBuild.LLVMEnvironment
         # else the prebuilt artifact when it is already in the depot (it is on
         # a CI runner whose cache holds it). A probe downloads nothing.
         loc = RepliBuild.JLCSLibrary.locate(; install = false)
-        @test jlcs.path == loc.path
+        # A missing library has no path in the report (`locate` names where a
+        # local build would be).
+        @test jlcs.path == (loc.source === :missing ? "" : loc.path)
         @test jlcs.found == (loc.source !== :missing)
         @test jlcs.found == isfile(jlcs.path)
         jlcs.found && @test basename(jlcs.path) == "libJLCS." * Libdl.dlext
