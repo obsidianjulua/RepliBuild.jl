@@ -166,7 +166,7 @@ function _table_entry(t::AbstractString, structs)
     (isempty(t) || t in ("void", "unknown")) && return (:direct, nothing)
     (occursin(r"[*&(\[]", _outside_template_args(t)) || startswith(t, "function_ptr")) && return (:direct, nothing)
 
-    mapped = map_cpp_type(t)
+    mapped = map_cpp_type(t, structs)
     named = startswith(mapped, "!llvm.struct<\"") && endswith(mapped, "\">")
     # A scalar the map knows: `i32`, `f64`, `i1`, …; not `long double`'s
     # (`C_LONG_DOUBLE_MLIR`), which the map knows for a record member and no
@@ -766,7 +766,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             end
 
             t = get(p, "c_type", "void*")
-            mlir_t = map_cpp_type(t)
+            mlir_t = map_cpp_type(t, structs)
             s_name = nothing
             lookup_key = nothing
             is_packed_param = false
@@ -865,7 +865,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         has_raii = any(!isnothing, raii_specs)
 
         ret_c_type = get(ret_info, "c_type", "void")
-        ret_type = map_cpp_type(ret_c_type)
+        ret_type = map_cpp_type(ret_c_type, structs)
 
         # Track packed struct return for thunk conversion
         is_packed_ret = false
@@ -1133,7 +1133,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 body = match(r"^!llvm\.struct<packed \((.*)\)\s*>$", llvm_t)
                 body_types = body === nothing ? String[] : StructGen._split_type_list(body.captures[1])
                 member_types_strs = length(body_types) == length(members) ? body_types :
-                    [map_cpp_type(get(m, "c_type", "void*")) for m in members]
+                    [map_cpp_type(get(m, "c_type", "void*"), structs) for m in members]
 
                 member_types_attr = "[" * join(member_types_strs, ", ") * "]"
                 offsets_attr = "[" * join(["$(o) : i64" for o in offsets], ", ") * "]"

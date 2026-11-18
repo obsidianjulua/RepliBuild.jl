@@ -870,7 +870,9 @@ lua_pushfstring = [["Cstring"], ["Cint"], ["Cstring", "Cint"]]
 
 `key = "julia_name"`, one per function (or per overload set, through a glob).
 The key is the function's mangled symbol or the Julia name the wrapper binds
-without the rename; the value must be a Julia identifier. See §2.17.
+without the rename; the value must be a Julia identifier. See §2.17. A function
+`wrap` reports as bound under another name (`String` as `String_`) is keyed by
+the name it had (`String`), and the name you give it must not be a Julia type.
 
 ```toml
 [wrap.rename]

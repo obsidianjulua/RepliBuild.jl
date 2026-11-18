@@ -230,8 +230,15 @@ function _julia_function_name(raw::AbstractString, mangled::AbstractString = "";
     # that is not a binding of the symbol: the proxy's short method name.
     rt = _RENAMES[]
     if rename && rt !== nothing
-        n = _apply_rename!(rt, n, mangled)
+        chosen = _apply_rename!(rt, n, mangled)
+        chosen === nothing || return chosen
     end
+    # The name screen (NameScreen.jl), last: a name Julia or the wrapper's own
+    # text already uses gets its alternative. A chosen name above wins, and is
+    # keyed by the name as it is here, before the screen (`String`).
+    n = _screened_function_name(n, isempty(mangled) ? raw : mangled)
+    rename && rt !== nothing &&
+        push!(get!(() -> Set{String}(), rt.derived, n), isempty(mangled) ? n : String(mangled))
     return n
 end
 
@@ -295,7 +302,9 @@ function with_renames(f, table::AbstractDict)
     end
 end
 
-function _apply_rename!(rt::_RenameTable, derived::String, mangled::AbstractString)::String
+# The chosen name, or `nothing` when no key names this symbol: the caller then
+# records the name it binds (`rt.derived`), which the name screen may still move.
+function _apply_rename!(rt::_RenameTable, derived::String, mangled::AbstractString)::Union{Nothing,String}
     symbol = isempty(mangled) ? derived : String(mangled)
     chosen = Dict{String,Vector{String}}()      # Julia name => keys that chose it
     for (key, re, value) in rt.entries
@@ -303,10 +312,7 @@ function _apply_rename!(rt::_RenameTable, derived::String, mangled::AbstractStri
         rt.hit[key] += 1
         push!(get!(() -> String[], chosen, value), key)
     end
-    if isempty(chosen)
-        push!(get!(() -> Set{String}(), rt.derived, derived), symbol)
-        return derived
-    end
+    isempty(chosen) && return nothing
     if length(chosen) > 1
         error("""
         RepliBuild: [wrap.rename] gives `$symbol` (derived name `$derived`) more than one name:
@@ -348,13 +354,20 @@ function _check_renames(rt::Union{Nothing,_RenameTable}, wrapper_content::Abstra
         wrapper, or `nm | c++filt` for the C++ spelling the name is derived from).
         Keys are anchored globs (`*` and `?`; every other character literal), so a
         prefix needs a trailing `*`. A symbol `[wrap] exclude_symbols` drops, or a
-        varargs function's typed overloads, cannot be renamed.""")
+        varargs function's typed overloads, cannot be renamed. A function the wrap
+        reports as bound under another name (`String` as `String_`) is keyed by the
+        name it had before (`String`), or by its symbol.""")
     end
     taken = _toplevel_names(wrapper_content)
     offenders = String[]
     for value in sort!(collect(keys(rt.renamed)))
         sources = rt.renamed[value]
         who = join(("$(repr(k)) (`$sym`)" for (k, sym) in sources), ", ")
+        # A chosen name is not screened, so the one thing no text can make
+        # right is said here (`_function_name_refusal`).
+        refusal = _function_name_refusal(value)
+        refusal === nothing ||
+            push!(offenders, "  `$value`, chosen by $who, cannot name a function: $(_screen_why(refusal, value))")
         if haskey(rt.derived, value)
             others = join(("`$s`" for s in sort!(collect(rt.derived[value]))), ", ")
             push!(offenders, "  `$value`, chosen by $who, is also the derived name of $others")
@@ -1339,7 +1352,13 @@ function _render_enum_chunks(chunks::AbstractVector, taken::Dict{String,Symbol})
             push!(get!(owners, base, String[]), c.name)
         end
     end
-    collides(base) = haskey(taken, base) || base in enum_types || length(owners[base]) > 1
+    # The name screen's answer for an enumerator no binding of this wrapper
+    # collides with (NameScreen.jl): a name Julia or the wrapper's own text
+    # already uses is prefixed like a collision. Asked once per name.
+    screened = Dict{String,Union{Nothing,Symbol}}()
+    bound_elsewhere(base) = haskey(taken, base) || base in enum_types || length(owners[base]) > 1
+    collides(base) = bound_elsewhere(base) ||
+                     get!(() -> _screen_enumerator(base), screened, base) !== nothing
 
     # Names the module ends up holding besides the renamed enumerators, so a
     # prefixed name can be checked against them before it is assigned.
@@ -1353,6 +1372,8 @@ function _render_enum_chunks(chunks::AbstractVector, taken::Dict{String,Symbol})
     end
 
     function note(base, enum_name)
+        why = get(screened, base, nothing)
+        why === nothing || return "# $(_screen_why(why, base)); "
         parts = String[]
         haskey(taken, base) && push!(parts, _describe_binding(taken[base]) * " this module defines")
         base in enum_types && push!(parts, "the enum type `$base`")
@@ -1384,6 +1405,8 @@ function _render_enum_chunks(chunks::AbstractVector, taken::Dict{String,Symbol})
                 end
                 push!(used, final)
                 push!(notes, note(base, c.name) * "the enumerator is `$final`.")
+                why = get(screened, base, nothing)
+                why === nothing || _screen_note_enumerator!(base, final, why, c.name)
             else
                 final = base
             end
@@ -1958,7 +1981,7 @@ function _libc_free_block(lib_path::AbstractString;
         "libc_free(ptr::Ptr) = Libc.free(ptr)" :
         "libc_free(ptr::Ptr) = ccall((:free, $(repr(crt_dll))), Cvoid, (Ptr{Cvoid},), ptr)"
     # The cstring policy hands over a Cstring, which ccall will not convert to Ptr.
-    body *= "\nlibc_free(ptr::Cstring) = libc_free(reinterpret(Ptr{Cvoid}, ptr))"
+    body *= "\nlibc_free(ptr::Cstring) = libc_free(Base.reinterpret(Ptr{Cvoid}, ptr))"
     return """
     # ── Freeing what the library allocated ─────────────────────────────────────
     \"\"\"
@@ -3410,7 +3433,7 @@ Return a copy of `x` with each named field set. Byte-blob structs are immutable
     cp = setproperties(llama_context_default_params(); n_ctx = 512, embeddings = true)
 \"\"\"
 setproperties(x; kwargs...) =
-    foldl((acc, kv) -> setproperty(acc, first(kv), last(kv)), pairs(kwargs); init = x)
+    Base.foldl((acc, kv) -> setproperty(acc, Base.first(kv), Base.last(kv)), Base.pairs(kwargs); init = x)
 
 """
 
