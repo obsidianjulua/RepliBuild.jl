@@ -2,7 +2,7 @@
 
 [![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/stable/)
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://obsidianjulua.github.io/RepliBuild.jl/dev/)
-[![Julia 1.12 | 1.13](https://img.shields.io/badge/julia-1.12%20%7C%201.13-9558B2?logo=julia)](https://julialang.org)
+[![Julia 1.13 | 1.14](https://img.shields.io/badge/julia-1.13%20%7C%201.14-9558B2?logo=julia)](https://julialang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Point RepliBuild at C or C++ source. It compiles the library, reads the ABI the
@@ -97,8 +97,9 @@ and one Julia type per C++ type across them
   not MSVC. Both read DWARF through GNU binutils. macOS is refused at load: its
   Mach-O plumbing (DWARF in a `.dSYM`, no dynamic symbol table, no GNU dumper)
   and Apple's arm64 calling convention are not built.
-- **Julia 1.12 or 1.13**, the versions CI tests, and what `Project.toml`
-  admits (`julia = "1.12"`).
+- **Julia 1.13 or 1.14**, the versions CI tests, and what `Project.toml`
+  admits (`julia = "1.13"`). Julia 1.12 is served by the 4.5 line, whose last
+  release is 4.5.1.
 - **C libraries:** on Linux, GNU binutils (`readelf`, `nm`), which almost every
   distribution has. Clang ships as a JLL, and link/optimize/assemble run on
   Julia's own libLLVM. On Windows, MSYS2 CLANG64 and GNU `objdump` (below).
