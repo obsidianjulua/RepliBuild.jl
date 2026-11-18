@@ -58,10 +58,13 @@ const EH_RUNTIME_SYMBOLS = Set([
 """
     _collect_class_raii(metadata) -> Dict{String,Dict{Symbol,String}}
 
-Resolve per-class RAII symbols from DWARF metadata: the complete-object
-destructor (`D1` preferred over `D2`/`D0`) and, when present, the copy
+Resolve per-class RAII symbols from DWARF metadata: the destructor that ends
+an object where it stands (`_choose_destructor!`: the complete-object `D1`,
+else the base-object `D2` where it takes no VTT) and, when present, the copy
 constructor (`C1` preferred, signature `(const T&)`) and the move constructor
-(`:move_ctor`, signature `(T&&)`).
+(`:move_ctor`, signature `(T&&)`). The deleting destructor (`D0`) also frees
+the object: it is `:dtor` only for a class the library gives nothing else,
+and `:no_dtor` then says why no temporary of the class can be ended.
 
 Symbol presence is the gate (the repo's symbol-presence law): a truly trivial
 destructor is never emitted as a symbol, so a class appearing here is
@@ -148,6 +151,7 @@ function _collect_class_raii(metadata; demangle = Compiler._demangle)::Dict{Stri
     structs = get(metadata, "struct_definitions", Dict{String,Any}())
     key_of = Dict{String,String}()      # a class as the demangler spells it → its table key
     fuzzy = Ref{Any}(nothing)           # `_class_table_key`'s index, built on the first miss
+    destructors = Dict{String,Dict{Symbol,String}}()   # per key, each variant the library defines
     for f in get(metadata, "functions", [])
         get(f, "is_method", false) || continue
         cls = String(get(f, "class", ""))
@@ -169,10 +173,13 @@ function _collect_class_raii(metadata; demangle = Compiler._demangle)::Dict{Stri
         end
 
         if is_dtor
-            # Destructor: prefer the complete-object destructor (D1)
-            if !haskey(entry, :dtor) || (occursin("D1E", mangled) && !occursin("D1E", entry[:dtor]))
-                entry[:dtor] = mangled
-            end
+            # Destructor: every variant is kept, and one is chosen below. A
+            # base-object destructor with a parameter after `this` takes a VTT.
+            found = get!(destructors, key, Dict{Symbol,String}())
+            variant = _destructor_variant(mangled)
+            get!(found, variant, mangled)
+            variant === :d2 && any(p -> get(p, "name", "") != "this", get(f, "parameters", [])) &&
+                (found[:d2_vtt] = mangled)
         else
             # Constructor: a copy ctor takes exactly one param of `const cls&`,
             # a move ctor one of `cls&&` (metadata params exclude the implicit
@@ -190,6 +197,9 @@ function _collect_class_raii(metadata; demangle = Compiler._demangle)::Dict{Stri
             end
         end
         entry[:symbols] = haskey(entry, :symbols) ? entry[:symbols] * " " * mangled : mangled
+    end
+    for (key, found) in destructors
+        haskey(raii, key) && _choose_destructor!(raii[key], found, key, structs)
     end
     # Only classes with a resolvable destructor participate
     filter!(p -> haskey(p.second, :dtor), raii)
@@ -213,6 +223,51 @@ function _collect_class_raii(metadata; demangle = Compiler._demangle)::Dict{Stri
         isempty(why) || (entry[:why] = why)
     end
     return raii
+end
+
+# Which destructor a symbol is: `:d1` the complete-object one, `:d2` the
+# base-object one, `:d0` the deleting one (it runs `operator delete` on the
+# object after ending it), `:other` for a name that is not an Itanium
+# destructor's (hand-made metadata).
+function _destructor_variant(mangled::AbstractString)::Symbol
+    m = match(r"D([012])(?:B[A-Za-z0-9_]+?)?Ev$", mangled)
+    return m === nothing ? :other : Symbol("d", m.captures[1])
+end
+
+"""
+    _choose_destructor!(entry, found, key, structs) -> entry
+
+`entry[:dtor]` from the destructor variants the library defines for the class
+(`found`): the one a `jlcs.scope` may call on a temporary, which is an object
+in the thunk's frame.
+
+  * `D1`, the complete-object destructor.
+  * else `D2`, the base-object destructor, which is the same function for a
+    class with no virtual base. An implicit or inline virtual destructor has
+    no `D1` symbol at all: clang replaces it by `D2`. With a virtual base
+    `D2` takes a VTT the scope has no operand for, and `:no_dtor` says so.
+  * never `D0`. The scope used to take the first destructor it met unless a
+    `D1` showed up, and `D0` sorts first: `take_k0(K0)` ran `operator delete`
+    on the thunk's alloca and aborted (2026-11-18). For a class with `D0`
+    alone, `D0` is recorded (the class has a destructor, so it is not passed
+    as bytes) with `:no_dtor`, and `value_temporary` refuses the crossing.
+"""
+function _choose_destructor!(entry::AbstractDict, found::AbstractDict, key::AbstractString, structs)
+    if haskey(found, :d1)
+        entry[:dtor] = found[:d1]
+    elseif haskey(found, :d2)
+        entry[:dtor] = found[:d2]
+        (haskey(found, :d2_vtt) || FunctionGen._has_virtual_base(key, structs)) &&
+            (entry[:no_dtor] = "it has a virtual base and the library defines no complete-object destructor " *
+                               "for it (the base-object one takes a VTT)")
+    elseif haskey(found, :other)
+        entry[:dtor] = found[:other]
+    elseif haskey(found, :d0)
+        entry[:dtor] = found[:d0]
+        entry[:no_dtor] = "the library defines only its deleting destructor, which frees the object " *
+                          "and cannot end a temporary"
+    end
+    return entry
 end
 
 # The `struct_definitions` key of the class the demangler spells `cls`: the
@@ -738,14 +793,23 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
             end
         end
 
-        # `predeclared`: the callees this module has declared already (the
-        # legacy virtual-method declarations above), so a by-value temporary's
-        # destructor among them is not declared a second time.
+        # `predeclared`: the callees another pass of this module declares (the
+        # legacy virtual-method declarations above, the STL thunks' below), so
+        # a by-value temporary's constructor or destructor among them is not
+        # declared a second time. The function-thunk pass knows its own: a
+        # callee with a thunk here is declared by that thunk, and a second
+        # `func.func private` of one symbol is a redefinition that takes every
+        # thunk of the library with it.
+        predeclared = Set{String}(keys(declared_vmethods))
+        for (_, methods) in get(metadata, "stl_methods", Dict{String,Any}()), m in methods
+            haskey(STLContainerGen.STL_METHOD_SIGNATURES, String(get(m, "method", ""))) &&
+                push!(predeclared, String(get(m, "mangled", "")))
+        end
         println(io, generate_function_thunks(filtered_functions, structs_meta;
                                              may_throw=is_cpp, class_raii=class_raii,
                                              vcall_info=vcall_info,
                                              record_abi=get(metadata, "record_abi", Dict{String,Any}()),
-                                             abi=abi, predeclared=keys(declared_vmethods)))
+                                             abi=abi, predeclared=predeclared))
     end
 
     # 5. Generate STL Container Accessor Thunks

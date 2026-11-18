@@ -41,6 +41,10 @@ Poly::Poly(const Poly &o) : v(o.v) { g_tally += 100; }
 Poly::~Poly() { g_tally += 1; }
 int Poly::get() const { return v; }
 
+VKid::VKid(int x) : Poly(x) {}
+VKid::VKid(const VKid &o) : Poly(o) {}
+int VKid::get() const { return v + 1000; }
+
 Wide::Wide(int x) : a(x), b(x) {}
 Wide::Wide(const Wide &o) : a(o.a), b(o.b) { g_tally += 100; }
 Wide::~Wide() { g_tally += 1; }
@@ -81,6 +85,7 @@ Holder  make_holder(int v) { return Holder(v); }
 Tracked make_tracked(int v) { return Tracked(v); }
 Poly    make_poly(int v) { return Poly(v); }
 Wide    make_wide(int v) { return Wide(v); }
+VKid    make_vkid(int v) { return VKid(v); }
 Outer::Inner make_inner(int v) { return Outer::Inner(v); }
 one::Twin    make_twin(int v) { return one::Twin(v); }
 
@@ -94,6 +99,7 @@ int take_holder(Holder h) { return h.id; }
 int take_tracked(Tracked t) { return t.ok() ? t.v : -999; }
 int take_poly(Poly p) { return p.get(); }
 int take_wide(Wide w) { return reinterpret_cast<unsigned long long>(&w) % 16 == 0 ? (int)w.a : -1; }
+int take_vkid(VKid k) { return k.get(); }
 int take_inner(Outer::Inner i) { return *i.p; }
 int take_twin(one::Twin t) { return *t.p; }
 int take_both(Res a, int k, Uniq b) { return a.get() * k + b.get(); }

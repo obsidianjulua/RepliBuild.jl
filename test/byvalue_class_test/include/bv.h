@@ -34,6 +34,11 @@ struct Holder { Res r; int id; explicit Holder(int v); ~Holder(); };
 struct Tracked { int v; int *self; explicit Tracked(int x); Tracked(const Tracked &o); ~Tracked(); bool ok() const; };
 // The destructor is virtual.
 struct Poly { int v; explicit Poly(int x); Poly(const Poly &o); virtual ~Poly(); virtual int get() const; };
+// The destructor is implicit and virtual. The library then has its deleting
+// variant (D0) and its base-object one (D2), and clang emits no
+// complete-object one (D1): it is the same function as D2. D0 runs
+// `operator delete` on the object, which for a temporary is the thunk's frame.
+struct VKid : Poly { explicit VKid(int x); VKid(const VKid &o); int get() const override; };
 // A member aligned to 16: the temporary is an object, and aligned as one.
 struct Wide { alignas(16) long long a; long long b; explicit Wide(int x); Wide(const Wide &o); ~Wide(); };
 // A nested class: `Outer::Inner` to its functions, `Inner` to a parameter.
@@ -70,6 +75,7 @@ Holder  make_holder(int v);
 Tracked make_tracked(int v);
 Poly    make_poly(int v);
 Wide    make_wide(int v);
+VKid    make_vkid(int v);
 Outer::Inner make_inner(int v);
 one::Twin    make_twin(int v);
 
@@ -83,6 +89,7 @@ int take_holder(Holder h);
 int take_tracked(Tracked t);            // t.ok() ? t.v : -999
 int take_poly(Poly p);
 int take_wide(Wide w);                  // w.a when the temporary is 16-aligned, else -1
+int take_vkid(VKid k);                  // k.get(): v + 1000
 int take_inner(Outer::Inner i);
 int take_twin(one::Twin t);
 int take_both(Res a, int k, Uniq b);    // a.get() * k + b.get()

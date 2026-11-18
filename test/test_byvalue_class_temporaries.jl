@@ -41,7 +41,7 @@ _bvt_owner(scope = "") = Dict{String,Any}("kind" => "struct", "byte_size" => "0x
     "members" => Any[Dict{String,Any}("name" => "p", "c_type" => "int*", "offset" => "0x0", "size" => 8)])
 # The constructor and destructor rows of class `cls` (as the demangler spells
 # it; `bare` is how DWARF spells a parameter of it), symbols `pre…`.
-function _bvt_lifetime(cls, bare, pre, self; copy = false, move = false, d0_only = false)
+function _bvt_lifetime(cls, bare, pre, self; copy = false, move = false, dtors = ("D0", "D1", "D2"))
     short = last(split(cls, "::"))
     short = first(split(short, "<"))
     out = Any[]
@@ -53,7 +53,7 @@ function _bvt_lifetime(cls, bare, pre, self; copy = false, move = false, d0_only
         push!(out, _bvt_fn("$(pre)$(v)Ei", "$cls::$short(int)"; class = cls, name = short,
                            params = (("this", "$bare*"), ("v", "int"))))
     end
-    for v in (d0_only ? ("D0",) : ("D0", "D1", "D2"))
+    for v in dtors
         push!(out, _bvt_fn("$(pre)$(v)Ev", "$cls::~$short()"; class = cls, name = "~$short", params = (("this", "$bare*"),)))
     end
     return out
@@ -65,6 +65,11 @@ const _BVT_STRUCTS = Dict{String,Any}(
     "Dflt" => _bvt_owner(), "Undefined" => _bvt_owner(), "Legacy" => _bvt_owner(), "OldCopy" => _bvt_owner(),
     "Virt" => _bvt_owner(), "Assigned" => _bvt_owner(), "Tok" => _bvt_owner(), "TokGraph" => _bvt_owner(),
     "Tool" => merge(_bvt_owner(), Dict{String,Any}("toolchain" => true)),
+    # Destructor variants: `Kid`'s is implicit and virtual (D0 and D2, no D1);
+    # `VbKid` has a virtual base, and `Deep` gets one through its base.
+    "Kid" => _bvt_owner(),
+    "VbKid" => merge(_bvt_owner(), Dict{String,Any}("base_classes" => Any[Dict{String,Any}("type" => "Plain", "offset" => 0, "virtual" => true)])),
+    "Deep" => merge(_bvt_owner(), Dict{String,Any}("base_classes" => Any[Dict{String,Any}("type" => "class VbKid", "offset" => 0, "virtual" => false)])),
     "Plain" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x4", "scope" => "", "scopes" => [""],
         "members" => Any[Dict{String,Any}("name" => "v", "c_type" => "int", "offset" => "0x0", "size" => 4)]),
     "Holder" => Dict{String,Any}("kind" => "struct", "byte_size" => "0x10", "scope" => "", "scopes" => [""],
@@ -103,6 +108,9 @@ const _BVT_ABI = Dict{String,Any}(
     "Box<int>" => _bvt_facts(ctors = [_bvt_row("_ZN2ns3BoxIiEC4ERKS1_"), _bvt_row("_ZN2ns3BoxIiEC4Ei")]),
     "Inner" => _bvt_facts(ctors = [_bvt_row("_ZN5Outer5InnerC4ERKS0_"), _bvt_row("_ZN5Outer5InnerC4Ei")]),
     "Twin" => _bvt_facts(ctors = [_bvt_row("_ZN3one4TwinC4ERKS0_")]),
+    "Kid" => _bvt_facts(ctors = [_bvt_row("_ZN3KidC4ERKS_")], methods = [_bvt_method("_ZN3KidD4Ev"; virtual = true)]),
+    "VbKid" => _bvt_facts(ctors = [_bvt_row("_ZN5VbKidC4ERKS_")]),
+    "Deep" => _bvt_facts(ctors = [_bvt_row("_ZN4DeepC4ERKS_")]),
     # The copy deleted and `Tok(Tok&&) = default`: a move that is the bytes
     # (`Tok`, which the forced unit was asked for; `TokGraph`, which it was not).
     "Tok" => _bvt_facts(ctors = [_bvt_row("_ZN3TokC4EOS_"), _bvt_row("_ZN3TokC4ERKS_"; deleted = true)]),
@@ -123,7 +131,14 @@ const _BVT_FUNCTIONS = vcat(
     _bvt_lifetime("Dflt", "Dflt", "_ZN4Dflt", "S_"),
     _bvt_lifetime("Undefined", "Undefined", "_ZN9Undefined", "S_"),
     _bvt_lifetime("Poly", "Poly", "_ZN4Poly", "S_"; copy = true),
-    _bvt_lifetime("Virt", "Virt", "_ZN4Virt", "S_"; d0_only = true),
+    _bvt_lifetime("Virt", "Virt", "_ZN4Virt", "S_"; dtors = ("D0",)),
+    _bvt_lifetime("Kid", "Kid", "_ZN3Kid", "S_"; copy = true, dtors = ("D0", "D2")),
+    # The base-object destructor of a class with a virtual base takes a VTT.
+    _bvt_lifetime("VbKid", "VbKid", "_ZN5VbKid", "S_"; copy = true, dtors = ("D0",)),
+    Any[_bvt_fn("_ZN5VbKidD2Ev", "VbKid::~VbKid()"; class = "VbKid", name = "~VbKid",
+                params = (("this", "VbKid*"), ("vtt", "void**")))],
+    # ... and where the metadata does not show that parameter, the bases do.
+    _bvt_lifetime("Deep", "Deep", "_ZN4Deep", "S_"; copy = true, dtors = ("D0", "D2")),
     _bvt_lifetime("Assigned", "Assigned", "_ZN8Assigned", "S_"),
     _bvt_lifetime("Tok", "Tok", "_ZN3Tok", "S_"),
     _bvt_lifetime("TokGraph", "TokGraph", "_ZN8TokGraph", "S_"),
@@ -149,6 +164,9 @@ const _BVT_FUNCTIONS = vcat(
         _bvt_take("_ZN2ns8take_boxENS_3BoxIiEE", "ns::take_box", "Box<int>"),
         _bvt_take("_Z10take_innerN5Outer5InnerE", "take_inner", "Inner"),
         _bvt_take("_Z9take_twinN3one4TwinE", "take_twin", "Twin"),
+        _bvt_take("_Z8take_kid3Kid", "take_kid", "Kid"),
+        _bvt_take("_Z9take_virt4Virt", "take_virt", "Virt"),
+        _bvt_take("_Z10take_vbkid5VbKid", "take_vbkid", "VbKid"),
         _bvt_fn("_Z9take_both3Resi4Uniq", "take_both(Res, int, Uniq)"; name = "take_both",
                 params = (("a", "Res"), ("k", "int"), ("b", "Uniq")), ret = "int"),
         # A reference, not a value: no temporary.
@@ -185,7 +203,7 @@ end
     @testset "a class is keyed as a parameter names it, namespace or not" begin
         @test Set(keys(raii)) == Set(["Res", "Uniq", "Pinned", "Guarded", "Plain", "Holder", "Dflt", "Undefined",
                                       "Poly", "Virt", "Assigned", "Tok", "TokGraph", "Tool", "Legacy", "OldCopy",
-                                      "NRes", "NUniq", "Box<int>", "Inner", "Twin"])
+                                      "NRes", "NUniq", "Box<int>", "Inner", "Twin", "Kid", "VbKid", "Deep"])
         @test raii["NRes"][:class] == "ns::NRes"
         @test raii["Inner"][:class] == "Outer::Inner"
         @test raii["Box<int>"][:class] == "ns::Box<int>"
@@ -249,6 +267,48 @@ end
         # here has no copy-constructor symbol, which used to mean "its bytes".
         @test sort!([k for k in keys(raii) if !haskey(raii[k], :copy_ctor) && raii[k][:temp] != "bits"]) ==
               ["Assigned", "Holder", "Legacy", "NUniq", "Pinned", "TokGraph", "Tool", "Undefined", "Uniq", "Virt"]
+    end
+
+    @testset "a temporary is ended by a destructor that does not free it" begin
+        V = _BVT_J._destructor_variant
+        @test (V("_ZN3ResD0Ev"), V("_ZN3ResD1Ev"), V("_ZN3ResD2Ev")) == (:d0, :d1, :d2)
+        @test V("_ZN3FooD1B5cxx11Ev") === :d1 && V("_ZN2ns3BoxIiED0Ev") === :d0
+        @test V("pair_int_double_dtor") === :other && V("_ZN3ResC1ERKS_") === :other
+        # The complete-object destructor where the library has it.
+        @test raii["Res"][:dtor] == "_ZN3ResD1Ev" && raii["Poly"][:dtor] == "_ZN4PolyD1Ev"
+        # An implicit virtual destructor: D0 and D2, no D1. The base-object
+        # one ends the temporary; the deleting one would free the thunk's frame.
+        @test raii["Kid"][:dtor] == "_ZN3KidD2Ev" && !haskey(raii["Kid"], :no_dtor)
+        @test (raii["Kid"][:temp], raii["Kid"][:ctor]) == ("copy", "_ZN3KidC1ERKS_")
+        # The deleting destructor alone: the class keeps its entry (it is not
+        # passed as bytes) and no temporary of it can be ended.
+        @test raii["Virt"][:dtor] == "_ZN4VirtD0Ev" && raii["Virt"][:temp] == "none"
+        @test occursin("only its deleting destructor", raii["Virt"][:why])
+        # A virtual base, the class's own or a base's: D2 takes a VTT.
+        @test _BVT_FG._has_virtual_base("VbKid", _BVT_STRUCTS) && _BVT_FG._has_virtual_base("Deep", _BVT_STRUCTS)
+        @test !_BVT_FG._has_virtual_base("Kid", _BVT_STRUCTS) && !_BVT_FG._has_virtual_base("Missing", _BVT_STRUCTS)
+        for k in ("VbKid", "Deep")
+            @test (k, raii[k][:temp]) == (k, "none")
+            @test occursin("virtual base", raii[k][:why]) && occursin("no complete-object destructor", raii[k][:why])
+        end
+        # Whatever order the library lists them in.
+        flipped = merge(_BVT_METADATA, Dict{String,Any}("functions" => reverse(_BVT_FUNCTIONS)))
+        back = _BVT_J._collect_class_raii(flipped)
+        @test [(k, back[k][:dtor]) for k in sort!(collect(keys(raii))) if k != "Twin"] ==
+              [(k, raii[k][:dtor]) for k in sort!(collect(keys(raii))) if k != "Twin"]
+        # No entry names the deleting destructor without refusing the temporary,
+        # and a hand-made one that does is refused all the same.
+        @test all(e -> !occursin(r"D0Ev$", e[:dtor]) || e[:temp] == "none", values(raii))
+        made = _BVT_FG.value_temporary(Dict{Symbol,String}(:class => "Res", :dtor => "_ZN3ResD0Ev", :copy_ctor => "_ZN3ResC1ERKS_"),
+                                       "Res", _BVT_STRUCTS, _BVT_ABI, Set{String}())
+        @test made[1] == "none" && occursin("deleting destructor", made[3])
+        # The crossing is a refusal with that reason, for both generators.
+        func(sym) = _BVT_FUNCTIONS[findfirst(f -> f["mangled"] == sym, _BVT_FUNCTIONS)]
+        for (sym, part) in (("_Z9take_virt4Virt", "only its deleting destructor"), ("_Z10take_vbkid5VbKid", "virtual base"))
+            c = _BVT_FG.thunk_crossings(func(sym), _BVT_STRUCTS, _BVT_ABI; abi = :sysv, class_raii = raii)
+            @test (sym, c.params[1][1], c.trap !== nothing && occursin(part, c.trap)) == (sym, :uncopyable, true)
+        end
+        @test _BVT_FG.thunk_crossings(func("_Z8take_kid3Kid"), _BVT_STRUCTS, _BVT_ABI; abi = :sysv, class_raii = raii).trap === nothing
     end
 
     @testset "the copy is its bytes only over members that are" begin
@@ -318,14 +378,17 @@ end
     lifetime = ["_ZN3ResC1ERKS_", "_ZN3ResD1Ev", "_ZN4UniqC1EOS_", "_ZN4UniqD1Ev", "_ZN5PlainD1Ev", "_ZN4DfltD1Ev",
                 "_ZN4PolyC1ERKS_", "_ZN4PolyD1Ev", "_ZN2ns4NResC1ERKS0_", "_ZN2ns4NResD1Ev", "_ZN2ns5NUniqC1EOS0_",
                 "_ZN2ns5NUniqD1Ev", "_ZN2ns3BoxIiEC1ERKS1_", "_ZN2ns3BoxIiED1Ev", "_ZN5Outer5InnerC1ERKS0_",
-                "_ZN5Outer5InnerD1Ev"]
+                "_ZN5Outer5InnerD1Ev", "_ZN3KidC1ERKS_", "_ZN3KidD2Ev"]
+    scope_destructors(ir) = [String(s.captures[1]) for m in eachmatch(r"dtors\(\[([^\]]*)\]\)", ir)
+                             for s in eachmatch(r"@([^\s,\]]+)", m.captures[1])]
     declarations(ir, sym) = count("func.func private @$(sym)(", ir) + count("llvm.func @$(sym)(", ir)
 
     @testset "the module declares every constructor and destructor it calls, once, whatever the manifest" begin
         ir = _BVT_J.generate_jlcs_ir(_BVT_EMPTY_VT, _BVT_METADATA; needed_symbols = copy(_BVT_MANIFEST), abi = :sysv)
-        # The manifest has none of them, so none has a thunk to declare it.
-        @test isempty(intersect(lifetime, _BVT_MANIFEST))
-        @test !any(s -> occursin("func.func @$(s)_thunk(", ir), lifetime)
+        # The manifest has none of them but `Kid`'s destructor, the only one
+        # that class has to bind, so no other has a thunk to declare it.
+        @test intersect(lifetime, _BVT_MANIFEST) == ["_ZN3KidD2Ev"]
+        @test [s for s in lifetime if occursin("func.func @$(s)_thunk(", ir)] == ["_ZN3KidD2Ev"]
         called = Set{String}()
         for m in eachmatch(r"dtors\(\[([^\]]*)\]\)", ir), s in eachmatch(r"@([^\s,\]]+)", m.captures[1])
             push!(called, String(s.captures[1]))
@@ -343,6 +406,46 @@ end
         @test [(s, declarations(all_ir, s)) for s in lifetime] == [(s, 1) for s in lifetime]
         @test _BVT_J.undeclared_callees(all_ir) == String[]
         @test !occursin("Constructors and destructors of by-value temporaries", all_ir)
+
+        # A wrapper that binds the complete-object variants: the manifest has
+        # `C1` and `D1` (and `Kid`'s `D2`, which has no `D1`), so each is
+        # declared by its own thunk and must not be declared again. A second
+        # `func.func private` of one symbol is a redefinition, and MLIR then
+        # rejects the module with every thunk of the library in it.
+        complete = Set{String}(m for m in (String(f["mangled"]) for f in _BVT_FUNCTIONS)
+                               if !occursin(r"C2E|D2E|D0E", m) || m == "_ZN3KidD2Ev")
+        @test issubset(lifetime, complete)
+        c1_ir = _BVT_J.generate_jlcs_ir(_BVT_EMPTY_VT, _BVT_METADATA; needed_symbols = copy(complete), abi = :sysv)
+        @test all(s -> occursin("func.func @$(s)_thunk(", c1_ir), lifetime)
+        @test [(s, declarations(c1_ir, s)) for s in lifetime] == [(s, 1) for s in lifetime]
+        @test _BVT_J.undeclared_callees(c1_ir) == String[]
+        @test !occursin("Constructors and destructors of by-value temporaries", c1_ir)
+        # The destructors in the manifest and the constructors not, and the
+        # other way round: each symbol once, whichever pass declares it.
+        for kept in (r"D1E", r"C1E")
+            mixed = union(_BVT_MANIFEST, Set(s for s in lifetime if occursin(kept, s)))
+            mixed_ir = _BVT_J.generate_jlcs_ir(_BVT_EMPTY_VT, _BVT_METADATA; needed_symbols = copy(mixed), abi = :sysv)
+            @test [(s, declarations(mixed_ir, s)) for s in lifetime] == [(s, 1) for s in lifetime]
+            @test count(s -> occursin("func.func @$(s)_thunk(", mixed_ir), lifetime) == count(in(mixed), lifetime)
+            @test _BVT_J.undeclared_callees(mixed_ir) == String[]
+        end
+        # No symbol of any of these modules is declared twice.
+        for text in (ir, all_ir, c1_ir)
+            names = [String(m.captures[1]) for m in eachmatch(r"(?:func\.func(?: private)?|llvm\.func) @([^\s(]+)\(", text)]
+            @test !isempty(names) && allunique(names)
+        end
+        # A callee the STL thunks declare is theirs to declare.
+        stl = merge(_BVT_METADATA, Dict{String,Any}("stl_methods" => Dict{String,Any}(
+            "std::vector<int>" => Any[Dict{String,Any}("mangled" => "_ZN3ResD1Ev", "method" => "destructor", "is_const" => false)])))
+        stl_ir = _BVT_J.generate_jlcs_ir(_BVT_EMPTY_VT, stl; needed_symbols = copy(_BVT_MANIFEST), abi = :sysv)
+        @test declarations(stl_ir, "_ZN3ResD1Ev") == 1 && _BVT_J.undeclared_callees(stl_ir) == String[]
+
+        # No scope of any of them names a deleting destructor.
+        for text in (ir, all_ir, c1_ir)
+            ds = scope_destructors(text)
+            @test !isempty(ds) && !any(d -> occursin(r"D0Ev$", d), ds)
+            @test "_ZN3KidD2Ev" in ds
+        end
 
         # A callee the module declared before the thunks (a virtual destructor
         # on the legacy path) is not declared again.
@@ -391,13 +494,18 @@ end
             @test (sym, occursin("dtors([@$(dtor)])", t), occursin("jlcs.ctor_call @$(ctor)(%raii_tmp_1, %val_ptr_1)", t)) ==
                   (sym, true, true)
         end
+        # An implicit virtual destructor: the base-object variant, the only
+        # one the library has that ends an object where it stands.
+        t = _bvt_thunk(ir, "_Z8take_kid3Kid")
+        @test occursin("dtors([@_ZN3KidD2Ev])", t) && occursin("jlcs.ctor_call @_ZN3KidC1ERKS_(%raii_tmp_1, %val_ptr_1)", t)
         # Two temporaries: a copy and a move, one destructor each.
         t = _bvt_thunk(ir, "_Z9take_both3Resi4Uniq")
         @test occursin("jlcs.scope(%raii_tmp_1, %raii_tmp_3 : !llvm.ptr, !llvm.ptr) dtors([@_ZN3ResD1Ev, @_ZN4UniqD1Ev]) {", t)
         @test occursin("jlcs.ctor_call @_ZN3ResC1ERKS_(%raii_tmp_1, %val_ptr_1)", t)
         @test occursin("jlcs.ctor_call @_ZN4UniqC1EOS_(%raii_tmp_3, %val_ptr_3)", t)
         # No thunk where no temporary can be made, and the module says why.
-        for sym in ("_Z11take_pinned6Pinned", "_Z12take_guarded7Guarded", "_Z11take_holder6Holder", "_Z9take_twinN3one4TwinE")
+        for sym in ("_Z11take_pinned6Pinned", "_Z12take_guarded7Guarded", "_Z11take_holder6Holder", "_Z9take_twinN3one4TwinE",
+                    "_Z9take_virt4Virt", "_Z10take_vbkid5VbKid")
             @test (sym, _bvt_thunk(ir, sym)) == (sym, "")
             @test occursin(Regex("// no thunk for " * sym * ": .*cannot be passed by value"), ir)
         end

@@ -387,9 +387,13 @@ function value_temporary(entry::AbstractDict, key::AbstractString, structs, reco
         return cant("distinct types in this library are named `$name` (in " *
                     join(("`$(isempty(s) ? "::" : s)`" for s in scopes), ", ") *
                     "), and its temporary needs the constructor and destructor of the one meant")
-    # D0 frees the object after ending it. A temporary lives in the thunk's frame.
-    endswith(String(get(entry, :dtor, "")), "D0Ev") &&
-        return cant("the library defines only its deleting destructor, which cannot end a temporary")
+    # The library has no destructor that ends a temporary where it stands
+    # (`JLCSIRGenerator._choose_destructor!`). And whatever chose `:dtor`, the
+    # deleting destructor is never a scope's: it frees the thunk's frame.
+    haskey(entry, :no_dtor) && return cant(String(entry[:no_dtor]))
+    occursin(r"D0(?:B[A-Za-z0-9_]+?)?Ev$", String(get(entry, :dtor, ""))) &&
+        return cant("the library defines only its deleting destructor, which frees the object " *
+                    "and cannot end a temporary")
 
     facts = get(record_abi, name, nothing)
     facts isa AbstractDict || (facts = _NO_FACTS)
@@ -557,6 +561,27 @@ function _bitwise_copyable(key::AbstractString, structs, record_abi)::Bool
         _held_bitwise(String(get(m, "c_type", "")), structs, record_abi) || return false
     end
     return true
+end
+
+"""
+    _has_virtual_base(key, structs) -> Bool
+
+Whether the record `key` has a virtual base, its own or one a base brings:
+its base-object constructor and destructor (`C2`, `D2`) then take a VTT.
+"""
+function _has_virtual_base(key::AbstractString, structs, seen::Set{String} = Set{String}())::Bool
+    k = String(key)
+    k in seen && return false
+    push!(seen, k)
+    info = get(structs, k, nothing)
+    info isa AbstractDict || return false
+    for b in get(info, "base_classes", [])
+        get(b, "virtual", false) == true && return true
+        t = _strip_top_cv(replace(String(get(b, "type", "")), r"^(?:class|struct)\s+" => ""))
+        (kind, base) = _table_entry(t, structs)
+        kind === :layout && _has_virtual_base(base, structs, seen) && return true
+    end
+    return false
 end
 
 # Whether a base or member of C type `c_type` copies as its bytes; see `_bitwise_copyable`.

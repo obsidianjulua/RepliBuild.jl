@@ -133,6 +133,16 @@ probe("virtual_destructor") do p
     check(p, "tally (1 copy, 1 destructor)", M.tally(), 101)
 end
 
+# A class whose destructor is implicit and virtual: the temporary is ended in
+# place, once. Ended with the deleting destructor, the process aborts in
+# `free`, which is why this is a child.
+probe("implicit_virtual_destructor") do p
+    k = M.make_vkid(7)
+    M.reset_tally()
+    check(p, "take_vkid, twice", (M.take_vkid(k), M.take_vkid(k)), (1007, 1007))
+    check(p, "tally (2 copies, 2 destructors)", M.tally(), 202)
+end
+
 # The temporary is aligned as the object: the callee sees its own address.
 probe("aligned_temporary") do p
     w = M.make_wide(33)
