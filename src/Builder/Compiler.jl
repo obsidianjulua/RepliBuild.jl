@@ -10555,6 +10555,8 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     functions = parse_function_signatures(symbols, sig_struct_names, sig_enum_names)
 
     # Merge DWARF return types and parameters into function metadata (overrides inference)
+    address_of = Dict{String,String}(String(s["mangled"]) => String(get(s, "address", "")) for s in symbols)
+    by_address = nothing      # every code symbol by address, read when a symbol has no DIE
     for func in functions
         mangled = func["mangled"]
         # Constructors and destructors are keyed differently on the two sides:
@@ -10562,6 +10564,15 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # unified C4/D4 into DW_AT_linkage_name. See `_structor_dwarf_key`.
         dwarf_key = haskey(dwarf_return_types, mangled) ? mangled :
                     _structor_dwarf_key(mangled, dwarf_return_types)
+        # A symbol no DIE describes is an alias when a described function has
+        # its address, and then has that function's signature
+        # (`_alias_signature_key`). Any other stays `inferred`, which both
+        # generators refuse to call (`Wrapper._lacks_debug_info`).
+        if dwarf_key === nothing
+            by_address === nothing && (by_address = _code_symbols_by_address(binary_path))
+            twin = _alias_signature_key(mangled, get(address_of, mangled, ""), by_address, dwarf_return_types)
+            twin === nothing || ((func["alias_of"], dwarf_key) = twin)
+        end
         if dwarf_key !== nothing
             dwarf_info = dwarf_return_types[dwarf_key]
 
@@ -10597,6 +10608,17 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
             func["is_vararg"] = false
         end
     end
+    # Say which symbols had no DIE: the aliases that took a signature, and the
+    # ones the wrapper will refuse.
+    let aliases = sort!(["$(f["mangled"]) = $(f["alias_of"])" for f in functions if haskey(f, "alias_of")]),
+        refused = sort!([String(f["mangled"]) for f in functions if f["return_type_source"] == "inferred"])
+        isempty(aliases) || println("  metadata: ", length(aliases), " alias(es) with no debug information of their ",
+                                    "own take their aliasee's signature: ", join(first(aliases, 6), ", "),
+                                    length(aliases) > 6 ? ", …" : "")
+        isempty(refused) || println("  metadata: ", length(refused), " exported function(s) have no debug ",
+                                    "information, and the wrapper will refuse to call them: ",
+                                    join(first(refused, 6), ", "), length(refused) > 6 ? ", …" : "")
+    end
 
     # "Can an exception leave this function?" — the question the tier router asks
     # (DispatchLogic.is_ccall_safe) and the thunk generator asks (FunctionGen:
@@ -10616,6 +10638,9 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # nested enum, fmt's inferred constructor signatures). Widening is a separate
     # change, after those gaps are closed. No IR (ingest mode) means nothing is
     # noexcept, so all C++ goes to Tier 2, the router's documented safe default.
+    # A function with C linkage in a C++ library is routed by the proof alone
+    # (`nounwind`, which `_mark_noexcept!` records beside `is_noexcept`): ccall
+    # is where those already were, so that only narrows.
     candidates = config.wrap.language == :c ? Set{String}() :
                  _scan_noexcept_functions(source_files, get_include_dirs(config))
     _apply_default_argument_identity!(functions, bound_defaults)
@@ -10748,6 +10773,10 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # Older metadata spells every one `function_ptr(R)*`, so the generators
         # build a callback's `@cfunction` example from it only when this is set.
         "function_pointer_parameters" => true,
+        # A symbol with no DIE was looked up by address (`_alias_signature_key`),
+        # so one still `inferred` here is no alias of a described function.
+        # Older metadata never looked: the refusal says to rebuild.
+        "alias_signatures" => true,
 
         # STL container method symbols (for JIT thunk generation)
         "stl_methods" => stl_methods,
@@ -10801,6 +10830,54 @@ function _structor_dwarf_key(mangled::AbstractString, dwarf_table::AbstractDict)
 end
 
 """
+    _code_symbols_by_address(binary_path) -> Dict{String,Vector{String}}
+
+The name of every code symbol in `binary_path` under its address, mangled and
+with the local symbols (`nm -p --defined-only`, no `-g`): an alias is often the
+one exported name of a `static` or hidden function. Empty when `nm` fails.
+"""
+function _code_symbols_by_address(binary_path::String)::Dict{String,Vector{String}}
+    out = Dict{String,Vector{String}}()
+    (listing, rc) = BuildBridge.execute("nm", ["-p", "--defined-only", binary_path])
+    rc == 0 || return out
+    for (address, _, name) in _nm_code_lines(listing)
+        push!(get!(() -> String[], out, address), name)
+    end
+    return out
+end
+
+"""
+    _alias_signature_key(mangled, address, by_address, dwarf_table)
+        -> Union{Nothing,Tuple{String,String}}
+
+For a symbol no DIE describes: `(aliasee, key)`, a function at the same
+`address` that `dwarf_table` describes and its key there; `nothing` when no
+symbol at the address is described.
+
+`int aliased_name(int) __attribute__((alias("aliased_real")))` is a second name
+for `aliased_real`'s code and clang writes no DIE for it. Its signature was
+then inferred from the demangled name, which for a C symbol is the name: no
+parameters and `Cint`, a call that passes nothing and returns whatever the
+callee computed from a stale register (2026-11-17). The code at an address is
+one function's whatever it is called, so the described function's signature is
+the alias's, exactly; that is the one use an address has here (a symbol's own
+two names are still paired by position, `_pair_nm_outputs`). Several described
+names at one address (constructor variants, identical functions a linker
+folded) are the same code too, and the smallest name is taken so the answer
+does not move. A constructor or destructor name is looked up as the merge
+does (`_structor_dwarf_key`).
+"""
+function _alias_signature_key(mangled::AbstractString, address::AbstractString,
+                              by_address::AbstractDict, dwarf_table::AbstractDict)
+    for name in sort!(unique(get(by_address, address, String[])))
+        name == mangled && continue
+        key = haskey(dwarf_table, name) ? name : _structor_dwarf_key(name, dwarf_table)
+        key === nothing || return (String(name), String(key))
+    end
+    return nothing
+end
+
+"""
     _mark_noexcept!(functions, candidates, nounwind)
 
 Set `is_noexcept` on every function: `true` only when its bare `name` is a
@@ -10808,13 +10885,23 @@ Set `is_noexcept` on every function: `true` only when its bare `name` is a
 in the IR. `nounwind === nothing` (no IR, i.e. ingest) marks nothing, which sends
 all C++ to Tier 2. The reasoning is in `extract_compilation_metadata`, and the
 test is `test_noexcept_routing.jl`.
+
+The proof by itself is recorded too, as `nounwind`, whenever there was IR to
+read. It is what routes a function with C linkage in a C++ library
+(`DispatchLogic.is_ccall_safe`): `extern "C"` changes a function's name, not
+what its body may throw, and no source spelling says which of them can
+(`test_c_linkage_unwind.jl`). No IR writes no key, and a reader takes a missing
+key as "not proven". An alias (`alias_of`, `_alias_signature_key`) has no
+definition of its own: its code is its aliasee's, so the aliasee's is the one
+asked about.
 """
 function _mark_noexcept!(functions, candidates::Set{String},
                          nounwind::Union{Nothing,Set{String}})
     for func in functions
-        func["is_noexcept"] = nounwind !== nothing &&
-                              get(func, "name", "") in candidates &&
-                              get(func, "mangled", "") in nounwind
+        proven = nounwind !== nothing &&
+                 get(func, "alias_of", get(func, "mangled", "")) in nounwind
+        func["is_noexcept"] = proven && get(func, "name", "") in candidates
+        nounwind === nothing || (func["nounwind"] = proven)
     end
     return functions
 end
@@ -10829,12 +10916,13 @@ A function the IR only declares, and every function when there is no IR
 (`byval === nothing`: ingest), gets no key, which the generator reads as "not
 recorded" and decides from DWARF alone (`_c_byval_facts`). Metadata from
 before this key has the same effect, so an over-aligned record parameter is
-callable only after a rebuild.
+callable only after a rebuild. An alias (`alias_of`) takes its aliasee's
+definition, whose signature it has.
 """
 function _mark_byval_params!(functions, byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}})
     byval === nothing && return functions
     for func in functions
-        facts = get(byval, get(func, "mangled", ""), nothing)
+        facts = get(byval, get(func, "alias_of", get(func, "mangled", "")), nothing)
         facts === nothing || (func["byval_params"] = Any[copy(f) for f in facts])
     end
     return functions

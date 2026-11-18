@@ -53,9 +53,11 @@ end
 probe("dispatch_tier") do
     tiers = Dict(f => AotTest.dispatch_tier(f) for f in
                  (:Accumulator_add, :Accumulator_as_vec2, :Shape_area, :vec2_scale,
-                  :vec3_cross, :pair_swap, :safe_ratio, :aot_new_accumulator))
-    ok = all(tiers[f] === :tier2 for f in keys(tiers) if f !== :aot_new_accumulator) &&
-         tiers[:aot_new_accumulator] === :tier3
+                  :vec3_cross, :pair_swap, :safe_ratio, :aot_new_accumulator, :aot_free_accumulator))
+    # The one Tier 3 function: an extern "C" deleter, which cannot throw. The
+    # extern "C" factory calls `new`, which can, so it has a thunk.
+    ok = all(tiers[f] === :tier2 for f in keys(tiers) if f !== :aot_free_accumulator) &&
+         tiers[:aot_free_accumulator] === :tier3
     (ok, string(tiers))
 end
 

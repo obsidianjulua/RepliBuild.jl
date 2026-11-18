@@ -3,8 +3,10 @@
 // Every C++ function here is mangled and not `noexcept`, so `is_ccall_safe`
 // routes it to Tier 2. Built with `[compile] aot_thunks = true`, each one is
 // called through lib<name>_thunks.<dlext> instead of a JIT. The extern "C"
-// factories at the bottom are Tier 3 on purpose: a mixed wrapper emits the
-// DISPATCH_TIER table, so the test can tell the two tiers apart.
+// deleters at the bottom are Tier 3 on purpose (their definitions are
+// `nounwind`): a mixed wrapper emits the DISPATCH_TIER table, so the test can
+// tell the two tiers apart. The extern "C" factories call `new`, which may
+// throw, so they take a thunk like the C++ functions.
 //
 // The by-value records cover the three ways a record crosses on each host:
 //   Pair32  8 bytes  — one INTEGER eightbyte (SysV); a register (Win64)

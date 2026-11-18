@@ -3261,6 +3261,17 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         mangled = func["mangled"]
         demangled = func["demangled"]
 
+        # No DIE describes this symbol, and it is no alias of a function that
+        # has one: the signature in hand is a guess from the name (no
+        # parameters, `Cint`), so the function is refused where it is defined
+        # (`_lacks_debug_info`).
+        if _lacks_debug_info(func)
+            stub_name = _julia_function_name(func_name, mangled)
+            push!(func_chunks, _no_debug_info_stub(stub_name, mangled, demangled, metadata, generate_docs))
+            push!(exports, stub_name)
+            continue
+        end
+
         # =========================================================
         # TIERED DISPATCH DECISION
         # =========================================================

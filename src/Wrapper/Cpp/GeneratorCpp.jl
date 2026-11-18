@@ -728,6 +728,42 @@ function _record_name_as_emitted(julia_type::AbstractString, records)::String
     return julia_type in records ? _sanitize_cpp_type_name(String(julia_type)) : String(julia_type)
 end
 
+"""
+    _managed_safe_wrapper(julia_name, param_sig, param_names, julia_return_type, deleters, idiomatic_classes)
+        -> Union{Nothing,Tuple{String,String}}
+
+The `<f>_safe` wrapper of a function that returns a pointer to a class with a
+`Managed<X>` type, as `(chunk, name)`: the same call, its result owned by a
+`Managed<X>`. `nothing` when the return is no such pointer, or the class has an
+idiomatic wrapper instead. It calls the function's own wrapper, so it is the
+same text whichever tier that wrapper dispatches through.
+"""
+function _managed_safe_wrapper(julia_name::AbstractString, param_sig::AbstractString, param_names,
+                               julia_return_type::AbstractString, deleters, idiomatic_classes)
+    (startswith(julia_return_type, "Ptr{") && endswith(julia_return_type, "}")) || return nothing
+    target_struct = julia_return_type[5:end-1]
+    # Sanitize target struct name to match ManagedX keys
+    safe_target = _sanitize_cpp_type_name(target_struct)
+    ((haskey(deleters, safe_target) || haskey(deleters, target_struct)) &&
+     !haskey(idiomatic_classes, safe_target) && !haskey(idiomatic_classes, target_struct)) || return nothing
+    managed_name = "Managed$safe_target"
+    safe_func_name = "$(julia_name)_safe"
+    # Use original param_names (not ccall_args which may have converted names
+    # like "a_c" that don't exist in the safe wrapper's scope)
+    safe_call_args = join(param_names, ", ")
+    return ("""
+    \"""
+        $safe_func_name($param_sig) -> $managed_name
+
+    Safe wrapper for `$julia_name` that returns a managed object with automatic finalization.
+    \"""
+    function $safe_func_name($param_sig)::$managed_name
+        ptr = $julia_name($safe_call_args)
+        return $managed_name(ptr)
+    end
+    """, safe_func_name)
+end
+
 function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::String,
                                       metadata, module_name::String,
                                       registry::TypeRegistry, generate_docs::Bool,
@@ -3375,6 +3411,18 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         is_vararg = get(func, "is_vararg", false)
         class_name = get(func, "class", "")
 
+        # No DIE describes this symbol, and it is no alias of a function that
+        # has one: the signature in hand is a guess from the name, so the
+        # function is refused where it is defined (`_lacks_debug_info`), under
+        # the name the loop below would have given it.
+        if _lacks_debug_info(func)
+            stub_name = _julia_function_name(
+                is_method && !isempty(class_name) ? "$(class_name)_$(func_name)" : func_name, mangled)
+            push!(func_chunks, _no_debug_info_stub(stub_name, mangled, demangled, metadata, generate_docs))
+            push!(exports, stub_name)
+            continue
+        end
+
         # Constructors are emitted. The old `func_name == class_name` skip
         # only fired at global scope (`T::T`, where `class` is the bare name)
         # and silently dropped those; `ns::T::T` was emitted because `class`
@@ -3946,6 +3994,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             push!(func_chunks, func_def)
             push!(exports, julia_name)
             is_cstring_ret && push!(exports, "$(julia_name)_ptr")
+            # A function with C linkage keeps its `<f>_safe` on this path. It
+            # had one while every unmangled name took ccall, and an `extern "C"`
+            # factory calls `new`, so it is never proven `nounwind`
+            # (`_is_nounwind`): which tier makes the call must not decide what
+            # the function offers. A mangled function has one on the ccall path
+            # alone, as before.
+            if !newly_typed_return && !_is_cpp_function(func)
+                safe = _managed_safe_wrapper(julia_name, param_sig, param_names,
+                                             String(return_type["julia_type"]), deleters, idiomatic_classes)
+                safe === nothing || (push!(func_chunks, safe[1]); push!(exports, safe[2]))
+            end
             continue # Skip the rest of the loop (ccall generation)
         end
 
@@ -4257,33 +4316,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # Generate safe wrapper if return type is a managed struct. Not for a
         # return typed from its declaration alone: `GetIO()` hands back memory
         # the context owns, and a finalizer on it frees what imgui still uses.
-        if !newly_typed_return && startswith(julia_return_type, "Ptr{") && endswith(julia_return_type, "}")
-            target_struct = julia_return_type[5:end-1]
-            # Sanitize target struct name to match ManagedX keys
-            safe_target = _sanitize_cpp_type_name(target_struct)
-            
-            if (haskey(deleters, safe_target) || haskey(deleters, target_struct)) && !haskey(idiomatic_classes, safe_target) && !haskey(idiomatic_classes, target_struct)
-                managed_name = "Managed$safe_target"
-                safe_func_name = "$(julia_name)_safe"
-                
-                # Use original param_names (not ccall_args which may have converted names
-                # like "a_c" that don't exist in the safe wrapper's scope)
-                safe_call_args = join(param_names, ", ")
-                safe_wrapper = """
-                \"""
-                    $safe_func_name($param_sig) -> $managed_name
-
-                Safe wrapper for `$julia_name` that returns a managed object with automatic finalization.
-                \"""
-                function $safe_func_name($param_sig)::$managed_name
-                    ptr = $julia_name($safe_call_args)
-                    return $managed_name(ptr)
-                end
-                """
-                
-                push!(func_chunks, safe_wrapper)
-                push!(exports, safe_func_name)
-            end
+        if !newly_typed_return
+            safe = _managed_safe_wrapper(julia_name, param_sig, param_names, julia_return_type,
+                                         deleters, idiomatic_classes)
+            safe === nothing || (push!(func_chunks, safe[1]); push!(exports, safe[2]))
         end
 
         # Generate convenience wrappers for ergonomic APIs
