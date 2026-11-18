@@ -74,6 +74,22 @@ catch e
     e isa MethodError && e.f === _PA_J.pointer_arg
 end
 
+# A closure `@cfunction` is a `Base.CFunction`, and Julia can make one on some
+# hosts only: on AArch64 it raises "cfunction: closures are not supported on
+# this platform". `nothing` there. The maker is its own function so the answer
+# is the same whether Julia raises when it compiles the expression or when it
+# runs it.
+_pa_inc(x::Cint)::Cint = x + Cint(1)
+_pa_make_closure(k::Cint) = @cfunction($(x -> x + k), Cint, (Cint,))
+function _pa_closure_cfunction(k::Cint)
+    try
+        return _pa_make_closure(k)
+    catch e
+        (e isa ErrorException && occursin("closures are not supported", e.msg)) || rethrow()
+        return nothing
+    end
+end
+
 @testset "Tier 2 pointer arguments" begin
 
 @testset "pointer_arg: the one derivation" begin
@@ -197,9 +213,16 @@ end
 
     @testset "a function pointer" begin
         f = x -> x + one(x)
-        k = Cint(3)
-        cf = @cfunction($(x -> x + k), Cint, (Cint,))
-        @test pa(Ptr{Code}, cf).ptr == Base.unsafe_convert(Ptr{Cvoid}, cf) && pa(Ptr{Code}, cf).keep === cf
+        # What every host has: the pointer a plain `@cfunction` returns.
+        plain = @cfunction(_pa_inc, Cint, (Cint,))
+        @test pa(Ptr{Code}, plain).ptr == plain
+        # A closure's `Base.CFunction`, where the host can make one.
+        cf = _pa_closure_cfunction(Cint(3))
+        if cf === nothing
+            @info "closure @cfunction is not supported on this host: the Base.CFunction case did not run" Sys.ARCH
+        else
+            @test pa(Ptr{Code}, cf).ptr == Base.unsafe_convert(Ptr{Cvoid}, cf) && pa(Ptr{Code}, cf).keep === cf
+        end
         @test _pa_refused(() -> pa(Ptr{Code}, f))                           # a Julia function
         @test _pa_refused(() -> pa(Ptr{Code}, Ref{Cint}(1)))
         @test _pa_refused(() -> pa(Ptr{Code}, _PABits((0x0, 0x0, 0x0, 0x0))))

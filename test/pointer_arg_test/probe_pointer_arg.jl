@@ -37,6 +37,17 @@ end
 
 inc(x::Cint)::Cint = x + Cint(1)
 const c_inc = @cfunction(inc, Cint, (Cint,))
+# A closure `@cfunction` (a `Base.CFunction`) exists on some hosts only: Julia
+# raises "cfunction: closures are not supported on this platform" on AArch64.
+make_closure(k::Cint) = @cfunction($(x -> x + k), Cint, (Cint,))
+function closure_cfunction(k::Cint)
+    try
+        return make_closure(k)
+    catch e
+        (e isa ErrorException && occursin("closures are not supported", e.msg)) || rethrow()
+        return nothing
+    end
+end
 
 # Storage for one T, zeroed, typed.
 newobj(T) = Ptr{T}(Libc.calloc(1, max(M.struct_size(nameof(T)), 1)))
@@ -86,9 +97,9 @@ end
 
 probe("function_pointers") do p
     (got = M.apply_unary(c_inc, 4)) == 5 || push!(p, "apply_unary(Ptr) = $got")
-    k = Cint(10)
-    closure = @cfunction($(x -> x + k), Cint, (Cint,))      # a Base.CFunction
-    (got = M.apply_unary(closure, 4)) == 14 || push!(p, "apply_unary(CFunction) = $got")
+    closure = closure_cfunction(Cint(10))                    # a Base.CFunction, where the host has them
+    closure === nothing ||
+        ((got = M.apply_unary(closure, 4)) == 14 || push!(p, "apply_unary(CFunction) = $got"))
 end
 
 probe("void_pointer_takes_what_ccall_takes") do p
