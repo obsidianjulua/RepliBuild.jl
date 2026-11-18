@@ -111,8 +111,11 @@ const CASES = [
 const HISTORICAL = [
     ("Foo::operator()(int) const",                                    "Foo", "operator"),
     ("pugi::xml_node::operator void (*)(pugi::xml_node***)() const",  "pugi::xml_node", "operator void"),
+    # Until 2026-11-18 the name was `operator<(pugi::xml_attribute const&) const`:
+    # the `<` read as a template bracket hid the parameter list. The operator's
+    # token is stepped over now (test_function_name_derivation.jl, "operators").
     ("pugi::xml_attribute::operator<(pugi::xml_attribute const&) const",
-     "pugi::xml_attribute", "operator<(pugi::xml_attribute const&) const"),
+     "pugi::xml_attribute", "operator<"),
     ("bool gguf_reader::read<int>(std::vector<int>&, unsigned long) const", "gguf_reader", "read<int>"),
     # _Z11signal_likeIiEPFvT_Ei. A function-pointer return wraps the name in
     # the declarator. Not a local entity or a decltype, so still unparsed.

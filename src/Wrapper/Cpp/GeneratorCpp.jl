@@ -5135,6 +5135,10 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     # same ::Any signature) must not survive into the module — method
     # overwriting is a hard error under package precompilation. Keep the
     # last definition per dispatch signature (include()-identical semantics).
+    # Before it, `operator()`/`[]`/`,` get their old shared name back beside
+    # their own, deduplicated as it always was (`_operator_legacy_aliases`).
+    (func_chunks, _legacy_operator_names) = _operator_legacy_aliases(func_chunks)
+    append!(all_exports, _legacy_operator_names)
     func_chunks = _dedup_method_chunks(func_chunks)
 
     # Each section is joined ONCE and reused for both the export filter and the
