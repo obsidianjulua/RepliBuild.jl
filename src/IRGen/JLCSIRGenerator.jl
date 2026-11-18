@@ -8,6 +8,8 @@ using ..DWARFParser
 import ..MLIRNative: CXX_PERSONALITY
 import ..host_record_abi
 import .._read_json
+import .._scope_suffixes, .._outside_template_args
+import ..Compiler
 import JSON
 
 # Modular includes
@@ -58,13 +60,24 @@ const EH_RUNTIME_SYMBOLS = Set([
 
 Resolve per-class RAII symbols from DWARF metadata: the complete-object
 destructor (`D1` preferred over `D2`/`D0`) and, when present, the copy
-constructor (`C1` preferred, signature `(const T&)`).
+constructor (`C1` preferred, signature `(const T&)`) and the move constructor
+(`:move_ctor`, signature `(T&&)`).
 
 Symbol presence is the gate (the repo's symbol-presence law): a truly trivial
 destructor is never emitted as a symbol, so a class appearing here is
 non-trivial for the purposes of calls under the Itanium ABI — by-value
 crossings must go through a caller-owned temporary that is destructed after
 the call, which is exactly what the scope-RAII producer emits.
+
+An entry is keyed by the class's key in `struct_definitions` (`NRes` for
+`ns::NRes`), which is how a parameter and every other table name it, and by
+the class as the demangler spells it only when it has no entry there. Keyed
+by that spelling alone, a class in a namespace was never found for a
+parameter. `:class` keeps the spelling; two classes on one key are
+`:ambiguous`. Each entry also says how a by-value parameter's temporary is
+made (`:temp`, with `:ctor` or `:why`: `FunctionGen.value_temporary`), and
+`:symbols` lists every constructor and destructor it was chosen from, for the
+JIT's pre-flight (`lifetime_callees`).
 """
 # The demangled form of a constructor is `<fully-qualified class>::<bare name>(`
 # — `pugi::xml_node::xml_node(…)`, not `pugi::xml_node::pugi::xml_node(…)`.
@@ -130,8 +143,11 @@ function apply_type_imports!(metadata, dir::AbstractString)
     return metadata
 end
 
-function _collect_class_raii(metadata)::Dict{String,Dict{Symbol,String}}
+function _collect_class_raii(metadata; demangle = Compiler._demangle)::Dict{String,Dict{Symbol,String}}
     raii = Dict{String,Dict{Symbol,String}}()
+    structs = get(metadata, "struct_definitions", Dict{String,Any}())
+    key_of = Dict{String,String}()      # a class as the demangler spells it → its table key
+    fuzzy = Ref{Any}(nothing)           # `_class_table_key`'s index, built on the first miss
     for f in get(metadata, "functions", [])
         get(f, "is_method", false) || continue
         cls = String(get(f, "class", ""))
@@ -140,32 +156,159 @@ function _collect_class_raii(metadata)::Dict{String,Dict{Symbol,String}}
         isempty(mangled) && continue
         demangled = String(get(f, "demangled", ""))
 
-        entry = get!(raii, cls, Dict{Symbol,String}())
+        is_dtor = occursin("~", demangled)
+        (is_dtor || occursin("$(cls)::$(_bare_class_name(cls))(", demangled)) || continue
+        key = get!(() -> _class_table_key(cls, structs, fuzzy), key_of, cls)
+        entry = get!(raii, key, Dict{Symbol,String}())
+        owner = get!(entry, :class, cls)
+        if owner != cls
+            # Distinct classes sharing a bare name share the key. The first
+            # keeps the entry, and no temporary is made for either.
+            entry[:ambiguous] = join(sort!(unique!(push!(String.(split(get(entry, :ambiguous, owner), "; ")), cls))), "; ")
+            continue
+        end
 
-        if occursin("~", demangled)
+        if is_dtor
             # Destructor: prefer the complete-object destructor (D1)
             if !haskey(entry, :dtor) || (occursin("D1E", mangled) && !occursin("D1E", entry[:dtor]))
                 entry[:dtor] = mangled
             end
-        elseif occursin("$(cls)::$(_bare_class_name(cls))(", demangled)
-            # Constructor: a copy ctor takes exactly one param of `const cls&`
-            # (metadata params exclude the implicit `this`)
+        else
+            # Constructor: a copy ctor takes exactly one param of `const cls&`,
+            # a move ctor one of `cls&&` (metadata params exclude the implicit
+            # `this`). DWARF spells the parameter by the class's bare name.
             params = get(f, "parameters", [])
             explicit = [p for p in params if get(p, "name", "") != "this"]
-            if length(explicit) == 1
-                pct = strip(String(get(explicit[1], "c_type", "")))
-                pct_clean = strip(replace(pct, r"\bconst\b" => ""))
-                if pct_clean == "$(cls)&" || pct_clean == "$(cls) &"
-                    if !haskey(entry, :copy_ctor) || (occursin("C1E", mangled) && !occursin("C1E", entry[:copy_ctor]))
-                        entry[:copy_ctor] = mangled
-                    end
-                end
+            length(explicit) == 1 || continue
+            pct = strip(replace(String(get(explicit[1], "c_type", "")), r"\b(?:const|volatile)\b" => ""))
+            slot = endswith(pct, "&&") ? :move_ctor : endswith(pct, "&") ? :copy_ctor : nothing
+            slot === nothing && continue
+            base = strip(rstrip(pct, '&'))
+            (base == key || base in _scope_suffixes(cls)) || continue
+            if !haskey(entry, slot) || (occursin("C1E", mangled) && !occursin("C1E", entry[slot]))
+                entry[slot] = mangled
             end
         end
+        entry[:symbols] = haskey(entry, :symbols) ? entry[:symbols] * " " * mangled : mangled
     end
     # Only classes with a resolvable destructor participate
     filter!(p -> haskey(p.second, :dtor), raii)
+
+    # How each class's by-value temporary is made, decided once here so the
+    # thunk generator and GeneratorCpp read one answer.
+    record_abi = get(metadata, "record_abi", Dict{String,Any}())
+    unemitted = _unemitted_constructors(metadata)
+    for key in sort!(collect(keys(raii)))
+        entry = raii[key]
+        (how, ctor, why) = FunctionGen.value_temporary(entry, key, structs, record_abi, unemitted; demangle)
+        entry[:temp] = how
+        isempty(ctor) || (entry[:ctor] = ctor)
+        isempty(why) || (entry[:why] = why)
+    end
     return raii
+end
+
+# The `struct_definitions` key of the class the demangler spells `cls`: the
+# longest `::` suffix that is a key (`_has_receiver` reads it the same way),
+# else the bare name's fuzzy match, else `cls` itself for a class with no
+# entry (a declaration, a standard-library class). The fuzzy match is
+# `TypeUtils._fuzzy_struct_lookup`'s answer (the key with a trailing ` >`,
+# else the smallest key equal up to trailing ` >`), read from an index built
+# once in `fuzzy`: that function scans every key on a miss, and this is asked
+# once per class.
+function _class_table_key(cls::AbstractString, structs, fuzzy::Ref)::String
+    suffixes = _scope_suffixes(cls)
+    for cand in suffixes
+        haskey(structs, cand) && return cand
+    end
+    bare = last(suffixes)
+    haskey(structs, bare * " >") && return bare * " >"
+    index = fuzzy[]
+    if index === nothing
+        index = Dict{String,String}()
+        for k in keys(structs)
+            s = String(k)
+            n = String(rstrip(s, [' ', '>']))
+            (!haskey(index, n) || s < index[n]) && (index[n] = s)
+        end
+        fuzzy[] = index
+    end
+    return get(index, String(rstrip(bare, [' ', '>'])), String(cls))
+end
+
+# The declared constructors the build's forced unit was asked to define and
+# had nothing to emit for (`inline_constructors`' `forced` rows with `emitted`
+# false), by their unified `C4` symbol: `X(const X&) = default` over trivially
+# copyable members is one, and has no symbol on any build.
+function _unemitted_constructors(metadata)::Set{String}
+    out = Set{String}()
+    plan = get(metadata, "inline_constructors", nothing)
+    plan isa AbstractDict || return out
+    for r in get(plan, "forced", ())
+        r isa AbstractDict || continue
+        get(r, "emitted", nothing) === false && push!(out, String(get(r, "symbol", "")))
+    end
+    return out
+end
+
+"""
+    lifetime_callees(metadata, needed_symbols) -> Set{String}
+
+The constructors and destructors the thunks of `needed_symbols` (of every
+function, with no manifest) may call for a by-value parameter's temporary:
+for each such parameter's class, every symbol `_collect_class_raii` chose
+from (`:symbols`), so that dropping one that does not resolve cannot leave
+its sibling unchecked. `JITManager._module_callees` adds them to what it
+pre-flights: the thunk module names them whether or not they have a thunk of
+their own, and ORC blocks on one that does not resolve.
+"""
+function lifetime_callees(metadata, needed_symbols)::Set{String}
+    out = Set{String}()
+    class_raii = _collect_class_raii(metadata)
+    isempty(class_raii) && return out
+    for f in get(metadata, "functions", [])
+        needed_symbols !== nothing && !(String(get(f, "mangled", "")) in needed_symbols) && continue
+        for p in get(f, "parameters", [])
+            t = FunctionGen._strip_top_cv(String(get(p, "c_type", "")))
+            (isempty(t) || occursin(r"[*&(\[]", _outside_template_args(t))) && continue
+            for cand in _scope_suffixes(t)
+                life = get(class_raii, cand, nothing)
+                life === nothing && continue
+                union!(out, String.(split(get(life, :symbols, ""), ' '; keepempty = false)))
+                break
+            end
+        end
+    end
+    return out
+end
+
+"""
+    undeclared_callees(ir) -> Vector{String}
+
+The symbols the thunk module `ir` calls and never declares, sorted: a
+`callee = @s`, a `jlcs.ctor_call @s` or `jlcs.dtor_call @s`, a member of a
+scope's `dtors([@s, …])` or an `llvm.call @s`, with no `func.func` or
+`llvm.func` of that name in the module. The dialect lowers each of these to
+an `llvm.call` of the symbol without looking it up, and MLIR's translation to
+LLVM IR dereferences null for one that is not there: a dead process, not an
+error. `JITManager.initialize_global_jit` and `ThunkBuilder.build_aot_thunks`
+ask before they hand a module over, and refuse it by name.
+"""
+function undeclared_callees(ir::AbstractString)::Vector{String}
+    declared = Set{String}()
+    for m in eachmatch(r"(?:func\.func(?: private)?|llvm\.func) @([^\s(]+)\(", ir)
+        push!(declared, String(m.captures[1]))
+    end
+    called = Set{String}()
+    for m in eachmatch(r"(?:callee = |jlcs\.[cd]tor_call |llvm\.call )@([^\s(,}\]]+)", ir)
+        push!(called, String(m.captures[1]))
+    end
+    for m in eachmatch(r"dtors\(\[([^\]]*)\]\)", ir)
+        for s in eachmatch(r"@([^\s,\]]+)", m.captures[1])
+            push!(called, String(s.captures[1]))
+        end
+    end
+    return sort!(collect(setdiff!(called, declared)))
 end
 
 """
@@ -588,11 +731,14 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
             end
         end
 
+        # `predeclared`: the callees this module has declared already (the
+        # legacy virtual-method declarations above), so a by-value temporary's
+        # destructor among them is not declared a second time.
         println(io, generate_function_thunks(filtered_functions, structs_meta;
                                              may_throw=is_cpp, class_raii=class_raii,
                                              vcall_info=vcall_info,
                                              record_abi=get(metadata, "record_abi", Dict{String,Any}()),
-                                             abi=abi))
+                                             abi=abi, predeclared=keys(declared_vmethods)))
     end
 
     # 5. Generate STL Container Accessor Thunks

@@ -898,6 +898,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # branch below). Absent from metadata built before it existed: every
     # record outside `struct_definitions` is then untypable, which traps.
     record_abi = get(metadata, "record_abi", Dict{String,Any}())
+    # How each class's by-value temporary is made, the table the thunk
+    # generator builds too: a class no temporary can be made for traps here
+    # (`thunk_crossings`), where the thunk generator emits no thunk.
+    class_raii = JLCSIRGenerator._collect_class_raii(metadata)
 
     # Struct definitions
     # Collect all struct names from DWARF (excluding enums which have __enum__ prefix)
@@ -3656,7 +3660,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # A record whose name several types share (`conflict_trap`) is
             # refused the same way: the thunk would lay out whichever one the
             # metadata kept.
-            crossings = JLCSIRGenerator.FunctionGen.thunk_crossings(func, dwarf_structs, record_abi)
+            crossings = JLCSIRGenerator.FunctionGen.thunk_crossings(func, dwarf_structs, record_abi; class_raii)
             if crossings.trap !== nothing
                 trap_msg = "ABI Safety Trap: cannot call '$julia_name' ($demangled)."
                 if crossings.layout_trap !== nothing

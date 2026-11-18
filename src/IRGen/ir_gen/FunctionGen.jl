@@ -6,6 +6,8 @@ using ..StructGen # for get_struct_type_string
 # package root, which the Builder reads too).
 import ..._scope_suffixes, ..._outside_template_args, ...C_LONG_DOUBLE_MLIR, ...host_record_abi
 import ..TypeUtils: _fuzzy_struct_lookup
+# The compiler's own spelling of a declared constructor (`value_temporary`).
+import ...Compiler
 
 export generate_function_thunks
 
@@ -56,6 +58,12 @@ How a parameter or return of C type `c_type` crosses a Tier-2 thunk. `kind`:
                   disagree, an enum whose definitions differ in width, or a
                   record holding either by value. `key` is the conflicted
                   entry, which is the crossing's own or one it holds.
+  * `:uncopyable` — a parameter of a class with a destructor, for which no
+                  temporary can be made (`value_temporary` says `"none"`): its
+                  copy constructor is deleted, private or absent from the
+                  library, and no move constructor stands in. Only with
+                  `class_raii` (`JLCSIRGenerator._collect_class_raii`), which
+                  both generators pass; `key` is the class's entry.
 
 Every `:opaque` crossing used to become `!llvm.ptr`, from `map_cpp_type`'s
 fallback or `generate_jlcs_ir`'s bodyless-struct rewrite. A 16-byte
@@ -66,13 +74,18 @@ plausible wrong value. `GeneratorCpp` asks this same function, so a function
 the thunk cannot call is emitted as a trap on the Julia side, not as a call.
 """
 function by_value_crossing(c_type::AbstractString, structs, record_abi;
-                           abi::Symbol = host_record_abi(), ret::Bool = false)
+                           abi::Symbol = host_record_abi(), ret::Bool = false,
+                           class_raii = nothing)
     t = _strip_top_cv(c_type)
     kind, key = _table_entry(t, structs)
     kind === :direct && return (:direct, nothing)
     if kind === :enum
         return _conflicted_entry(key, structs) ? (:conflict, key) : (:enum, key)
     elseif kind === :layout
+        # A parameter of a class whose temporary cannot be made (see
+        # `value_temporary`). A return needs none: it is built in place.
+        uncopyable = !ret && class_raii !== nothing &&
+                     get(get(class_raii, key, _NO_LIFETIME), :temp, "") == "none"
         # An empty record has an entry too since every defined library record
         # has one (2026-11-14), and its layout is one byte nothing reads: the
         # convention's answer for an empty record (dropped, a register pad,
@@ -80,9 +93,13 @@ function by_value_crossing(c_type::AbstractString, structs, record_abi;
         # Only `record_abi`'s `empty` says so; a memberless derived record
         # (`P3 : Pair {}`) has bytes, and is laid out from its bases.
         verdict = _record_facts_verdict(t, record_abi, abi, ret; empty_only = true)
-        verdict === nothing || return verdict[1] === :conflict ? (:conflict, key) : verdict
+        if verdict !== nothing
+            verdict[1] === :conflict && return (:conflict, key)
+            return uncopyable ? (:uncopyable, key) : verdict
+        end
         held = conflicted_within(key, structs)
-        return held === nothing ? (:layout, key) : (:conflict, held)
+        held === nothing || return (:conflict, held)
+        return uncopyable ? (:uncopyable, key) : (:layout, key)
     end
 
     verdict = _record_facts_verdict(t, record_abi, abi, ret)
@@ -322,6 +339,210 @@ function record_passes_by_reference(c_type::AbstractString, key, record_abi)::Bo
     return false
 end
 
+const _NO_LIFETIME = Dict{Symbol,String}()
+
+"""
+    value_temporary(entry, key, structs, record_abi, unemitted; demangle) -> (how, ctor, why)
+
+How the temporary of a by-value parameter of class `key` is made, for a class
+with a destructor in the library (`entry`, its row of
+`JLCSIRGenerator._collect_class_raii`). C++ passes such a class as a pointer
+to a temporary the caller makes and destroys, so the thunk has to make one:
+
+  * `"copy"` — the copy constructor `ctor`, which the library defines and a
+    caller may use.
+  * `"move"` — the move constructor `ctor`, when C++ itself has no copy to
+    make (the copy constructor is deleted, not public, or implicitly deleted
+    by a declared move) and the library defines a move constructor a caller
+    may use. The argument's storage is left moved-from.
+  * `"bits"` — the bytes, only where the copy is trivial: the class declares
+    no copy or move constructor and holds nothing with a copy of its own
+    (`_bitwise_copyable`), or it declares a copy constructor the forced unit
+    was asked to define and had nothing to emit for (`unemitted`:
+    `X(const X&) = default` over such members).
+  * `"none"` — no temporary can be made, and `why` says so. The function is
+    an ABI trap on both sides (`by_value_crossing` says `:uncopyable`).
+
+Decided from the declarations DWARF records (`record_abi[key]["constructors"]`:
+`deleted`, `accessibility`), never from a symbol's absence. The thunk used to
+read "no copy-constructor symbol" as "the copy is trivial" and copy the bytes;
+a deleted copy constructor has no symbol either, so a move-only class was
+duplicated and one of the two destroyed (`consume(Uniq)` freed the caller's
+object, 2026-11-17). A copy C++ would make and the library cannot (an inline
+or implicit one nothing emitted) is `"none"`, not a move: a caller who passes
+a copyable object does not expect to lose it. Metadata from before the
+declarations were recorded cannot say which case it is, and says to rebuild.
+"""
+function value_temporary(entry::AbstractDict, key::AbstractString, structs, record_abi, unemitted;
+                         demangle = Compiler._demangle)
+    name = String(key)
+    cant(why) = ("none", "", why)
+    haskey(entry, :ambiguous) &&
+        return cant("distinct classes in this library are named `$name` ($(entry[:ambiguous])), " *
+                    "and its temporary needs the constructor and destructor of the one meant")
+    info = get(structs, name, nothing)
+    scopes = info isa AbstractDict ? get(info, "scopes", ()) : ()
+    length(scopes) > 1 &&
+        return cant("distinct types in this library are named `$name` (in " *
+                    join(("`$(isempty(s) ? "::" : s)`" for s in scopes), ", ") *
+                    "), and its temporary needs the constructor and destructor of the one meant")
+    # D0 frees the object after ending it. A temporary lives in the thunk's frame.
+    endswith(String(get(entry, :dtor, "")), "D0Ev") &&
+        return cant("the library defines only its deleting destructor, which cannot end a temporary")
+
+    facts = get(record_abi, name, nothing)
+    facts isa AbstractDict || (facts = _NO_FACTS)
+    rows = get(facts, "constructors", nothing)
+    recorded = haskey(facts, "constructors") || haskey(facts, "methods")
+    (copy_row, move_row, unread) = rows isa AbstractVector ? _copy_move_declarations(rows, demangle) :
+                                   (nothing, nothing, false)
+    copy_sym = String(get(entry, :copy_ctor, ""))
+    move_sym = String(get(entry, :move_ctor, ""))
+    # A constructor the library defines names its own declaration: the row
+    # whose unified `C4` key it is a variant of.
+    row_of(sym, known) = (isempty(sym) || !(rows isa AbstractVector)) ? known :
+        something(_first_row(r -> sym in Compiler._constructor_variants(String(get(r, "symbol", ""))), rows),
+                  Some(known))
+    copy_row = row_of(copy_sym, copy_row)
+    move_row = row_of(move_sym, move_row)
+    access(r) = String(get(r, "accessibility", "public"))
+    open_to_callers(r) = get(r, "deleted", false) != true && access(r) == "public"
+
+    if !isempty(copy_sym) && (copy_row === nothing || open_to_callers(copy_row))
+        return ("copy", copy_sym, "")
+    end
+    # `no_copy`: C++ has no copy for a caller to make, so it moves. Anything
+    # else that keeps the copy from being made here is `cant`.
+    no_copy = if copy_row !== nothing
+        if get(copy_row, "deleted", false) == true
+            "its copy constructor is deleted"
+        elseif access(copy_row) != "public"
+            "its copy constructor is $(access(copy_row))"
+        elseif String(get(copy_row, "symbol", "")) in unemitted && _bitwise_copyable(name, structs, record_abi)
+            return ("bits", "", "")
+        else
+            return cant("the library does not define its copy constructor")
+        end
+    elseif !recorded
+        return cant("this metadata does not say which constructors it declares " *
+                    "(rebuild the library to record them)")
+    elseif unread
+        return cant("one of its constructors could not be read from its symbol, " *
+                    "so whether it can be copied is not known")
+    elseif move_row !== nothing
+        "it declares a move constructor and no copy constructor"
+    elseif _declares_move_assignment(facts)
+        "it declares a move assignment operator and no copy constructor"
+    elseif _bitwise_copyable(name, structs, record_abi)
+        return ("bits", "", "")
+    else
+        return cant("its copy constructor is implicit and not trivial, and the library has no definition of it")
+    end
+    if !isempty(move_sym) && (move_row === nothing || open_to_callers(move_row))
+        return ("move", move_sym, "")
+    end
+    no_move = move_row === nothing ? "it has no move constructor" :
+              get(move_row, "deleted", false) == true ? "its move constructor is deleted" :
+              access(move_row) != "public" ? "its move constructor is $(access(move_row))" :
+              "the library does not define its move constructor"
+    return cant("$no_copy and $no_move")
+end
+
+const _NO_FACTS = Dict{String,Any}()
+
+function _first_row(pred, rows)
+    for r in rows
+        r isa AbstractDict && pred(r) && return r
+    end
+    return nothing
+end
+
+"""
+    _copy_move_declarations(rows, demangle) -> (copy_row, move_row, unread)
+
+Of a record's declared constructors (`record_abi[key]["constructors"]`), the
+copy constructor's row and the move constructor's, each `nothing` when the
+class declares none. A row says only its unified `C4` symbol, so the
+parameters are read from the demangled name, the compiler's own spelling
+(`Compiler._constructor_spelling`): one parameter, a reference to the class
+itself. `unread` when a constructor that takes one reference could not be
+spelled (an ABI tag, an anonymous namespace), so the caller cannot say the
+class declares neither.
+"""
+function _copy_move_declarations(rows, demangle)
+    copy_row = nothing
+    move_row = nothing
+    unread = false
+    for r in rows
+        r isa AbstractDict || continue
+        sym = String(get(r, "symbol", ""))
+        # Only a constructor whose parameter list opens with a reference (`R`,
+        # or `O` for `&&`) can be either, and a constructor template is neither.
+        (occursin(r"C4[^E]*E[RO]", sym) && !occursin("C4I", sym)) || continue
+        dm = demangle(sym)
+        spelled = dm === nothing ? nothing : Compiler._constructor_spelling(dm)
+        if spelled === nothing
+            unread = true
+            continue
+        end
+        (cls, params) = spelled
+        length(params) == 1 || continue
+        p = params[1]
+        base = strip(replace(rstrip(p, '&'), r"\b(?:const|volatile)\b" => ""))
+        base == cls || continue
+        endswith(p, "&&") ? (move_row = r) : (copy_row = r)
+    end
+    return (copy_row, move_row, unread)
+end
+
+# `X& operator=(X&&)` among a record's declared member functions (`aS` is
+# `operator=`, `O` an rvalue reference): declaring one deletes the implicit
+# copy constructor. Any `operator=` taking an rvalue reference counts, which
+# errs toward refusing the copy.
+_declares_move_assignment(facts) =
+    any(m -> m isa AbstractDict && occursin("aSEO", String(get(m, "symbol", ""))), get(facts, "methods", ()))
+
+"""
+    _bitwise_copyable(key, structs, record_abi) -> Bool
+
+Whether an implicit or defaulted copy of the record `key` is its bytes: no
+virtual function or base (the copy would set the vptr), and every base and
+every member it holds by value is a scalar, a pointer, an enum, or a record
+DWARF says is trivial for the purposes of calls (`pass` is `"value"`). A
+member whose type has no facts is not known to be, and answers `false`.
+"""
+function _bitwise_copyable(key::AbstractString, structs, record_abi)::Bool
+    info = get(structs, key, nothing)
+    info isa AbstractDict || return false
+    facts = get(record_abi, key, nothing)
+    facts isa AbstractDict &&
+        any(m -> m isa AbstractDict && get(m, "virtual", false) == true, get(facts, "methods", ())) && return false
+    for b in get(info, "base_classes", [])
+        get(b, "virtual", false) == true && return false
+        _held_bitwise(replace(String(get(b, "type", "")), r"^(?:class|struct)\s+" => ""), structs, record_abi) || return false
+    end
+    for m in get(info, "members", [])
+        startswith(String(get(m, "name", "")), "_vptr") && return false
+        (get(m, "offset", nothing) === nothing && !haskey(m, "data_bit_offset")) && continue   # a static member
+        _held_bitwise(String(get(m, "c_type", "")), structs, record_abi) || return false
+    end
+    return true
+end
+
+# Whether a base or member of C type `c_type` copies as its bytes; see `_bitwise_copyable`.
+function _held_bitwise(c_type::AbstractString, structs, record_abi)::Bool
+    t = _strip_top_cv(replace(_strip_top_cv(c_type), r"(?:\[\d*\])+$" => ""))
+    (isempty(t) || t in ("void", "unknown")) && return false
+    (occursin(r"[*&(]", _outside_template_args(t)) || startswith(t, "function_ptr")) && return true
+    for cand in _scope_suffixes(t)
+        facts = get(record_abi, cand, nothing)
+        facts isa AbstractDict || continue
+        return get(facts, "conflict", false) != true && get(facts, "pass", nothing) == "value"
+    end
+    kind, _ = _table_entry(t, structs)
+    return kind === :enum || (kind === :direct && get_stl_container_size(t) == 0)
+end
+
 """
     returns_in_caller_buffer(func, structs, record_abi; abi) -> Bool
 
@@ -431,11 +652,15 @@ from DWARF, which a build flag can recover; `abi_trap` the convention's own
 refusals, which a shim taking a pointer or returning a `double` gets around;
 and `conflict_trap` the names several types share, which no flag can. `abi`
 is the convention asked (`host_record_abi()` unless a test asks for another).
+With `class_raii` (`JLCSIRGenerator._collect_class_raii`, which the thunk
+generator and GeneratorCpp both pass), a parameter of a class no temporary can
+be made for (`:uncopyable`) is an `abi_trap` too: a shim taking a pointer is
+the way around it.
 """
-function thunk_crossings(func, structs, record_abi; abi::Symbol = host_record_abi())
+function thunk_crossings(func, structs, record_abi; abi::Symbol = host_record_abi(), class_raii = nothing)
     # Typed so the thunk generator can prepend `this` as (:direct, nothing).
     params = Tuple{Symbol,Union{Nothing,String}}[
-        by_value_crossing(String(get(p, "c_type", "")), structs, record_abi; abi)
+        by_value_crossing(String(get(p, "c_type", "")), structs, record_abi; abi, class_raii)
         for p in get(func, "parameters", [])]
     ret_c = String(get(get(func, "return_type", Dict()), "c_type", "void"))
     ret = by_value_crossing(ret_c, structs, record_abi; abi, ret = true)
@@ -448,6 +673,8 @@ function thunk_crossings(func, structs, record_abi; abi::Symbol = host_record_ab
     by_ref(c, key) = record_passes_by_reference(c, key, record_abi)
     for (p, (k, key)) in zip(get(func, "parameters", []), params)
         k === :opaque && push!(reasons, "takes `$(get(p, "c_type", "?"))` by value")
+        k === :uncopyable && push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, and `$key` " *
+                                                "cannot be passed by value: $(get(class_raii[key], :why, "no temporary of it can be made"))")
         if k === :layout && !by_ref(String(get(p, "c_type", "")), key)
             why = sysv_trap_reason(key, structs; ret = false, abi)
             why === nothing || push!(abi_reasons, "takes `$(get(p, "c_type", "?"))` by value, $why")
@@ -668,7 +895,8 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                                   class_raii::Dict{String,Dict{Symbol,String}}=Dict{String,Dict{Symbol,String}}(),
                                   vcall_info::AbstractDict=Dict{String,Any}(),
                                   record_abi::AbstractDict=Dict{String,Any}(),
-                                  abi::Symbol=host_record_abi())
+                                  abi::Symbol=host_record_abi(),
+                                  predeclared=())
     # The convention the thunks are generated for: the host's, since they run
     # in this process. Every record crossing is refused or stated under it
     # (`thunk_crossings`, `record_statement`); a test passes another to see
@@ -680,6 +908,16 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
     println(io, "// Function Thunks")
 
     generated = Set{String}()
+    # Every symbol the module declares: the caller's (`predeclared`, what it
+    # declared before this pass) and each callee declared below. And the
+    # constructors and destructors the scopes below call, with the number of
+    # pointers each takes. Such a callee's only declaration used to be its own
+    # thunk's, and a thunk the wrapper does not bind is not emitted: the module
+    # then called a symbol it never declared, and translating it to LLVM IR
+    # dereferenced null (`using` of the wrapper died, 2026-11-17). They are
+    # declared after the loop, once each.
+    declared = Set{String}(String(s) for s in predeclared)
+    lifetime_callees = Dict{String,Int}()
 
     for func in functions
         name = get(func, "name", "")
@@ -701,7 +939,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # thunk: every spelling of one would be a wrong call. GeneratorCpp
         # reaches the same verdict and emits a trap. The line stays in the
         # .mlir, which is the file a debugger shows.
-        crossings = thunk_crossings(func, structs, record_abi; abi)
+        crossings = thunk_crossings(func, structs, record_abi; abi, class_raii)
         if crossings.trap !== nothing
             println(io, "// no thunk for $(mangled): $(replace(crossings.trap, '\n' => ' '))")
             println(io, "")
@@ -737,8 +975,12 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # the Itanium ABI — the callee expects a POINTER to a caller-owned
         # temporary, not raw bits in registers. Passing the raw struct (the old
         # behavior) miscompiled those calls. The producer builds the temporary
-        # (copy-ctor when resolvable, bit-copy when the copy is trivial), passes
-        # its address, and destructs it after the call via jlcs.scope.
+        # as `value_temporary` decided for the class (its copy constructor, its
+        # move constructor when C++ has no copy, its bytes only where the copy
+        # is trivial), passes its address, and destructs it after the call via
+        # jlcs.scope. The class is found by its table key, which is how a
+        # parameter names it: looked up by the parameter's spelling, a class in
+        # a namespace (`NRes` for `ns::NRes`) never matched and went as bytes.
         # nothing = not an RAII param; NamedTuple = transform it.
         raii_specs = Vector{Any}(nothing, length(params))
         # What the slot is loaded as, per param, decided once here and read by
@@ -808,7 +1050,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             # destructor (`Guard`) has had a one-byte entry since 2026-11-14,
             # and the definition string below must not replace the pointer.
             by_address = kind in (:layout, :indirect) && lookup_key !== nothing &&
-                         !haskey(class_raii, strip(replace(t, r"\bconst\b" => ""))) &&
+                         !haskey(class_raii, lookup_key) &&
                          record_passes_by_reference(t, rec_key, record_abi)
             if by_address
                 param_load[pi] = (type = "!llvm.ptr", packed = false, info = nothing, address = true)
@@ -827,12 +1069,14 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 # a POINTER to a caller-owned temporary regardless of byte
                 # layout. (is_struct_packed classifies any padding-free
                 # struct as "packed", so it must not gate this decision.)
-                cls_key = strip(replace(t, r"\bconst\b" => ""))
+                life = get(class_raii, lookup_key, nothing)
                 bsz = try _parse_byte_size(get(structs[lookup_key], "byte_size", "0")) catch; 0 end
-                if haskey(class_raii, cls_key) && bsz > 0
-                    raii_specs[pi] = (cls = cls_key, size = bsz,
-                                      dtor = class_raii[cls_key][:dtor],
-                                      copy_ctor = get(class_raii[cls_key], :copy_ctor, ""))
+                if life !== nothing && bsz > 0
+                    # `how` is "copy", "move" or "bits": a class with "none"
+                    # trapped above (`:uncopyable`).
+                    raii_specs[pi] = (cls = lookup_key, size = bsz,
+                                      dtor = life[:dtor], how = life[:temp],
+                                      ctor = get(life, :ctor, ""))
                     mlir_t = "!llvm.ptr"   # Itanium: pass address of the temporary
                 elseif StructGen.is_struct_packed(structs[lookup_key])
                     # For packed structs, use LLVM packed type to avoid type mismatch with thunk marshalling
@@ -1026,6 +1270,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         # 1. External Declaration (Real C++ Symbol)
         # Use real mangled name so JIT can link to it
         println(io, "func.func private @$(mangled)($(join(arg_types, ", "))) $ext_mlir_ret")
+        push!(declared, String(mangled))
 
         # 2. Thunk (Exposed to JIT)
         # Append _thunk suffix to avoid collision
@@ -1229,7 +1474,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
 
         # Call using jlcs.ffe_call or jlcs.try_call (via Dialect)
         if has_raii
-            # Scope-RAII: copy-construct temporaries, call inside the scope,
+            # Scope-RAII: construct the temporaries, call inside the scope,
             # destructors fire in reverse order at scope exit. try_call converts
             # C++ exceptions to sentinel-return-and-continue, so the normal path
             # (where the scope emits dtors) is the only path — coverage is total.
@@ -1243,12 +1488,17 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             println(io, "  jlcs.scope($(tmp_list) : $(tmp_types)) dtors([$(dtor_list)]) {")
             for i in raii_idx
                 spec = raii_specs[i]
-                if !isempty(spec.copy_ctor)
-                    println(io, "    jlcs.ctor_call @$(spec.copy_ctor)(%raii_tmp_$(i), %val_ptr_$(i)) : (!llvm.ptr, !llvm.ptr) -> ()")
-                else
-                    # No copy-ctor symbol → copy is trivial; bit-copy the bytes
+                lifetime_callees[spec.dtor] = 1
+                if spec.how == "bits"
+                    # The copy is trivial (`value_temporary`): the bytes are the copy.
                     println(io, "    %raii_blob_$(i) = llvm.load %val_ptr_$(i) : !llvm.ptr -> !llvm.array<$(spec.size) x i8>")
                     println(io, "    llvm.store %raii_blob_$(i), %raii_tmp_$(i) : !llvm.array<$(spec.size) x i8>, !llvm.ptr")
+                else
+                    # The copy constructor, or the move constructor of a class
+                    # C++ cannot copy: both take the temporary and the
+                    # argument's storage, which a move leaves moved-from.
+                    println(io, "    jlcs.ctor_call @$(spec.ctor)(%raii_tmp_$(i), %val_ptr_$(i)) : (!llvm.ptr, !llvm.ptr) -> ()")
+                    lifetime_callees[spec.ctor] = 2
                 end
             end
             if func_ret == ""
@@ -1304,6 +1554,18 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         end
 
         println(io, "}")
+        println(io, "")
+    end
+
+    # The constructors and destructors of by-value temporaries that nothing
+    # above declared (a thunk of its own declares its callee): the complete
+    # constructor takes the object and its source, the destructor the object.
+    undeclared = sort!([s for s in keys(lifetime_callees) if !(s in declared)])
+    if !isempty(undeclared)
+        println(io, "// Constructors and destructors of by-value temporaries")
+        for sym in undeclared
+            println(io, "func.func private @$(sym)($(join(fill("!llvm.ptr", lifetime_callees[sym]), ", "))) ")
+        end
         println(io, "")
     end
 

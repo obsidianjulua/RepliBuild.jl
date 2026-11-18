@@ -834,7 +834,10 @@ end
 
 The mangled symbols the thunk module for this library will call: the
 functions the manifest lists (every function in the metadata when there is no
-manifest) and the STL method table's members.
+manifest), the STL method table's members, and the constructors and
+destructors of the temporaries those functions' by-value class parameters
+need (`JLCSIRGenerator.lifetime_callees`), which the module names whether or
+not the manifest lists them.
 """
 function _module_callees(metadata, needed_symbols)::Set{String}
     out = Set{String}()
@@ -852,6 +855,7 @@ function _module_callees(metadata, needed_symbols)::Set{String}
             isempty(s) || push!(out, s)
         end
     end
+    union!(out, JLCSIRGenerator.lifetime_callees(metadata, needed_symbols))
     return out
 end
 
@@ -887,6 +891,35 @@ function _drop_stl_methods!(metadata, unresolved)
         filter!(m -> !(String(get(m, "mangled", "")) in gone), methods)
     end
     return metadata
+end
+
+"""
+Remove the function rows whose symbol is in `unresolved`, in place: a
+function the library's handle cannot resolve gets no thunk, and no thunk
+calls it as the constructor or destructor of a by-value temporary
+(`JLCSIRGenerator._collect_class_raii` reads these rows).
+"""
+function _drop_functions!(metadata, unresolved)
+    haskey(metadata, "functions") || return metadata
+    gone = Set{String}(unresolved)
+    filter!(f -> !(String(get(f, "mangled", "")) in gone), metadata["functions"])
+    return metadata
+end
+
+"""
+    _assert_callees_declared(ir_source, lib)
+
+Refuse a thunk module that calls a symbol it never declares
+(`JLCSIRGenerator.undeclared_callees`), naming each. MLIR's translation of
+such a module to LLVM IR dereferences null, so `create_jit` would end the
+process; as an error here it is one library's failed initialization.
+"""
+function _assert_callees_declared(ir_source::AbstractString, lib::AbstractString)
+    undeclared = JLCSIRGenerator.undeclared_callees(ir_source)
+    isempty(undeclared) && return nothing
+    error("the thunk module for $(lib) calls $(length(undeclared)) symbol(s) it never declares: " *
+          join(undeclared, ", ") * ". This is a bug in RepliBuild's thunk generator, not in the library; " *
+          "handing the module to the JIT would end the process.")
 end
 
 # Declarations the thunk module carries that no pre-flight owns: helpers
@@ -1070,11 +1103,15 @@ function initialize_global_jit(binary_path::String)
                       "wrapper's methods on them raise instead of hanging" unresolved = join(sort(unresolved), ", ")
                 needed_symbols === nothing || setdiff!(needed_symbols, unresolved)
                 _drop_stl_methods!(metadata, unresolved)
+                _drop_functions!(metadata, unresolved)
             end
 
             # 4. Generate MLIR Module for vtables + needed function thunks
             ir_source = JLCSIRGenerator.generate_jlcs_ir(eng.vtable_info, metadata;
                                                           needed_symbols=needed_symbols)
+            # A callee the module never declares would end the process in
+            # `create_jit`, not raise: refused here, it fails this library alone.
+            _assert_callees_declared(ir_source, basename(rp))
             # The declarations the module actually carries: every one must be
             # the library's, pre-flighted above, or a helper registered
             # globally, or the first call into it would block the process.
