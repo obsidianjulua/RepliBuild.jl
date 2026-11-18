@@ -239,6 +239,12 @@ end
         @test how("OldCopy") == ("copy", "_ZN7OldCopyC1ERKS_")
         @test haskey(raii["Legacy"], :move_ctor) && occursin("rebuild", why("Legacy"))
         @test occursin("toolchain header", why("Tool")) && !occursin("rebuild", why("Tool"))
+        # Facts that cannot be read cost one class its temporary, not the
+        # table: it is built on every load of the wrapper.
+        broken = _BVT_J._collect_class_raii(_BVT_METADATA; demangle = s -> occursin("Uniq", s) ? error("no demangler here") : RepliBuild.Compiler._demangle(s))
+        @test broken["Uniq"][:temp] == "none" && occursin("no demangler here", broken["Uniq"][:why])
+        @test broken["NUniq"][:temp] == "none" && broken["Res"][:temp] == "copy" && broken["Plain"][:temp] == "bits"
+        @test Set(keys(broken)) == Set(keys(raii))
         # A symbol's absence decides nothing: every class refused or moved
         # here has no copy-constructor symbol, which used to mean "its bytes".
         @test sort!([k for k in keys(raii) if !haskey(raii[k], :copy_ctor) && raii[k][:temp] != "bits"]) ==

@@ -200,7 +200,14 @@ function _collect_class_raii(metadata; demangle = Compiler._demangle)::Dict{Stri
     unemitted = _unemitted_constructors(metadata)
     for key in sort!(collect(keys(raii)))
         entry = raii[key]
-        (how, ctor, why) = FunctionGen.value_temporary(entry, key, structs, record_abi, unemitted; demangle)
+        # A class whose facts cannot be read is one class without a
+        # temporary: this table is built on every load, and one class is not
+        # worth the library's thunks.
+        (how, ctor, why) = try
+            FunctionGen.value_temporary(entry, key, structs, record_abi, unemitted; demangle)
+        catch err
+            ("none", "", "how to copy it could not be read from the metadata ($(first(sprint(showerror, err), 200)))")
+        end
         entry[:temp] = how
         isempty(ctor) || (entry[:ctor] = ctor)
         isempty(why) || (entry[:why] = why)
