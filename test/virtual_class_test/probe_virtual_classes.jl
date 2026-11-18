@@ -118,11 +118,20 @@ probe("abstract_with_a_virtual_base_is_refused") do p
     Libc.free(s)
 end
 
-# No virtual base: the base-object constructor is the constructor.
-probe("abstract_without_a_virtual_base_is_bound") do p
+# No virtual base: the base-object constructor is the constructor, and it is
+# refused all the same. The class is abstract, and an object built by it alone
+# would have `__cxa_pure_virtual` where `get` is (test_pure_virtual_live.jl).
+probe("abstract_without_a_virtual_base_is_refused") do p
     q = alloc(:Plain)
-    M.Plain_Plain(q, 31)
-    (got = unsafe_load(Ptr{Cint}(q + M.member_offset(:Plain, :v)))) == 31 || push!(p, "v = $got")
+    try
+        M.Plain_Plain(q, 31)
+        push!(p, "Plain_Plain returned")
+    catch e
+        msg = sprint(showerror, e)
+        e isa ErrorException || push!(p, "threw $(typeof(e))")
+        occursin("`Plain` is an abstract class", msg) || push!(p, "message: $(first(msg, 160))")
+    end
+    (got = unsafe_load(Ptr{Cint}(q + M.member_offset(:Plain, :v)))) == 0 || push!(p, "v = $got: the storage was written")
     Libc.free(q)
 end
 

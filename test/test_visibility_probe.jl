@@ -179,9 +179,12 @@ end
             # Stand in for a built package: the wrapper carries all four today.
             mkpath(joinpath(dir, "julia"))
             open(joinpath(dir, "julia", "compilation_metadata.json"), "w") do io
-                JSON.print(io, Dict("functions" => [
-                    Dict("name" => n, "mangled" => n) for n in
-                    ("annotated_one", "annotated_two", "bare_extern", "uses_helper")]))
+                JSON.print(io, Dict("functions" => vcat(
+                    [Dict{String,Any}("name" => n, "mangled" => n) for n in
+                     ("annotated_one", "annotated_two", "bare_extern", "uses_helper")],
+                    # A pure virtual member function's row: it names no symbol,
+                    # so the flag has nothing of it to remove and it is not counted.
+                    [Dict{String,Any}("name" => "poke", "mangled" => "_ZN5Iface4pokeEi", "vtable_only" => true)])))
             end
             r = VP.visibility_probe(toml)
 

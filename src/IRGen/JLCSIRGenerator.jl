@@ -418,6 +418,52 @@ function _sanitize_mlir_symbol(name::String)
 end
 
 """
+    _vtable_only_vcall(func) -> Union{Nothing,NamedTuple}
+
+The `jlcs.vcall` coordinates of a pure virtual member function's row
+(`Compiler._is_vtable_only`): the slot its declaration recorded
+(`vtable_slot`), in class-local terms like every other entry of `vcall_info`
+(`vtable_offset = 0`, the vptr of the class the wrapper's `this` points at),
+and the class as `jlcs.type_info` names it. `nothing` for a row with no slot.
+"""
+function _vtable_only_vcall(func)
+    slot = get(func, "vtable_slot", nothing)
+    slot isa Integer || return nothing
+    cls = String(get(func, "class", ""))
+    isempty(cls) && return nothing
+    return (class = _sanitize_mlir_symbol(String(last(_scope_suffixes(cls)))), slot = Int(slot), vtable_offset = 0)
+end
+
+"""
+    vtable_only_refusal(func, structs, record_abi; class_raii, abi) -> Union{Nothing,String}
+
+Whether the thunk generator emits a thunk for the pure virtual member
+function `func` (`nothing`), or why it does not. GeneratorCpp asks before it
+binds the thunk: such a function has no symbol, so with no thunk there is
+nothing a wrapper could call, and it emits a refusal with this reason.
+
+The answer is the generator's own: the one function is run through
+`generate_function_thunks` with the coordinates its row brings, and the
+refusal it records, or the thunk it wrote, is read back.
+"""
+function vtable_only_refusal(func, structs, record_abi;
+                             class_raii::Dict{String,Dict{Symbol,String}} = Dict{String,Dict{Symbol,String}}(),
+                             abi::Symbol = host_record_abi())
+    m = String(get(func, "mangled", ""))
+    get(func, "is_vararg", false) == true &&
+        return "it is pure virtual and variadic; a call through the vtable cannot forward `...`"
+    vc = _vtable_only_vcall(func)
+    refused = Dict{String,String}()
+    ir = generate_function_thunks(Any[func], structs; may_throw = true, class_raii = class_raii,
+                                  vcall_info = vc === nothing ? Dict{String,Any}() : Dict{String,Any}(m => vc),
+                                  record_abi = record_abi, abi = abi, refused = refused)
+    haskey(refused, m) && return refused[m]
+    occursin("func.func @$(FunctionGen.thunk_symbol(m, false))(", ir) && occursin("\"jlcs.vcall\"", ir) ||
+        return "the thunk generator wrote no vtable call for it"
+    return nothing
+end
+
+"""
     generate_type_info_ir(class_name::String, info::ClassInfo, vtable_addr::UInt64;
                           destructor::String="") -> String
 
@@ -815,6 +861,15 @@ function generate_jlcs_ir(vtinfo::DWARFParser.VtableInfo, metadata::Any=Dict();
                     (class = cls_sym, slot = method.slot,
                      vtable_offset = class_info.vtable_ptr_offset)
             end
+        end
+
+        # A pure virtual member function's row brings its own coordinates
+        # (`_vtable_only_vcall`): it has no symbol, so the thunk generator
+        # must not depend on the scan above having listed it.
+        for f in filtered_functions
+            Compiler._is_vtable_only(f) || continue
+            vc = _vtable_only_vcall(f)
+            vc === nothing || (vcall_info[String(get(f, "mangled", ""))] = vc)
         end
 
         # `predeclared`: the callees another pass of this module declares (the

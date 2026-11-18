@@ -90,6 +90,7 @@ const TESTS = TestFile[
     T("test_cpp_finalizers.jl", :unit, [:cpp]),
     T("test_structor_variants.jl", :unit, [:dwarf, :cpp]),
     T("test_virtual_dispatch.jl", :unit, [:cpp, :dialect]),
+    T("test_pure_virtual_methods.jl", :unit, [:build, :dwarf, :cpp, :dialect]),
     T("test_dwarf_member_sizes.jl", :unit, [:dwarf]),
     T("test_shim_header_guard.jl", :unit, [:build, :c]),
     T("test_shim_defines.jl", :unit, [:build, :c]),
@@ -252,6 +253,7 @@ const TESTS = TestFile[
       locks = ["conflict_trap_test", "conflict_trap_c_test"]),
     T("test_cpp_finalizers_live.jl", :dev, [:cpp], locks = ["finalizer_test"]),
     T("test_virtual_classes_live.jl", :dev, [:dwarf, :cpp, :dialect], locks = ["virtual_class_test"]),
+    T("test_pure_virtual_live.jl", :dev, [:build, :dwarf, :cpp, :dialect], locks = ["pure_virtual_test"]),
     T("test_toolchain_byvalue_live.jl", :dev, [:dwarf, :cpp], locks = ["toolchain_byvalue_test"]),
     # Which functions a call may reach at all: C linkage that may throw, and
     # symbols with no debug information.

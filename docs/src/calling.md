@@ -238,6 +238,21 @@ destructor the library holds (an implicit virtual destructor at `-O2`, as for
 Bullet's `btBoxShape`), there is no `Class_destroy_Class` at all; the wrap
 report names those classes, and the docstring says which case you have.
 
+**Virtual methods** go through the object's vtable: `Animal_legs(p)` runs the
+override of whatever class `p` really points at. (The exception is a method
+that takes or returns a struct by value: `Dog_span(p)` runs `Dog::span`.) That
+includes a pure virtual one (`virtual const char *name() const = 0;`):
+`Animal_name(p)` exists although `Animal` has no body for it, and a class a
+factory makes has the proxy (`M.name(a)`). Three kinds of pure virtual get no
+wrapper: a private or protected one, a variadic one, and a destructor, which
+is bound as every destructor is. A pure virtual that takes or returns a struct
+by value has a wrapper that raises and says so; call the override through its
+own class (`Dog_span(p)`).
+
+An abstract class is not constructed: `Animal_Animal(p, 4)` raises and names
+the function that is still pure, as C++ refuses `Animal a(4);`. Build a class
+that defines it (`Dog_Dog(p)`), or take the object from the library.
+
 `Rect()` is not a constructor. It is the zeroed Julia value every struct gets:
 no C++ constructor has run, so a class with virtual methods has a null vtable
 pointer, and calling a method on it crashes. A class a factory makes is the

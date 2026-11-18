@@ -1040,7 +1040,8 @@ end
 
 The mangled symbols the thunk module for this library will call: the
 functions the manifest lists (every function in the metadata when there is no
-manifest), the STL method table's members, and the constructors and
+manifest) less the pure virtual ones, whose thunks call through the vtable,
+the STL method table's members, and the constructors and
 destructors of the temporaries those functions' by-value class parameters
 need (`JLCSIRGenerator.lifetime_callees`), which the module names whether or
 not the manifest lists them.
@@ -1054,6 +1055,13 @@ function _module_callees(metadata, needed_symbols)::Set{String}
             m = String(get(f, "mangled", ""))
             isempty(m) || push!(out, m)
         end
+    end
+    # A pure virtual member function's thunk calls through the vtable and
+    # names no symbol (`Compiler._is_vtable_only`): there is nothing to
+    # resolve, and looked up, its name would be reported unresolved and its
+    # thunk left out.
+    for f in get(metadata, "functions", Any[])
+        Compiler._is_vtable_only(f) && delete!(out, String(get(f, "mangled", "")))
     end
     for (_, methods) in get(metadata, "stl_methods", Dict{String,Any}())
         for m in methods

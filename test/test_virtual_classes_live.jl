@@ -139,9 +139,8 @@ if requires("constructor/destructor variants and virtual dispatch, live", :libJL
                 ("Left_Left", "this::Any", "_ZN4LeftC1Ev"), ("Left_Left", "this::Any, l_::Integer", "_ZN4LeftC1Ei"),
                 ("Left_destroy_Left", "this::Any", "_ZN4LeftD1Ev"), ("Left_delete_Left", "this::Any", "_ZN4LeftD0Ev"),
                 ("Right_Right", "this::Any", "_ZN5RightC1Ev"), ("Solid_Solid", "this::Any", "_ZN5SolidC1Ev"),
-                # No virtual base: C1 where the library has it, else C2.
-                ("Root_Root", "this::Any", "_ZN4RootC1Ev"), ("Root_destroy_Root", "this::Any", "_ZN4RootD1Ev"),
-                ("Plain_Plain", "this::Any, v_::Integer", "_ZN5PlainC2Ei"))
+                # No virtual base: C1 where the library has it.
+                ("Root_Root", "this::Any", "_ZN4RootC1Ev"), ("Root_destroy_Root", "this::Any", "_ZN4RootD1Ev"))
         checked = 0
         for (name, sig, sym) in want
             @test (name, sig in sigs(name)) == (name, true)
@@ -166,6 +165,13 @@ if requires("constructor/destructor variants and virtual dispatch, live", :libJL
         # The abstract class with a virtual base: a refusal that says why.
         @test occursin("only the base-object constructor of `Sketch` (`_ZN6SketchC2Ev`)", body("Sketch_Sketch"))
         @test !("_ZN6SketchC2Ev" in thunks)
+        # The abstract class with none: its base-object constructor is the
+        # constructor, and would build an object C++ never lets exist, whose
+        # pure slot ends the process. Refused because the class is abstract
+        # (test_pure_virtual_live.jl), with its own parameters.
+        @test sigs("Plain_Plain") == ["this::Any, v_::Integer"]
+        @test occursin("`Plain` is an abstract class: `Plain::get() const`", body("Plain_Plain"))
+        @test !("_ZN5PlainC2Ei" in thunks)
     end
 
     @testset "the wrapper sends every virtual method to a thunk" begin
@@ -188,7 +194,7 @@ if requires("constructor/destructor variants and virtual dispatch, live", :libJL
         @test haskey(v, "PROBE_DONE")
         names = ["both_constructed_in_place", "both_constructed_with_arguments", "left_and_right_constructed_in_place",
                  "delete_takes_the_object_alone", "no_wrapper_takes_a_vtt", "solid_is_built_through_its_abstract_base",
-                 "abstract_with_a_virtual_base_is_refused", "abstract_without_a_virtual_base_is_bound",
+                 "abstract_with_a_virtual_base_is_refused", "abstract_without_a_virtual_base_is_refused",
                  "memberless_class_dispatches", "memberless_class_with_two_bases_dispatches",
                  "class_declared_in_a_later_unit_dispatches", "noexcept_virtual_dispatches"]
         for n in names
