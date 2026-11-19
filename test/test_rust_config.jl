@@ -114,6 +114,51 @@ end
     end
 end
 
+@testset "[rust] dependency: the crate is a dependency's checkout" begin
+    git_dep = """
+        [dependencies.upstream]
+        type = "git"
+        url = "https://example.invalid/upstream.git"
+        tag = "v1.0.0"
+        commit = "0123456789abcdef0123456789abcdef01234567"
+        """
+    mktempdir() do dir
+        toml = rust_project(dir, "[rust]\ndependency = \"upstream\"\nmanifest = \"./crates//core/Cargo.toml\"\n\n" * git_dep)
+        cfg = RCM.load_config(toml)
+        # Relative to the checkout, normalised, and joined to it only when asked.
+        @test cfg.rust.dependency == "upstream" && cfg.rust.manifest == "crates/core/Cargo.toml"
+        root = RepliBuild.DependencyResolver.checkout_root(cfg, "upstream")
+        @test RB.manifest_path(cfg) == replace(joinpath(root, "crates", "core", "Cargo.toml"), '\\' => '/')
+        @test occursin(".replibuild_cache", RB.manifest_path(cfg))
+        located = RB._located(cfg)
+        @test located.manifest == RB.manifest_path(cfg) && isempty(located.dependency) &&
+              located.target_dir == cfg.rust.target_dir
+        # The default manifest is the checkout's own.
+        plain = RCM.load_config(rust_project(joinpath(dir, "plain"), "[rust]\ndependency = \"upstream\"\n\n" * git_dep))
+        @test plain.rust.manifest == "Cargo.toml"
+        # Without a dependency the manifest is where the project says, as before.
+        own = RCM.load_config(rust_project(joinpath(dir, "own"), "[rust]\nmanifest = \"crate/Cargo.toml\"\n"))
+        @test RB.manifest_path(own) == own.rust.manifest && isabspath(own.rust.manifest)
+
+        # Saved as written: relative to the checkout, never a machine path.
+        RCM.save_config(cfg)
+        saved = TOML.parsefile(toml)
+        @test saved["rust"]["dependency"] == "upstream" && saved["rust"]["manifest"] == "crates/core/Cargo.toml"
+        @test RCM.load_config(toml).rust.manifest == "crates/core/Cargo.toml"
+
+        load(body) = rust_error(() -> RCM.load_config(rust_project(joinpath(dir, "bad"), body)))
+        @test occursin("names no [dependencies] entry", load("[rust]\ndependency = \"nowhere\"\n\n" * git_dep))
+        @test occursin("upstream", load("[rust]\ndependency = \"nowhere\"\n\n" * git_dep))
+        @test occursin("no [dependencies] section", load("[rust]\ndependency = \"upstream\"\n"))
+        @test occursin("must be relative to the checkout",
+                       load("[rust]\ndependency = \"upstream\"\nmanifest = \"/abs/Cargo.toml\"\n\n" * git_dep))
+        @test occursin("leaves the checkout",
+                       load("[rust]\ndependency = \"upstream\"\nmanifest = \"../Cargo.toml\"\n\n" * git_dep))
+        @test occursin("no source tree",
+                       load("[rust]\ndependency = \"sys\"\n\n[dependencies.sys]\ntype = \"system\"\n"))
+    end
+end
+
 @testset "[rust]: wrap says the generator is not built" begin
     mktempdir() do dir
         toml = rust_project(dir, "[rust]\n")
@@ -125,49 +170,106 @@ end
     end
 end
 
+@testset "cargo: the generated root crate" begin
+    rc(; features = String[], default_features = true) =
+        RCM.RustConfig("/p/crate/Cargo.toml", "", "", 0, features, default_features, "/p/build/rust/target")
+    crate = RB.Crate("rb-fix", "rb_fix", "/p/up/crate/Cargo.toml", "/p/up")
+    @test RB.root_name(crate) == "rb_fix_rb"
+    @test RB.root_dir(rc()) == "/p/build/rust/root"         # beside cargo's target directory, never in the crate
+    files = RB.root_files(rc(), crate)
+    @test sort!(collect(keys(files))) == ["Cargo.toml", "lib.rs"]
+    manifest = TOML.parse(files["Cargo.toml"])
+    @test manifest["package"]["name"] == "rb_fix_rb" && manifest["lib"]["crate-type"] == ["dylib"]
+    @test manifest["lib"]["path"] == "lib.rs"
+    # The crate is a path dependency, under its PACKAGE name, from its own directory.
+    @test manifest["dependencies"] == Dict("rb-fix" => Dict("path" => "/p/up/crate"))
+    # Its own workspace: a workspace in a directory above does not claim it.
+    @test manifest["workspace"] == Dict()
+    # One line makes the crate part of the library, under its CRATE name.
+    @test occursin("\nextern crate rb_fix;\n", files["lib.rs"])
+    @test count(l -> !startswith(l, "//") && !isempty(strip(l)), split(files["lib.rs"], '\n')) == 1
+    feat = TOML.parse(RB.root_files(rc(; features = ["a", "b"], default_features = false), crate)["Cargo.toml"])
+    @test feat["dependencies"]["rb-fix"] == Dict("path" => "/p/up/crate", "features" => ["a", "b"], "default-features" => false)
+    # The same inputs give the same text: a rewrite that changes nothing must not make cargo rebuild.
+    @test RB.root_files(rc(), crate) == files
+
+    mktempdir() do dir
+        up = joinpath(dir, "up"); mkpath(up)
+        r = RCM.RustConfig(joinpath(up, "Cargo.toml"), "", "", 0, String[], true, joinpath(dir, "build", "rust", "target"))
+        c = RB.Crate("rb-fix", "rb_fix", joinpath(up, "Cargo.toml"), up)
+        root = RB._write_root(r, c)
+        @test root == RB.root_dir(r) && isfile(joinpath(root, "Cargo.toml")) && isfile(joinpath(root, "lib.rs"))
+        @test !isfile(joinpath(root, "Cargo.lock"))            # the crate has none to start from
+        stamp = mtime(joinpath(root, "Cargo.toml"))
+        sleep(0.05)
+        RB._write_root(r, c)
+        @test mtime(joinpath(root, "Cargo.toml")) == stamp     # unchanged text is not rewritten
+        # The crate's lock file pins its dependencies: the root starts from a
+        # copy, and takes a new copy when the crate's changes, not otherwise.
+        write(joinpath(up, "Cargo.lock"), "version = 3\n")
+        RB._write_root(r, c)
+        @test read(joinpath(root, "Cargo.lock"), String) == "version = 3\n"
+        write(joinpath(root, "Cargo.lock"), "version = 3\n# cargo added the root package\n")
+        RB._write_root(r, c)
+        @test occursin("cargo added", read(joinpath(root, "Cargo.lock"), String))
+        write(joinpath(up, "Cargo.lock"), "version = 4\n")
+        RB._write_root(r, c)
+        @test read(joinpath(root, "Cargo.lock"), String) == "version = 4\n"
+        @test readdir(up) == ["Cargo.lock"]                    # nothing was written into the crate's tree
+    end
+end
+
 @testset "cargo: the command line" begin
-    rc(opt; package = "", features = String[], default_features = true) =
-        RCM.RustConfig("/p/crate/Cargo.toml", package, opt, features, default_features, "/p/build/rust/target")
+    rc(opt) = RCM.RustConfig("/p/crate/Cargo.toml", "", "", opt, String[], true, "/p/build/rust/target")
     crate = RB.Crate("rb-fix", "rb_fix", "/p/crate/Cargo.toml", "/p/crate")
-    args = RB.cargo_args(rc(0), crate; locked = true, windows = false)
+    args = RB.cargo_args(rc(0), crate; windows = false)
     @test args[1] == "rustc"
     config(args) = [args[i+1] for i in eachindex(args) if args[i] == "--config"]
-    for needed in (["--manifest-path", "/p/crate/Cargo.toml"], ["--package", "rb-fix"], ["--crate-type", "dylib"],
-                   ["--target-dir", "/p/build/rust/target"])
+    # cargo builds the ROOT crate, into the build directory.
+    for needed in (["--manifest-path", "/p/build/rust/root/Cargo.toml"], ["--target-dir", "/p/build/rust/target"])
         i = findfirst(==(needed[1]), args)
         @test i !== nothing && args[i+1] == needed[2]
     end
-    @test "--lib" in args && "--locked" in args && "--message-format=json-render-diagnostics" in args
-    @test !("--features" in args) && !("--no-default-features" in args)
-    # The profile is stated whole: a debug build at 0, with one IR file.
+    @test "--lib" in args && "--message-format=json-render-diagnostics" in args
+    # What the root crate's own manifest says is not said again.
+    @test !("--crate-type" in args) && !("--package" in args) && !("--features" in args) && !("--locked" in args)
+    # The profile is stated whole: a debug build at 0, with one IR file per crate.
     @test "profile.dev.opt-level=0" in config(args) && "profile.dev.debug=2" in config(args)
     @test "profile.dev.codegen-units=1" in config(args) && "profile.dev.panic=\"unwind\"" in config(args)
     @test "profile.dev.incremental=false" in config(args)
     @test "profile.dev.debug-assertions=true" in config(args) && "profile.dev.overflow-checks=true" in config(args)
-    # What reaches rustc for the crate alone comes after `--`.
+    # After `--`: the root crate's link, which is the library's.
     after = args[findfirst(==("--"), args)+1:end]
-    @test after[1] == "--emit=llvm-ir,link"
-    @test "symbol-mangling-version=v0" in after
-    @test "link-arg=-Wl,-Bsymbolic" in after                      # ELF: the library binds itself
-    @test !any(a -> occursin("no-insert-timestamp", a), after)
-    @test all(a -> a in ("-C",) || !startswith(a, "-C"), after)   # each `-C` has its own value
+    @test after == ["-C", "link-arg=-Wl,-Bsymbolic"]              # ELF: the library binds itself
 
     # Above opt-level 0: a release build that keeps incremental on, which is
     # what keeps a small `pub fn` its symbol.
-    args3 = RB.cargo_args(rc(3), crate; locked = false, windows = false)
+    args3 = RB.cargo_args(rc(3), crate; windows = false)
     @test "profile.dev.opt-level=3" in config(args3) && "profile.dev.incremental=true" in config(args3)
     @test "profile.dev.debug-assertions=false" in config(args3) && "profile.dev.overflow-checks=false" in config(args3)
-    @test "profile.dev.debug=2" in config(args3) && !("--locked" in args3)
+    @test "profile.dev.debug=2" in config(args3)
 
     # PE: no self-binding flag (a DLL never imports its own symbols), and no clock in the header.
-    pe = RB.cargo_args(rc(0), crate; locked = false, windows = true)
-    pe_after = pe[findfirst(==("--"), pe)+1:end]
-    @test "link-arg=-Wl,--no-insert-timestamp" in pe_after && !("link-arg=-Wl,-Bsymbolic" in pe_after)
+    pe = RB.cargo_args(rc(0), crate; windows = true)
+    @test pe[findfirst(==("--"), pe)+1:end] == ["-C", "link-arg=-Wl,--no-insert-timestamp"]
+end
 
-    feat = RB.cargo_args(rc(0; features = ["a", "b"], default_features = false), crate; locked = false, windows = false)
-    @test feat[findfirst(==("--features"), feat)+1] == "a,b" && "--no-default-features" in feat
-    # Flags for cargo come before `--`.
-    @test findfirst(==("--features"), feat) < findfirst(==("--"), feat)
+@testset "cargo: the flags every rustc of the build gets" begin
+    ours = ["--emit=llvm-ir,link", "-Csymbol-mangling-version=v0", "--cap-lints=warn"]
+    @test RB.rustflags(; base = Dict{String,String}()) == ours
+    # The user's own flags stay, in front; either spelling of them.
+    @test RB.rustflags(; base = Dict("RUSTFLAGS" => "-C target-cpu=native  -g")) == vcat(["-C", "target-cpu=native", "-g"], ours)
+    @test RB.rustflags(; base = Dict("CARGO_ENCODED_RUSTFLAGS" => "-Clink-arg=-fuse-ld=lld\x1f--cfg\x1ffoo=\"a b\"",
+                                     "RUSTFLAGS" => "ignored")) ==
+          vcat(["-Clink-arg=-fuse-ld=lld", "--cfg", "foo=\"a b\""], ours)
+    # They reach cargo as the one variable it reads before any configuration file.
+    tc = RB.Toolchain("cargo", "rustc", "1.0.0", "x86_64-unknown-linux-gnu", "20.0.0", "id")
+    cmd = withenv("RUSTFLAGS" => "-g", "CARGO_ENCODED_RUSTFLAGS" => nothing) do
+        RB._cargo(tc, ["metadata"], tempdir())
+    end
+    env = Dict(split(e, '='; limit = 2)[1] => split(e, '='; limit = 2)[2] for e in cmd.env)
+    @test split(env["CARGO_ENCODED_RUSTFLAGS"], '\x1f') == vcat(["-g"], ours)
+    @test !haskey(env, "RUSTFLAGS") && env["CARGO_TERM_COLOR"] == "never"
 end
 
 @testset "cargo: which crate" begin
@@ -175,7 +277,7 @@ end
     pkg(name, manifest, targets) = Dict{String,Any}("name" => name, "manifest_path" => manifest, "targets" => targets)
     lib(name) = Dict{String,Any}("name" => name, "kind" => ["lib"], "crate_types" => ["lib"])
     bin(name) = Dict{String,Any}("name" => name, "kind" => ["bin"], "crate_types" => ["bin"])
-    rc(manifest; package = "") = RCM.RustConfig(manifest, package, 0, String[], true, "/w/build/rust/target")
+    rc(manifest; package = "") = RCM.RustConfig(manifest, "", package, 0, String[], true, "/w/build/rust/target")
 
     one = metadata([pkg("rb-fix", "/w/Cargo.toml", [bin("tool"), lib("rb_fix")])])
     c = RB.select_crate(one, rc("/w/Cargo.toml"))
@@ -198,28 +300,50 @@ end
     proc = metadata([pkg("mac", "/w/Cargo.toml", [Dict{String,Any}("name" => "mac", "kind" => ["proc-macro"],
                                                                    "crate_types" => ["proc-macro"])])])
     @test occursin("no library target", rust_error(() -> RB.select_crate(proc, rc("/w/Cargo.toml"))))
+    # A library another Rust crate cannot depend on: the root crate has nothing to link.
+    c_only = metadata([pkg("capi", "/w/Cargo.toml", [Dict{String,Any}("name" => "capi", "kind" => ["cdylib"],
+                                                                      "crate_types" => ["cdylib"])])])
+    msg = rust_error(() -> RB.select_crate(c_only, rc("/w/Cargo.toml")))
+    @test occursin("only as a C library", msg) && occursin("`lib` or `rlib`", msg)
+    both = metadata([pkg("capi", "/w/Cargo.toml", [Dict{String,Any}("name" => "capi", "kind" => ["cdylib", "rlib"],
+                                                                    "crate_types" => ["cdylib", "rlib"])])])
+    @test RB.select_crate(both, rc("/w/Cargo.toml")).name == "capi"
 end
 
-@testset "cargo: which file is the library" begin
-    crate = RB.Crate("rb-fix", "rb_fix", "/w/Cargo.toml", "/w")
-    so = "/t/debug/librb_fix." * Libdl.dlext
-    artifact(name, types, files; fresh = false) =
-        "{\"reason\":\"compiler-artifact\",\"target\":{\"name\":\"$name\",\"crate_types\":$(repr(types))," *
-        "\"kind\":$(repr(types))},\"filenames\":$(repr(files)),\"fresh\":$fresh}"
-    messages = join([
-        "warning: a line that is not JSON",
-        "{\"reason\":\"compiler-message\",\"message\":{\"rendered\":\"x\"}}",
-        artifact("dep", ["lib"], ["/t/debug/deps/libdep.rlib"]),
-        artifact("rb_fix", ["dylib"], ["/t/debug/librb_fix.rlib", so]; fresh = true),
-        "{\"reason\":\"build-finished\",\"success\":true}"], "\n")
-    a = RB.find_artifact(messages, crate)
-    @test a.path == so && a.fresh
-    @test !RB.find_artifact(replace(messages, "\"fresh\":true" => "\"fresh\":false"), crate).fresh
-    # The crate built as something else is not its dynamic library.
-    wrong = join([artifact("rb_fix", ["rlib"], ["/t/debug/librb_fix.rlib"])], "\n")
-    msg = rust_error(() -> RB.find_artifact(wrong, crate))
-    @test occursin("no dynamic library", msg) && occursin("rb_fix", msg)
-    @test occursin("no artifact at all", rust_error(() -> RB.find_artifact("", crate)))
+@testset "cargo: what was built" begin
+    mktempdir() do dir
+        manifest = joinpath(dir, "crate", "Cargo.toml")
+        mkpath(dirname(manifest)); write(manifest, "")
+        other = joinpath(dir, "vendor", "rb_fix", "Cargo.toml")       # another crate of the same name
+        mkpath(dirname(other)); write(other, "")
+        crate = RB.Crate("rb-fix", "rb_fix", manifest, dirname(manifest))
+        so = "/t/debug/librb_fix_rb." * Libdl.dlext
+        artifact(name, types, files, mpath; fresh = false) =
+            "{\"reason\":\"compiler-artifact\",\"manifest_path\":$(repr(mpath)),\"target\":{\"name\":\"$name\"," *
+            "\"crate_types\":$(repr(types)),\"kind\":$(repr(types))},\"filenames\":$(repr(files)),\"fresh\":$fresh}"
+        messages(; root_fresh = true, crate_fresh = true) = join([
+            "warning: a line that is not JSON",
+            "{\"reason\":\"compiler-message\",\"message\":{\"rendered\":\"x\"}}",
+            artifact("rb_fix", ["lib"], ["/t/debug/deps/librb_fix-0000aaaa.rlib"], other; fresh = true),
+            artifact("rb_fix", ["lib"], ["/t/debug/deps/librb_fix-3cb2bb3e.rlib", "/t/debug/deps/librb_fix-3cb2bb3e.rmeta"],
+                     manifest; fresh = crate_fresh),
+            artifact("rb_fix_rb", ["dylib"], [so], "/t/root/Cargo.toml"; fresh = root_fresh),
+            "{\"reason\":\"build-finished\",\"success\":true}"], "\n")
+        a = RB.find_artifacts(messages(), crate)
+        @test a.library == so && a.fresh
+        # The IR is beside the crate's rlib, under its name: THIS crate's, told from its namesake by manifest.
+        @test a.ir == "/t/debug/deps/rb_fix-3cb2bb3e.ll"
+        # Either one recompiled is "built".
+        @test !RB.find_artifacts(messages(; root_fresh = false), crate).fresh
+        @test !RB.find_artifacts(messages(; crate_fresh = false), crate).fresh
+        # No library for the root, or none for the crate, is an error that says what cargo did report.
+        no_root = join(filter(l -> !occursin("rb_fix_rb", l), split(messages(), '\n')), "\n")
+        msg = rust_error(() -> RB.find_artifacts(no_root, crate))
+        @test occursin("no dynamic library for the root crate `rb_fix_rb`", msg) && occursin("rb_fix (lib)", msg)
+        no_crate = join(filter(l -> !occursin("3cb2bb3e", l), split(messages(), '\n')), "\n")
+        @test occursin("no library for the crate `rb_fix`", rust_error(() -> RB.find_artifacts(no_crate, crate)))
+        @test occursin("no artifact at all", rust_error(() -> RB.find_artifacts("", crate)))
+    end
 end
 
 @testset "cargo: the tools are the user's, or the ones named" begin

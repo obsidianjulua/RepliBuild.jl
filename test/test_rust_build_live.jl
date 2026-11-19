@@ -48,6 +48,10 @@ function _rbl_build()
     return (lib, out)
 end
 
+# Every file under `dir` with its content's hash: what a build must leave alone.
+_rbl_tree(dir) = sort!([relpath(joinpath(r, f), dir) => bytes2hex(open(RepliBuild.SHA.sha256, joinpath(r, f)))
+                        for (r, _, fs) in walkdir(dir) for f in fs])
+
 _rbl_error(f) = try
     f()
     ""
@@ -63,6 +67,7 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         rm(joinpath(_RBL_DIR, d); recursive = true, force = true)
     end
     _rbl_write(0)
+    crate_tree = _rbl_tree(joinpath(_RBL_DIR, "crate"))
     (lib, out) = _rbl_build()
     meta_path = joinpath(dirname(lib), "compilation_metadata.json")
     key_path = joinpath(dirname(lib), "rust_metadata.key")
@@ -76,12 +81,19 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         @test md["language"] == "rust" && md["metadata_version"] == RepliBuild.RustBuild.METADATA_VERSION
         # The package is `rb-fix`; the crate, and every name derived from it, `rb_fix`.
         @test md["crate"]["name"] == "rb_fix" && md["crate"]["package"] == "rb-fix"
+        # The library is the generated root crate's, which carries the crate.
+        @test md["crate"]["root"] == "rb_fix_rb"
         @test !isempty(md["crate"]["disambiguator"])
         @test md["library"] == basename(lib)
         @test md["library_sha"] == bytes2hex(open(RepliBuild.SHA.sha256, lib))
         @test md["build"]["opt_level"] == 0 && !isempty(md["toolchain"]["rustc"]) && !isempty(md["toolchain"]["llvm"])
-        # cargo's target directory is under the build directory, not in the crate.
-        @test isdir(joinpath(_RBL_DIR, "build", "rust", "target")) && !isdir(joinpath(_RBL_DIR, "crate", "target"))
+        # Everything cargo writes is under the build directory: the root crate,
+        # its lock file, the target directory. The crate's own tree is as it was.
+        @test isdir(joinpath(_RBL_DIR, "build", "rust", "target"))
+        root = joinpath(_RBL_DIR, "build", "rust", "root")
+        @test isfile(joinpath(root, "Cargo.toml")) && isfile(joinpath(root, "lib.rs")) && isfile(joinpath(root, "Cargo.lock"))
+        @test sort!(readdir(joinpath(_RBL_DIR, "crate"))) == ["Cargo.lock", "Cargo.toml", "src"]
+        @test crate_tree == _rbl_tree(joinpath(_RBL_DIR, "crate"))
         @test isfile(key_path)
     end
 
@@ -207,6 +219,44 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         @test occursin("[rust] project", _rbl_error(() -> RepliBuild.Wrapper.wrap_library(cfg, lib)))
         msg = _rbl_error(() -> RepliBuild.wrap(_RBL_TOML))
         @test occursin("not built yet", msg) && occursin("compilation_metadata.json", msg)
+    end
+
+    @testset "a no_std crate that denies its own warnings, from a dependency" begin
+        # The two things the first real library (libm) did, and the Hub's
+        # shape: the crate is a [dependencies] entry's tree, not the project's.
+        mktempdir() do dir
+            cp(joinpath(_RBL_DIR, "nostd"), joinpath(dir, "upstream"))
+            before = _rbl_tree(joinpath(dir, "upstream"))
+            toml = joinpath(dir, "replibuild.toml")
+            write(toml, """
+                [project]
+                name = "nostd_demo"
+
+                [dependencies.upstream]
+                type = "local"
+                path = "upstream"
+
+                [rust]
+                dependency = "upstream"
+                opt_level = 3
+                """)
+            lib2 = withenv("REPLIBUILD_JULIA_ENV" => "none") do
+                redirect_stdout(() -> RepliBuild.build(toml), devnull)
+            end
+            md2 = RepliBuild._read_json(joinpath(dirname(lib2), "compilation_metadata.json"))
+            f2 = Dict(f["path"] => f for f in md2["functions"])
+            @test md2["crate"]["name"] == "rb_nostd" && md2["crate"]["root"] == "rb_nostd_rb"
+            @test sort!(collect(keys(f2))) == ["rb_nostd::split", "rb_nostd::sum", "rb_nostd::triple"]
+            @test all(f -> f["refusal"] === nothing, md2["functions"])
+            @test f2["rb_nostd::split"]["return"]["pass"] == "pair" && f2["rb_nostd::split"]["ir"]["return"]["type"] == "{ double, i32 }"
+            # The dependency's tree is as it was: no lock file, no target directory.
+            @test _rbl_tree(joinpath(dir, "upstream")) == before
+            @test isfile(joinpath(dir, "build", "rust", "root", "Cargo.lock"))
+            h = Libdl.dlopen(lib2)
+            @test ccall(Libdl.dlsym(h, f2["rb_nostd::triple"]["symbol"]), Cint, (Cint,), 14) == 42
+            xs = [1.0, 2.0, 3.5]
+            @test ccall(Libdl.dlsym(h, f2["rb_nostd::sum"]["symbol"]), Cdouble, (Ptr{Cdouble}, Csize_t), xs, 3) == 6.5
+        end
     end
 
     @testset "what cargo cannot build is cargo's error, in full" begin

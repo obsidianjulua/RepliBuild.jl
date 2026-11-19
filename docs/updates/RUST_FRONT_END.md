@@ -1405,10 +1405,20 @@ of §15's walk now exists in `src/`.
    often no DIE. Left unread it is a function missing from the surface with
    no word said. `RustABI.aliases` reads it; the row carries `alias_of`, and
    the target's types when it has no DIE of its own.
-5. **Steps 1 to 4 of §15's walk are built** (§19). `RepliBuild.build` on a
+5. **Steps 1 to 5 of §15's walk are built** (§19). `RepliBuild.build` on a
    `[rust]` project writes the library and a `compilation_metadata.json`
-   that says, for every function of the crate, how it is called. `wrap` is
-   not built: steps 5 to 7.
+   that says, for every function of the crate, how it is called; the dialect
+   has the call form of §13.3 (`jlcs.native_call`, a new op), and
+   `RustThunks` generates and JITs a thunk per function from the metadata.
+   `wrap` is not built: steps 6 and 7.
+6. **A real crate goes through it: libm** (§19.1), from its pinned upstream
+   commit. 114 functions, every one callable from Julia through a generated
+   thunk, ten of them returning two values in two registers. It took two
+   changes to the build, both of which any real crate would have needed:
+   the library is a generated ROOT crate with the wrapped crate as its
+   dependency (libm is `#![no_std]` and cannot be the end of a link), and
+   lints are capped (libm denies its own warnings, and a newer rustc has
+   newer ones).
 
 ## 18. Linux measurements
 
@@ -1442,13 +1452,32 @@ of §15's walk now exists in `src/`.
 
 | §15 step | Where | What it does |
 |---|---|---|
-| 1. The build | `Builder/RustBuild.jl`, `[rust]` in `ConfigurationManager` | cargo and rustc build and link; the flags of §12.6, stated as a whole `dev` profile so the crate's own `[profile]` does not decide; the metadata key |
-| 2. Artifacts and surface | `RustBuild.find_artifact`, `RustABI.surface`, `RustABI.v0_root` | the library from cargo's messages; exported ∩ defined in the crate's IR ∩ rooted in the crate by its v0 path (or unmangled) |
+| 1. The build | `Builder/RustBuild.jl`, `[rust]` in `ConfigurationManager` | writes a root crate (`extern crate <name>;`, a `dylib`, the wrapped crate a path dependency) under `[paths] build`; cargo and rustc build and link it; the flags of §12.6, the profile stated whole; `[rust] dependency` takes the crate from a pinned `[dependencies]` checkout; the metadata key |
+| 2. Artifacts and surface | `RustBuild.find_artifacts`, `RustABI.surface`, `RustABI.v0_root` | the library and the crate's IR file from cargo's messages; exported ∩ defined in the crate's IR ∩ rooted in the crate by its v0 path (or unmangled) |
 | 3. Define lines and the join | `RustABI.definitions`, `aliases`, `join_function` | each parameter's `pass` (`ignore`, `direct`, `pair`, `cast`, `indirect`) and the IR parameters it takes; anything that does not match in exactly one way is refused with its reason |
 | 4. The Rust DWARF pass | `Builder/RustDWARF.jl` | scoped type keys, variant parts with the discriminant and each variant's value, pointer kinds, fat pointers, methods by nesting; only what the surface reaches |
+| 5. The dialect | `jlcs.native_call` (`src/mlir`), `IRGen/RustThunks.jl` | the op lowers to exactly the call it states, with its parameter attributes; one thunk per function, `void thunk(void **args, void *ret)`; `load` JITs them, `call_raw` calls one |
 
 Departures from Parts I and II, each measured:
 
+- **The root crate comes first, not last.** Part I §6.1 and §7 make the
+  generated crate Stage 3, for generics, drops and panics. A `#![no_std]`
+  crate needs it to build at all: built as the `dylib` itself, libm fails
+  with "`#[panic_handler]` function required". Through a root crate the
+  fixture exports the same functions (unmangled ones included) and keeps
+  them when optimized (39 of 39 with incremental on, 12 without). It also
+  means nothing is written into the crate's tree: the lock file is the
+  root's, seeded from the crate's when it has one.
+- **The flags reach every crate through `CARGO_ENCODED_RUSTFLAGS`**, since
+  what follows `--` on a `cargo rustc` line reaches the root alone and the
+  wrapped crate is now a dependency. cargo reads that variable before any
+  configuration file, so the machine's cargo configuration does not decide
+  what is built; the user's own `RUSTFLAGS` are kept in front.
+- **`--cap-lints=warn`.** A crate with `#![deny(warnings)]` stops building
+  when rustc grows a warning (libm 0.2.8 under rustc 1.97: 111 errors).
+  cargo caps lints for a registry dependency for this reason and not for a
+  path one. Given twice, rustc takes the flag without complaint, so it can
+  go to every crate.
 - **The join does not use §4.2's rule as written** ("2 if the DWARF shape is
   two scalars"). rustc's own rule for when a type is two scalars is not
   DWARF's to state (an array of two is not; a struct of two is). So each
@@ -1465,21 +1494,57 @@ Departures from Parts I and II, each measured:
   that shape is not in the join yet.
 - **`#[track_caller]`** passes a caller location DWARF does not list. Such a
   function is refused, and the reason names the attribute.
+- **A new op, not an attribute** (§13.3, decision 3): `jlcs.native_call`.
+  `ffe_call` and `try_call` keep one derivation of the C rule and never see
+  a Rust call; the invariants test holds that the C and C++ generators
+  never emit the new op. Its `arg_attrs` are dictionaries under the LLVM
+  dialect's own names, copied to the call site and the declaration as they
+  are, which is §C.2's transcriber with nothing left to translate.
+- **A pair's two halves are stored where DWARF puts them**, not as the IR
+  struct: the thunk extracts each scalar and stores it at its leaf's offset
+  in the return type.
+
+### 19.1 A real crate: libm
+
+`rust-lang/libm` at `libm-v0.2.8` (commit `721a5edc`), the Rust port of
+MUSL's math library: `#![no_std]`, `#![deny(warnings)]`, no dependencies,
+its functions ordinary `pub fn`s in private modules. The recipe is a
+`[dependencies]` git entry and `[rust] dependency = "libm"`, `opt_level = 3`.
+
+| | |
+|---|---|
+| Functions | 114, all callable, none refused or skipped |
+| Types | 7 (`f64`, `f32`, `i32`, and the four tuples returned) |
+| `nounwind` | all 114: optimized, the compiler proved none can panic |
+| Returned as a pair | 10: `frexp`, `modf`, `sincos`, `remquo`, `lgamma_r` and their `f32` twins (`{ double, i32 }`, `{ double, double }`, …) |
+| Checks | 1,150, all passing: every function called through its thunk; 28 one-argument and 10 two-argument functions against Julia's over a grid, `f64` and `f32`, to 4 units in the last place; the pairs against `frexp`, `modf`, `sincos`; Bessel, gamma and error functions at known values |
+| `ccall` against the thunk | the 104 scalar-only functions give the same bits both ways |
+| The upstream checkout | unchanged after the build |
+
+The one thing it found in the library itself: this release's `sincosf` is 6
+and 12 units in the last place from its own `sinf` and `cosf` at 1.5 and
+3.25. The thunk returns what the crate computes.
+
+Not part of the repository's tests (it clones from the network): the recipe
+and its check are a Hub package's files.
 
 ## 20. The walk from here
 
-5. **The dialect**: the call form of §13.3 and the `void(void**, void*)`
-   thunk. Needs an `ABI_VERSION` bump and a republished artifact.
 6. **The catching frame, before the generator.** At opt-level 0 no function
    is `nounwind`, so every call without it is one panic from ending Julia.
-   It is the first piece of §15's step 7, moved up: a generated crate with
-   `__rb_catch` alone.
-7. **GeneratorRust**: Julia types and names from the metadata, `ccall`
-   where every IR type is a scalar or a pointer, the thunk otherwise.
+   It goes in the root crate, which now exists: `__rb_catch` (Part I §6.3),
+   measured on Linux through a JIT'd thunk in §17.
+7. **GeneratorRust** (`wrap`): Julia types and names from the metadata,
+   `ccall` where every IR type is a scalar or a pointer, the thunk otherwise.
 8. **The rest of the generated crate**: drop functions, declared
-   instantiations, `dyn` forwarders.
+   instantiations, `dyn` forwarders, and forwarders for `#[inline]`
+   functions, which have no symbol at any optimization level.
 
-Not built, and not on that list: a `[rust]` crate from a `[dependencies]`
-checkout (the Hub's shape); `discover` on a Cargo project; the environment
-doctor reporting cargo and rustc; statics; a C-ABI record argument; Windows
-and AArch64 runs of what is built here.
+Before any of this reaches a machine without a local libJLCS: the dialect's
+ABI version is 2, and the published artifact is version 1
+(`deps/jlcs_jll/README.md` has the steps).
+
+Not built, and not on that list: `discover` on a Cargo project; the
+environment doctor reporting cargo and rustc; statics; a C-ABI record
+argument; AOT thunks for Rust; Windows and AArch64 runs of what is built
+here.

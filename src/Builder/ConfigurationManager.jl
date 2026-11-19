@@ -325,8 +325,14 @@ and reads back what it reads from a clang build: the library's dynamic symbol
 table, its DWARF, and the `define` lines of the IR rustc emitted. The crate's
 source is never edited and needs no `extern "C"`.
 
-- `manifest`: the crate's `Cargo.toml`. Absolute and `/`-separated; relative
-  in the TOML, against the project root.
+- `manifest`: the crate's `Cargo.toml`. With no `dependency`, absolute and
+  `/`-separated; relative in the TOML, against the project root. With a
+  `dependency`, the file inside that dependency's checkout, relative and
+  `/`-separated; `RustBuild.manifest_path` joins it to the checkout.
+- `dependency`: the `[dependencies.<name>]` entry whose checkout holds the
+  crate (a git, archive or local dependency), or `""` when the crate is in
+  the project. `build` resolves it, pinned by `commit` or `sha256`, before
+  cargo is asked anything. This is the shape of a Hub recipe.
 - `package`: the package to wrap, by its Cargo name, when the manifest is a
   workspace or has several packages; `""` is the manifest's own package.
 - `opt_level`: rustc's `opt-level` for the wrapped crate, 0 to 3. Above 0,
@@ -339,6 +345,7 @@ source is never edited and needs no `extern "C"`.
 """
 struct RustConfig
     manifest::String
+    dependency::String
     package::String
     opt_level::Int
     features::Vector{String}
@@ -429,7 +436,7 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
     (ingest_config !== nothing && graph_config !== nothing) &&
         error("$toml_path has both [ingest] and [graph]: ingest wraps one prebuilt library, " *
               "graph mode builds a CMake project's libraries. Keep one.")
-    rust_config = parse_rust_config(data, project_config.root, paths_config)
+    rust_config = parse_rust_config(data, project_config.root, paths_config, dependencies_config)
     if rust_config !== nothing
         (ingest_config !== nothing || graph_config !== nothing) &&
             error("$toml_path has [rust] beside [ingest] or [graph]: a Rust project is one Cargo " *
@@ -1288,47 +1295,68 @@ refusal names the key and the entry.
 """
 function _graph_dependency_source(dependency::AbstractString, source::AbstractString,
                                   deps::DependenciesConfig)::String
-    key = "[graph] dependency = $(repr(String(dependency)))"
+    return _checkout_relative(dependency, source, deps; section = "graph", key = "source",
+                              owner = "A graph's source", action = "configure", inside = "a directory")
+end
+
+"""
+    _checkout_relative(dependency, path, deps; section, key, owner, action, inside) -> String
+
+Check `[<section>] dependency` against the `[dependencies]` entries and spell
+`[<section>] <key>` as a path inside that dependency's checkout: relative,
+`/`-separated, `"."` for the checkout itself. An entry that does not exist or
+has no source tree, and a path that is absolute or leaves the checkout, are
+errors. `[graph]` and `[rust]` both take their source from a checkout this
+way; `owner`, `action` and `inside` are the words of the message.
+"""
+function _checkout_relative(dependency::AbstractString, source::AbstractString, deps::DependenciesConfig;
+                            section::String, key::String, owner::String, action::String,
+                            inside::String)::String
+    dkey = "[$section] dependency = $(repr(String(dependency)))"
     if !haskey(deps.items, dependency)
         known = sort!(collect(keys(deps.items)))
-        error(key * " names no [dependencies] entry" *
+        error(dkey * " names no [dependencies] entry" *
               (isempty(known) ? "; the TOML has no [dependencies] section." :
                                 "; the entries: $(join(known, ", ")).") *
-              " A graph's source is a git, archive or local dependency ([dependencies.$dependency]).")
+              " $owner is a git, archive or local dependency ([dependencies.$dependency]).")
     end
     dep = deps.items[dependency]
     dep.type in GRAPH_DEPENDENCY_TYPES ||
-        error(key * " names [dependencies.$dependency], type = $(repr(dep.type)), which has no source " *
-              "tree to configure. A graph's source is a dependency of type " *
+        error(dkey * " names [dependencies.$dependency], type = $(repr(dep.type)), which has no source " *
+              "tree to $action. $owner is a dependency of type " *
               join(repr.(GRAPH_DEPENDENCY_TYPES), ", ") * ".")
     # A rooted path too: on Windows `isabspath("/abs")` is false, and `/abs`
     # joined to the checkout would still not be a directory inside it.
     (isabspath(source) || startswith(source, ('/', '\\'))) &&
-        error("[graph] source = $(repr(String(source))) must be relative to the checkout of " *
-              "[dependencies.$dependency] when $key is set.")
+        error("[$section] $key = $(repr(String(source))) must be relative to the checkout of " *
+              "[dependencies.$dependency] when $dkey is set.")
     s = replace(normpath(String(source)), '\\' => '/')
     s = String(rstrip(s, '/'))
     isempty(s) && (s = ".")
     (s == ".." || startswith(s, "../")) &&
-        error("[graph] source = $(repr(String(source))) leaves the checkout of [dependencies.$dependency]; " *
-              "it must name a directory inside it.")
+        error("[$section] $key = $(repr(String(source))) leaves the checkout of [dependencies.$dependency]; " *
+              "it must name $inside inside it.")
     return s
 end
 
 "The keys a `[rust]` section may have."
-const RUST_KEYS = ("manifest", "package", "opt_level", "features", "default_features")
+const RUST_KEYS = ("manifest", "dependency", "package", "opt_level", "features", "default_features")
 
 """
-    parse_rust_config(data, root, paths) -> Union{Nothing,RustConfig}
+    parse_rust_config(data, root, paths, deps = parse_dependencies_config(data))
+        -> Union{Nothing,RustConfig}
 
 Parse the `[rust]` section; `nothing` when there is none. `manifest` resolves
-against the project `root`, as `[compile]` paths do, and cargo's target
-directory is `<[paths] build>/rust/target`.
+against the project `root`, as `[compile]` paths do, or, with `dependency`,
+stays relative to that dependency's checkout (`_checkout_relative`, as
+`[graph] source` does). cargo's target directory is
+`<[paths] build>/rust/target`.
 
 Strict, like `[graph]`: an unknown key or a value of the wrong type is an
 error naming it, rather than a setting that silently does nothing.
 """
-function parse_rust_config(data::Dict, root::AbstractString, paths::PathsConfig)::Union{Nothing,RustConfig}
+function parse_rust_config(data::Dict, root::AbstractString, paths::PathsConfig,
+                           deps::DependenciesConfig = parse_dependencies_config(data))::Union{Nothing,RustConfig}
     haskey(data, "rust") || return nothing
     r = data["rust"]
     r isa AbstractDict || error("[rust] must be a table, e.g.\n[rust]\nmanifest = \"Cargo.toml\"")
@@ -1352,7 +1380,11 @@ function parse_rust_config(data::Dict, root::AbstractString, paths::PathsConfig)
     default_features = get(r, "default_features", true)
     default_features isa Bool ||
         error("[rust] default_features must be true or false, got $(repr(default_features))")
-    return RustConfig(under_root(manifest), str("package", ""), Int(opt),
+    dependency = str("dependency", "")
+    manifest = isempty(dependency) ? under_root(manifest) :
+               _checkout_relative(dependency, manifest, deps; section = "rust", key = "manifest",
+                                  owner = "A crate's source", action = "build", inside = "a file")
+    return RustConfig(manifest, dependency, str("package", ""), Int(opt),
                       unique(String[String(x) for x in feats]), default_features,
                       under_root(joinpath(paths.build, "rust", "target")))
 end
@@ -1687,8 +1719,12 @@ function save_config(config::RepliBuildConfig)
     # [rust] — only emitted for a Rust project. `target_dir` is derived from
     # [paths], so it is not written.
     if config.rust !== nothing
-        rust_dict = Dict{String,Any}("manifest" => _portable_path(config.rust.manifest, root),
+        # With a dependency, `manifest` is already relative, to the checkout.
+        rust_dict = Dict{String,Any}("manifest" => isempty(config.rust.dependency) ?
+                                                       _portable_path(config.rust.manifest, root) :
+                                                       config.rust.manifest,
                                      "opt_level" => config.rust.opt_level)
+        isempty(config.rust.dependency) || (rust_dict["dependency"] = config.rust.dependency)
         isempty(config.rust.package) || (rust_dict["package"] = config.rust.package)
         isempty(config.rust.features) || (rust_dict["features"] = config.rust.features)
         config.rust.default_features || (rust_dict["default_features"] = false)

@@ -181,7 +181,8 @@ does not yet, so there is no generated Julia module for one today.
 
 | Key | Default | Meaning |
 |:----|:--------|:--------|
-| `manifest` | `"Cargo.toml"` | The crate's `Cargo.toml`, relative to the project root. |
+| `manifest` | `"Cargo.toml"` | The crate's `Cargo.toml`, relative to the project root. With `dependency`, relative to that dependency's source. |
+| `dependency` | | The `[dependencies]` entry whose source holds the crate. |
 | `package` | the manifest's own package | The package to wrap, by its Cargo name. Needed when the manifest is a workspace. |
 | `opt_level` | `0` | The optimization level the crate is compiled at, `0` to `3`. |
 | `features` | none | Cargo features to turn on: `["simd"]`. |

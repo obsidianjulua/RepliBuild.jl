@@ -8,15 +8,37 @@
 # and rustc compile AND link, and RepliBuild sets what it needs on their
 # command line and reads back what it reads from a clang build.
 #
+# **The library is a generated root crate, and the crate is its dependency.**
+# `<[paths] build>/rust/root` holds a crate of one line, `extern crate <name>;`,
+# built as a `dylib`, with the wrapped crate as a path dependency. A Rust
+# `dylib` carries its dependencies and exports their public functions, so the
+# library is the crate's, and three things follow that building the crate
+# itself as the `dylib` does not give:
+#
+# - a `#![no_std]` crate (libm) builds: a library that is the end of a link
+#   needs a panic handler, which the root's `std` supplies;
+# - nothing is written into the crate's source tree, which is often a pinned
+#   checkout: the lock file is the root's;
+# - there is a place for the Rust RepliBuild has to supply itself (the frame
+#   that catches a panic, drop functions, generic instantiations), when that
+#   is built.
+#
 #   crate type `dylib`     every non-generic `pub fn` is exported; a `cdylib`
 #                          exports only `extern "C"` items
 #   debug info 2           every type and parameter is in the DWARF
-#   one codegen unit       one IR file, `<target>/…/deps/<crate>.ll`
+#   one codegen unit       one IR file per crate, `…/deps/<crate>-<hash>.ll`
 #   --emit=llvm-ir,link    the `define` lines, which say how each call is made
 #   v0 symbol names        the names say which crate an item belongs to
+#   --cap-lints=warn       the crate's own `#![deny(warnings)]` is its
+#                          author's, and a newer rustc has newer warnings;
+#                          cargo caps a registry dependency's the same way
 #   -Wl,-Bsymbolic (ELF)   the library binds its own symbols to itself, as
 #                          every library RepliBuild links does
 #   panic = unwind         `abort` would end the process on any panic
+#
+# The first four reach every crate of the build, through
+# `CARGO_ENCODED_RUSTFLAGS`: the wrapped crate is a dependency, and what
+# follows `--` on a `cargo rustc` line reaches the root alone.
 #
 # rustc's IR is read as text and never loaded into an LLVM: rustc carries its
 # own LLVM, which is not Julia's and need not be the system's.
@@ -40,12 +62,14 @@ module RustBuild
 
 using Dates
 using JSON: JSON
+using TOML
 import SHA
 import Libdl
 
 import ..ConfigurationManager
 import ..ConfigurationManager: RepliBuildConfig, RustConfig, get_output_path, get_library_name
 import ..BuildBridge
+import ..DependencyResolver
 import ..Compiler
 import ..LibDW
 import ..Tools
@@ -53,6 +77,27 @@ import ..RustDWARF
 import ..RustABI
 import ..PackageRegistry
 import .._parse_json
+
+"""
+    manifest_path(config) -> String
+
+The crate's `Cargo.toml`, absolute and `/`-separated: `[rust] manifest`
+itself, or, with `[rust] dependency`, `manifest` inside that dependency's
+checkout (`DependencyResolver.checkout_root`, which answers whether or not
+the checkout has been fetched). The one place the manifest is read from the
+config.
+"""
+function manifest_path(config::RepliBuildConfig)::String
+    rc = config.rust
+    isempty(rc.dependency) && return rc.manifest
+    root = DependencyResolver.checkout_root(config, rc.dependency)
+    return ConfigurationManager._graph_path(joinpath(root, rc.manifest))
+end
+
+# `[rust]` with its manifest where it is on this machine.
+_located(config::RepliBuildConfig) =
+    RustConfig(manifest_path(config), "", config.rust.package, config.rust.opt_level,
+               config.rust.features, config.rust.default_features, config.rust.target_dir)
 
 "The shape of a Rust project's `compilation_metadata.json`. Bump it with any change to what a row means."
 const METADATA_VERSION = "rust-1"
@@ -145,6 +190,9 @@ function _cargo(tc::Toolchain, args::Vector{String}, dir::AbstractString)::Cmd
     env = Dict{String,String}(String(k) => String(v) for (k, v) in ENV)
     env["CARGO_TERM_COLOR"] = "never"
     isempty(get(ENV, "REPLIBUILD_TOOL_RUSTC", "")) || (env["RUSTC"] = tc.rustc)
+    # One source of rustc flags, read before any configuration file (`rustflags`).
+    env["CARGO_ENCODED_RUSTFLAGS"] = join(rustflags(), '\x1f')
+    delete!(env, "RUSTFLAGS")
     return setenv(cmd, env)
 end
 
@@ -168,7 +216,9 @@ struct Crate
     workspace_root::String
 end
 
-const _LIBRARY_KINDS = ("lib", "rlib", "dylib", "cdylib", "staticlib")
+# What another crate can link: the root crate depends on the wrapped one.
+const _LIBRARY_KINDS = ("lib", "rlib", "dylib")
+const _ANY_LIBRARY_KINDS = ("lib", "rlib", "dylib", "cdylib", "staticlib")
 
 _same_file(a::AbstractString, b::AbstractString) =
     normpath(abspath(String(a))) == normpath(abspath(String(b))) ||
@@ -198,9 +248,16 @@ function select_crate(metadata::AbstractDict, rc::RustConfig)::Crate
         pkg = pkgs[i]
     end
     j = findfirst(t -> any(k -> k in _LIBRARY_KINDS, t["kind"]), pkg["targets"])
-    j === nothing && error("Cargo package $(repr(String(pkg["name"]))) has no library target " *
-                           "(its targets: $(join((String(t["name"]) * " " * string(t["kind"]) for t in pkg["targets"]), ", "))). " *
-                           "A binary crate has no API to wrap.")
+    if j === nothing
+        targets = join((String(t["name"]) * " " * string(t["kind"]) for t in pkg["targets"]), ", ")
+        any(t -> any(k -> k in _ANY_LIBRARY_KINDS, t["kind"]), pkg["targets"]) &&
+            error("Cargo package $(repr(String(pkg["name"]))) builds its library only as a C library " *
+                  "(its targets: $targets), which another Rust crate cannot depend on. RepliBuild builds " *
+                  "the crate as a dependency of a generated root crate, so it needs `lib` or `rlib` among " *
+                  "its `crate-type`s.")
+        error("Cargo package $(repr(String(pkg["name"]))) has no library target " *
+              "(its targets: $targets). A binary crate has no API to wrap.")
+    end
     return Crate(String(pkg["name"]), replace(String(pkg["targets"][j]["name"]), '-' => '_'),
                  String(pkg["manifest_path"]), String(metadata["workspace_root"]))
 end
@@ -208,7 +265,8 @@ end
 "`cargo metadata` for the manifest, resolved to the crate to wrap (`select_crate`)."
 function crate_info(rc::RustConfig, tc::Toolchain)::Crate
     isfile(rc.manifest) ||
-        error("[rust] manifest: $(rc.manifest) does not exist. It names the crate's Cargo.toml, relative to the project root.")
+        error("[rust] manifest: $(rc.manifest) does not exist. It names the crate's Cargo.toml, relative to " *
+              "the project root, or to the checkout of [rust] dependency.")
     args = ["metadata", "--format-version", "1", "--no-deps", "--manifest-path", rc.manifest]
     (out, err, code) = _capture(_cargo(tc, args, dirname(rc.manifest)))
     code == 0 || error("cargo metadata failed for $(rc.manifest) (exit $code):\n$(strip(err))")
@@ -219,20 +277,99 @@ end
 # The build
 # =============================================================================
 
-"""
-    cargo_args(rc, crate; locked, windows = Sys.iswindows()) -> Vector{String}
+"The generated root crate's name: the library cargo builds is `lib<this>.<ext>`."
+root_name(crate::Crate) = crate.name * "_rb"
 
-The `cargo rustc` command line for the crate (this file's header says why
-each part is there). The profile is `dev` with every setting that matters
-stated, so the crate's own `[profile]` tables and the user's cargo
-configuration do not decide what is built: at opt-level 0 it is a debug
-build, and above it a release build (no debug assertions, no overflow
-checks) that keeps its debug info and incremental compilation.
+"Where the generated root crate is: beside cargo's target directory, under `[paths] build`."
+root_dir(rc::RustConfig) = dirname(rc.target_dir) * "/root"
 
-Everything after `--` reaches rustc for the wrapped crate only; its
-dependencies build under the same profile without it.
 """
-function cargo_args(rc::RustConfig, crate::Crate; locked::Bool, windows::Bool = Sys.iswindows())::Vector{String}
+    root_files(rc, crate) -> Dict{String,String}
+
+The generated root crate, file name to text: a `Cargo.toml` that builds a
+`dylib` and depends on the wrapped crate by path, with the features `[rust]`
+asks for, and a `lib.rs` whose one line makes the crate part of the library.
+The empty `[workspace]` table keeps a workspace in a directory above from
+claiming it.
+"""
+function root_files(rc::RustConfig, crate::Crate)::Dict{String,String}
+    dep = Dict{String,Any}("path" => dirname(crate.manifest))
+    rc.default_features || (dep["default-features"] = false)
+    isempty(rc.features) || (dep["features"] = rc.features)
+    manifest = Dict{String,Any}(
+        "package" => Dict{String,Any}("name" => root_name(crate), "version" => "0.0.0",
+                                      "edition" => "2021", "publish" => false),
+        "lib" => Dict{String,Any}("crate-type" => ["dylib"], "path" => "lib.rs"),
+        "dependencies" => Dict{String,Any}(crate.package => dep),
+        "workspace" => Dict{String,Any}())
+    toml = "# Generated by RepliBuild: the root of the library built from the crate `$(crate.name)`.\n" *
+           "# Rewritten by every build; an edit here is lost.\n" *
+           sprint(io -> TOML.print(io, manifest; sorted = true))
+    lib = "// Generated by RepliBuild. The library is this crate; `$(crate.name)` is its\n" *
+          "// dependency, and a `dylib` carries its dependencies and exports their functions.\n" *
+          "extern crate $(crate.name);\n"
+    return Dict("Cargo.toml" => toml, "lib.rs" => lib)
+end
+
+# Write the root crate, touching only a file whose text changed: cargo
+# rebuilds what is newer than its last build.
+function _write_root(rc::RustConfig, crate::Crate)::String
+    dir = root_dir(rc)
+    mkpath(dir)
+    for (name, text) in root_files(rc, crate)
+        path = joinpath(dir, name)
+        (isfile(path) && read(path, String) == text) || write(path, text)
+    end
+    # The crate's own lock file pins its dependencies. A path dependency's
+    # lock is not read by cargo, so the root starts from a copy of it, and is
+    # given a new copy when it changes.
+    theirs = joinpath(crate.workspace_root, "Cargo.lock")
+    ours = joinpath(dir, "Cargo.lock")
+    from = joinpath(dir, "Cargo.lock.from")
+    if isfile(theirs)
+        sha = _file_sha(theirs)
+        if !(isfile(ours) && isfile(from) && strip(read(from, String)) == sha)
+            cp(theirs, ours; force = true)
+            chmod(ours, 0o644)
+            write(from, sha)
+        end
+    end
+    return dir
+end
+
+"""
+    rustflags(; base = ENV) -> Vector{String}
+
+What every rustc of the build is given: the user's own `RUSTFLAGS` (or
+`CARGO_ENCODED_RUSTFLAGS`), then the flags this file's header lists. They go
+to cargo as `CARGO_ENCODED_RUSTFLAGS`, which cargo reads before anything in a
+configuration file, so what is built does not depend on the machine's cargo
+configuration.
+"""
+function rustflags(; base = ENV)::Vector{String}
+    user = if !isempty(get(base, "CARGO_ENCODED_RUSTFLAGS", ""))
+        String[String(x) for x in split(base["CARGO_ENCODED_RUSTFLAGS"], '\x1f'; keepempty = false)]
+    else
+        String[String(x) for x in split(get(base, "RUSTFLAGS", ""))]
+    end
+    return vcat(user, ["--emit=llvm-ir,link", "-Csymbol-mangling-version=v0", "--cap-lints=warn"])
+end
+
+"""
+    cargo_args(rc, crate; windows = Sys.iswindows()) -> Vector{String}
+
+The `cargo rustc` command line that builds the generated root crate (this
+file's header says why each part is there). The profile is `dev` with every
+setting that matters stated, so the crate's own `[profile]` tables and the
+user's cargo configuration do not decide what is built: at opt-level 0 it is
+a debug build, and above it a release build (no debug assertions, no overflow
+checks) that keeps its debug info and incremental compilation. The profile
+is the whole build's, so the wrapped crate is compiled under it.
+
+What follows `--` reaches rustc for the root crate alone, which is the one
+that is linked: the link arguments.
+"""
+function cargo_args(rc::RustConfig, crate::Crate; windows::Bool = Sys.iswindows())::Vector{String}
     opt = rc.opt_level
     profile = ["opt-level=$opt",
                "debug=2",
@@ -244,32 +381,38 @@ function cargo_args(rc::RustConfig, crate::Crate; locked::Bool, windows::Bool = 
                "split-debuginfo=\"off\"",
                "debug-assertions=$(opt == 0)",
                "overflow-checks=$(opt == 0)"]
-    args = ["rustc", "--manifest-path", rc.manifest, "--package", crate.package, "--lib",
-            "--crate-type", "dylib", "--target-dir", rc.target_dir,
-            "--message-format=json-render-diagnostics"]
-    locked && push!(args, "--locked")
-    isempty(rc.features) || append!(args, ["--features", join(rc.features, ",")])
-    rc.default_features || push!(args, "--no-default-features")
+    args = ["rustc", "--manifest-path", root_dir(rc) * "/Cargo.toml", "--lib",
+            "--target-dir", rc.target_dir, "--message-format=json-render-diagnostics"]
     for p in profile
         append!(args, ["--config", "profile.dev." * p])
     end
-    append!(args, ["--", "--emit=llvm-ir,link", "-C", "symbol-mangling-version=v0"])
-    for flag in vcat(Compiler._self_binding_link_flags(; windows), Compiler._reproducible_link_flags(; windows))
+    link = vcat(Compiler._self_binding_link_flags(; windows), Compiler._reproducible_link_flags(; windows))
+    isempty(link) || push!(args, "--")
+    for flag in link
         append!(args, ["-C", "link-arg=" * flag])
     end
     return args
 end
 
 """
-    find_artifact(messages, crate) -> (path, fresh)
+    find_artifacts(messages, crate) -> (library, fresh, ir)
 
-The dynamic library cargo built for `crate`, from its JSON messages (one
-object per line of `--message-format=json`): the `compiler-artifact` whose
-target is the crate's `dylib`. `fresh` is cargo's word for "nothing was
-recompiled". An error when there is none, which names what cargo did report.
+What cargo built, from its JSON messages (one object per line of
+`--message-format=json`): the root crate's dynamic library, cargo's word for
+"nothing was recompiled" (`fresh`: the root's and the wrapped crate's both),
+and the wrapped crate's IR file, which rustc writes beside the crate's
+`.rlib` under the same name (`…/deps/lib<crate>-<hash>.rlib`,
+`…/deps/<crate>-<hash>.ll`).
+
+The wrapped crate is told from another of its name (a second version among
+the dependencies) by its manifest. An error when either is missing, which
+names what cargo did report.
 """
-function find_artifact(messages::AbstractString, crate::Crate)
+function find_artifacts(messages::AbstractString, crate::Crate)
     seen = String[]
+    library = nothing
+    rlib = nothing
+    fresh = true
     for line in eachsplit(messages, '\n')
         startswith(line, "{") || continue
         msg = try
@@ -280,14 +423,25 @@ function find_artifact(messages::AbstractString, crate::Crate)
         get(msg, "reason", "") == "compiler-artifact" || continue
         target = get(msg, "target", Dict())
         tname = replace(String(get(target, "name", "")), '-' => '_')
-        push!(seen, tname * " " * string(get(target, "crate_types", String[])))
-        (tname == crate.name && "dylib" in get(target, "crate_types", String[])) || continue
-        for f in get(msg, "filenames", String[])
-            endswith(String(f), "." * Libdl.dlext) && return (path = String(f), fresh = get(msg, "fresh", false) === true)
+        types = get(target, "crate_types", String[])
+        push!(seen, tname * " (" * join(types, ", ") * ")")
+        files = String[String(f) for f in get(msg, "filenames", String[])]
+        if tname == root_name(crate) && "dylib" in types
+            k = findfirst(f -> endswith(f, "." * Libdl.dlext), files)
+            k === nothing || (library = files[k]; fresh &= get(msg, "fresh", false) === true)
+        elseif tname == crate.name && _same_file(get(msg, "manifest_path", ""), crate.manifest)
+            k = findfirst(f -> endswith(f, ".rlib"), files)
+            k === nothing || (rlib = files[k]; fresh &= get(msg, "fresh", false) === true)
         end
     end
-    error("cargo reported no dynamic library for the crate `$(crate.name)`. " *
-          (isempty(seen) ? "It reported no artifact at all." : "It reported: " * join(seen, "; ")))
+    reported = isempty(seen) ? "It reported no artifact at all." : "It reported: " * join(seen, "; ")
+    library === nothing &&
+        error("cargo reported no dynamic library for the root crate `$(root_name(crate))`. " * reported)
+    rlib === nothing &&
+        error("cargo reported no library for the crate `$(crate.name)` ($(crate.manifest)). " * reported)
+    stem = replace(basename(rlib), r"^lib" => ""; count = 1)
+    ir = joinpath(dirname(rlib), replace(stem, r"\.rlib$" => ".ll"))
+    return (library = library, fresh = fresh, ir = ir)
 end
 
 function _file_sha(path::AbstractString)::String
@@ -315,9 +469,9 @@ _key_path(config::RepliBuildConfig) = joinpath(get_output_path(config), "rust_me
 """
     build_rust_project(config) -> String
 
-`RepliBuild.build` for a `[rust]` project: build the crate with cargo, copy
-its dynamic library to `[paths] output`, and write `compilation_metadata.json`
-beside it. Returns the library's path.
+`RepliBuild.build` for a `[rust]` project: write the root crate, build it
+with cargo, copy its dynamic library to `[paths] output`, and write
+`compilation_metadata.json` beside it. Returns the library's path.
 
 cargo decides what is recompiled; it is always asked. The metadata is
 extracted again only when the library, the IR, the toolchain or RepliBuild
@@ -325,8 +479,8 @@ itself changed (`rust_metadata.key`). The key is removed before an
 extraction, so one that fails leaves nothing claiming success.
 """
 function build_rust_project(config::RepliBuildConfig)::String
-    rc = config.rust
-    rc === nothing && error("build_rust_project: the project has no [rust] section")
+    config.rust === nothing && error("build_rust_project: the project has no [rust] section")
+    rc = _located(config)
     println("RepliBuild | $(config.project.name) [rust]")
     start = time()
 
@@ -336,15 +490,17 @@ function build_rust_project(config::RepliBuildConfig)::String
     out_dir = get_output_path(config)
     mkpath(out_dir)
 
-    args = cargo_args(rc, crate; locked = isfile(joinpath(crate.workspace_root, "Cargo.lock")))
-    (messages, diagnostics, code) = _capture(_cargo(tc, args, dirname(rc.manifest)))
+    _write_root(rc, crate)
+    # From the crate's own directory, like the toolchain question above: with
+    # rustup, a `rust-toolchain.toml` there chooses the compiler.
+    (messages, diagnostics, code) = _capture(_cargo(tc, cargo_args(rc, crate), dirname(crate.manifest)))
     code == BuildBridge.SPAWN_FAILED && error(_missing_tool_message("cargo", tc.cargo, code, diagnostics))
     code == 0 || error("cargo could not build the crate `$(crate.name)` (exit $code):\n$(strip(diagnostics))")
-    artifact = find_artifact(messages, crate)
-    isfile(artifact.path) || error("cargo named $(artifact.path) as the crate's library and it does not exist")
-    ir = joinpath(dirname(artifact.path), "deps", crate.name * ".ll")
+    artifact = find_artifacts(messages, crate)
+    isfile(artifact.library) || error("cargo named $(artifact.library) as the library and it does not exist")
+    ir = artifact.ir
     if !isfile(ir)
-        deps = joinpath(dirname(artifact.path), "deps")
+        deps = dirname(ir)
         found = isdir(deps) ? filter(f -> endswith(f, ".ll"), readdir(deps)) : String[]
         error("rustc wrote no IR file $ir for the crate `$(crate.name)`. " *
               (isempty(found) ? "No .ll file is in $deps." : "The .ll files there: $(join(found, ", "))."))
@@ -353,10 +509,10 @@ function build_rust_project(config::RepliBuildConfig)::String
             "(opt-level $(rc.opt_level), rustc $(tc.release), LLVM $(tc.llvm))")
 
     library = joinpath(out_dir, get_library_name(config))
-    key = _metadata_key(artifact.path, [ir], tc, crate)
+    key = _metadata_key(artifact.library, [ir], tc, crate)
     keyfile = _key_path(config)
     if isfile(library) && isfile(_metadata_path(config)) && isfile(keyfile) &&
-       strip(read(keyfile, String)) == key && _file_sha(library) == _file_sha(artifact.path)
+       strip(read(keyfile, String)) == key && _file_sha(library) == _file_sha(artifact.library)
         println("  metadata: cached")
         println("  done: $(round(time() - start, digits = 2))s")
         return library
@@ -366,7 +522,7 @@ function build_rust_project(config::RepliBuildConfig)::String
     # A new file, not new bytes in the old one: a session that has the
     # previous library open keeps the file it mapped.
     rm(library; force = true)
-    cp(artifact.path, library)
+    cp(artifact.library, library)
 
     metadata = extract_metadata(config, crate, tc, library, [ir])
     open(_metadata_path(config), "w") do io
@@ -499,6 +655,7 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
         "metadata_version" => METADATA_VERSION,
         "language" => "rust",
         "crate" => Dict{String,Any}("name" => crate.name, "package" => crate.package,
+                                    "root" => root_name(crate),
                                     "disambiguator" => root === nothing ? "" : root.disambiguator),
         "library" => basename(String(library)),
         "library_sha" => _file_sha(library),
