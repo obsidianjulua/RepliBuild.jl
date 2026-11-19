@@ -1128,6 +1128,24 @@ the test named when you touch the area.
   binds only further down. A new emitter that writes a type or a typed
   signature must place it after what it names. (`test_factory_field_order.jl`,
   devtests `test_factory_field_order_live.jl`.)
+- **One method per dispatch signature, everywhere** (2026-11-18). An
+  emitter's dedup keys on the dispatch signature (`_concrete_sig_type`, as
+  `_method_sig_keys` does), never on the parameter text: factory
+  constructors keyed on text with the names in it defined `Animal(::Cint)`
+  twice for `make_animal(int legs)` and `make_animal_doubled(int half)` (the
+  later replaced the earlier silently, and a precompiled consumer refused to
+  load), and dropped one of two factories whose parameter text was equal
+  (`finalizer_test`'s `Rect`, `vi_test`'s `Left`). A signature exactly one
+  factory has keeps its plain constructor byte for byte; one several share
+  is none of theirs: each is `X(Val(:<factory>), …)`, the tag being the
+  factory's `_julia_function_name`, in the inner and the early (outer) form
+  (`_factory_ctor_plan`), with the struct's docstring and a `wrap:` line
+  naming them. **Never a silent pick between two different C++ functions.**
+  Method proxies are keyed the same way and collapse only onto one raw
+  target. `_assert_no_duplicate_methods` (in `_assert_wrapper_loadable`)
+  refuses a wrapper whose parsed text defines one method twice.
+  (`test_factory_ctor_collisions.jl`, devtests
+  `test_factory_ctor_collisions_live.jl`, `test_cpp_finalizers.jl`.)
 - **A pointer or reference return is typed from its declaration**
   (`_typed_pointer_return`, both generators): `T*`, `const T*`, `T&`, `T**` give
   `Ptr{T}`/`Ptr{Ptr{T}}` when `T` is a type the module emits
@@ -2207,7 +2225,8 @@ the module or added methods to Base, `unsigned __int128`, the `char8/16/32_t`
 traps, `extern "C"` functions that throw, alias symbols; then signed
 bitfields, by-value `char`, `signed char*` returns, C strings on the `ccall`
 paths, C++ globals outside the global namespace, pure virtual methods,
-operator names, and a record's pointer to a factory class. Still open:
+operator names, a record's pointer to a factory class, and factories that
+share a constructor signature. Still open:
 
 - **Same-named enums in two scopes collapse** (`Mode`, `ns::Mode`): one's
   enumerators are bound nowhere and its functions return the other type. The
@@ -2216,12 +2235,19 @@ operator names, and a record's pointer to a factory class. Still open:
   moves as C++ does, but the caller's Julia value is an immutable bits copy,
   so using it again is a use-after-free. What owns a move-only object on the
   Julia side is John's call.
-- **Two factories of one class with the same parameter types are one
-  constructor** (found 2026-11-18): `make_animal(int legs)` beside
-  `make_animal_doubled(int half)` emits `Animal(legs::Cint)` and
-  `Animal(half::Cint)` in the factory struct; the later overwrites the
-  earlier, so `Animal(4)` calls `make_animal_doubled`, and a precompiled
-  consumer refuses the overwrite. Both functions stay callable by name.
+- **A C global named like its struct tag refuses the wrap** (found
+  2026-11-18): curl's `const struct Curl_ssl *Curl_ssl;` gives the struct's
+  zero-initializer `Curl_ssl()` and the global's accessor `Curl_ssl()`, one
+  signature twice. The accessor used to replace the zero-initializer
+  silently; `_assert_no_duplicate_methods` now refuses the wrapper, so the
+  Hub's curl cannot be re-wrapped until the accessor takes a name of its own
+  (the name screen lets a function stand beside a type of its name, which is
+  right for every signature but this one).
+- **Factory constructors take the strict C type**: `Animal(4)` is a
+  `MethodError` (`Animal(legs::Cint)`) while `make_animal(4)` takes any
+  `Integer`. Relaxing it changes every factory class's text and makes
+  collisions more frequent; `_factory_ctor_plan` must then key on the relaxed
+  spelling.
 - **A thread-local global gets a `cglobal` accessor** (found 2026-11-18).
   `cglobal` resolves once, in whichever thread calls the accessor first, so
   every other thread reads and writes that thread's instance (`tls_addr()`
