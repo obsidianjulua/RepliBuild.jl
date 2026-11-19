@@ -315,6 +315,37 @@ struct GraphConfig
     out_dir::String
 end
 
+"""
+Nested struct for [rust] section.
+
+Presence of this section selects the Rust front end: the project is a Cargo
+crate, and cargo and rustc compile AND link it (`RustBuild`). RepliBuild sets
+the crate type, the debug info, the optimization level and the IR emission,
+and reads back what it reads from a clang build: the library's dynamic symbol
+table, its DWARF, and the `define` lines of the IR rustc emitted. The crate's
+source is never edited and needs no `extern "C"`.
+
+- `manifest`: the crate's `Cargo.toml`. Absolute and `/`-separated; relative
+  in the TOML, against the project root.
+- `package`: the package to wrap, by its Cargo name, when the manifest is a
+  workspace or has several packages; `""` is the manifest's own package.
+- `opt_level`: rustc's `opt-level` for the wrapped crate, 0 to 3. Above 0,
+  rustc gives a small `pub fn` no symbol of its own (it is compiled into its
+  callers instead), so the build keeps incremental compilation on, which
+  turns that off; `RustBuild` says how that was measured.
+- `features`, `default_features`: the Cargo features the crate is built with.
+- `target_dir`: cargo's target directory, `<[paths] build>/rust/target`.
+  Derived at load, absolute and `/`-separated, never written back to a TOML.
+"""
+struct RustConfig
+    manifest::String
+    package::String
+    opt_level::Int
+    features::Vector{String}
+    default_features::Bool
+    target_dir::String
+end
+
 """Nested struct for [types] section - Type validation settings"""
 struct TypesConfig
     strictness::Symbol              # :strict, :warn, :permissive
@@ -352,6 +383,9 @@ struct RepliBuildConfig
     # Optional graph mode (nothing = one library). On the config of one library
     # of a graph (`GraphBuild._library_config`), the graph it belongs to.
     graph::Union{Nothing,GraphConfig}
+
+    # Optional Rust front end (nothing = a C or C++ project). See `RustConfig`.
+    rust::Union{Nothing,RustConfig}
 
     # Metadata
     config_file::String
@@ -395,6 +429,19 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
     (ingest_config !== nothing && graph_config !== nothing) &&
         error("$toml_path has both [ingest] and [graph]: ingest wraps one prebuilt library, " *
               "graph mode builds a CMake project's libraries. Keep one.")
+    rust_config = parse_rust_config(data, project_config.root, paths_config)
+    if rust_config !== nothing
+        (ingest_config !== nothing || graph_config !== nothing) &&
+            error("$toml_path has [rust] beside [ingest] or [graph]: a Rust project is one Cargo " *
+                  "crate that cargo builds. Keep one.")
+        wrap_config.language === :rust ||
+            error("$toml_path has a [rust] section and [wrap] language = " *
+                  "$(repr(string(wrap_config.language))). A Rust project's language is \"rust\" " *
+                  "(or leave `language` out).")
+    elseif wrap_config.language === :rust
+        error("$toml_path sets [wrap] language = \"rust\" and has no [rust] section. " *
+              "A Rust project names its crate:\n[rust]\nmanifest = \"Cargo.toml\"")
+    end
 
     # In ingest mode with no explicit binary.output_name, force the output name
     # to match the ingested .so so wrap() finds the library at output_dir/<name>.
@@ -422,6 +469,7 @@ function load_config(toml_path::String="replibuild.toml")::RepliBuildConfig
         parse_types_config(data),
         ingest_config,
         graph_config,
+        rust_config,
         toml_path,
         now()
     )
@@ -802,7 +850,9 @@ function parse_wrap_config(data::Dict)::WrapConfig
         end
     end
 
-    language_str = get(wrap, "language", "cpp")
+    # A [rust] section makes the project Rust; any other project is C++ unless
+    # it says C. `load_config` refuses a [rust] project that names another.
+    language_str = get(wrap, "language", haskey(data, "rust") ? "rust" : "cpp")
     language_sym = Symbol(language_str)
 
     # [wrap.rename] — `key = "julia_name"`, key a mangled symbol or the Julia
@@ -1265,6 +1315,48 @@ function _graph_dependency_source(dependency::AbstractString, source::AbstractSt
     return s
 end
 
+"The keys a `[rust]` section may have."
+const RUST_KEYS = ("manifest", "package", "opt_level", "features", "default_features")
+
+"""
+    parse_rust_config(data, root, paths) -> Union{Nothing,RustConfig}
+
+Parse the `[rust]` section; `nothing` when there is none. `manifest` resolves
+against the project `root`, as `[compile]` paths do, and cargo's target
+directory is `<[paths] build>/rust/target`.
+
+Strict, like `[graph]`: an unknown key or a value of the wrong type is an
+error naming it, rather than a setting that silently does nothing.
+"""
+function parse_rust_config(data::Dict, root::AbstractString, paths::PathsConfig)::Union{Nothing,RustConfig}
+    haskey(data, "rust") || return nothing
+    r = data["rust"]
+    r isa AbstractDict || error("[rust] must be a table, e.g.\n[rust]\nmanifest = \"Cargo.toml\"")
+    for k in sort!(collect(String, keys(r)))
+        k in RUST_KEYS || error("[rust] $k: unknown key; a [rust] section takes $(join(RUST_KEYS, ", "))")
+    end
+    function str(k, default)
+        v = get(r, k, default)
+        v isa AbstractString || error("[rust] $k must be a string, got $(repr(v))")
+        return String(v)
+    end
+    under_root(p) = _graph_path(isabspath(p) ? p : joinpath(root, p))
+    manifest = str("manifest", "Cargo.toml")
+    isempty(manifest) && error("[rust] manifest must name the crate's Cargo.toml, got an empty string")
+    opt = get(r, "opt_level", 0)
+    (opt isa Integer && !(opt isa Bool) && 0 <= opt <= 3) ||
+        error("[rust] opt_level must be an integer from 0 to 3, got $(repr(opt))")
+    feats = get(r, "features", String[])
+    (feats isa AbstractVector && all(x -> x isa AbstractString && !isempty(x), feats)) ||
+        error("[rust] features must be a list of non-empty strings, got $(repr(feats))")
+    default_features = get(r, "default_features", true)
+    default_features isa Bool ||
+        error("[rust] default_features must be true or false, got $(repr(default_features))")
+    return RustConfig(under_root(manifest), str("package", ""), Int(opt),
+                      unique(String[String(x) for x in feats]), default_features,
+                      under_root(joinpath(paths.build, "rust", "target")))
+end
+
 """Validate TOML data has minimum required fields"""
 function validate_toml_data(data::Dict, toml_path::String)
     # Project name is the only truly required field
@@ -1277,6 +1369,11 @@ function validate_toml_data(data::Dict, toml_path::String)
     # Graph mode takes every source and flag from the CMake project's own graph.
     if haskey(data, "graph") && !isempty(get(get(data, "compile", Dict()), "source_files", []))
         @warn "[graph] is set but [compile].source_files is non-empty in $toml_path — graph mode compiles what the CMake project's targets list, and ignores it"
+    end
+
+    # A Rust project's sources are the crate's, which cargo finds.
+    if haskey(data, "rust") && !isempty(get(get(data, "compile", Dict()), "source_files", []))
+        @warn "[rust] is set but [compile].source_files is non-empty in $toml_path — cargo compiles the crate the manifest names, and ignores it"
     end
 
     # Ingest mode is mutually exclusive with source-build mode. A mixed config usually
@@ -1324,6 +1421,7 @@ function create_default_config(toml_path::String="replibuild.toml")::RepliBuildC
         TypesConfig(:warn, true, false, true, Dict{String,String}(), String[], String[], String[]),
         nothing,  # ingest: source-build mode by default
         nothing,  # graph: one library by default
+        nothing,  # rust: a C or C++ project by default
         toml_path,
         now()
     )
@@ -1586,6 +1684,17 @@ function save_config(config::RepliBuildConfig)
         data["graph"] = graph_dict
     end
 
+    # [rust] — only emitted for a Rust project. `target_dir` is derived from
+    # [paths], so it is not written.
+    if config.rust !== nothing
+        rust_dict = Dict{String,Any}("manifest" => _portable_path(config.rust.manifest, root),
+                                     "opt_level" => config.rust.opt_level)
+        isempty(config.rust.package) || (rust_dict["package"] = config.rust.package)
+        isempty(config.rust.features) || (rust_dict["features"] = config.rust.features)
+        config.rust.default_features || (rust_dict["default_features"] = false)
+        data["rust"] = rust_dict
+    end
+
     # Write to file
     open(config.config_file, "w") do io
         TOML.print(io, data)
@@ -1618,7 +1727,7 @@ function merge_compile_flags(config::RepliBuildConfig, additional_flags::Vector{
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.ingest, config.graph, config.config_file, config.loaded_at
+        config.ingest, config.graph, config.rust, config.config_file, config.loaded_at
     )
 end
 
@@ -1642,7 +1751,7 @@ function with_source_files(config::RepliBuildConfig, source_files::Vector{String
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.ingest, config.graph, config.config_file, config.loaded_at
+        config.ingest, config.graph, config.rust, config.config_file, config.loaded_at
     )
 end
 
@@ -1669,7 +1778,7 @@ function with_aot_thunks(config::RepliBuildConfig, enabled::Bool)::RepliBuildCon
         new_compile,
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.ingest, config.graph, config.config_file, config.loaded_at
+        config.ingest, config.graph, config.rust, config.config_file, config.loaded_at
     )
 end
 
@@ -1690,7 +1799,7 @@ function with_include_dirs(config::RepliBuildConfig, include_dirs::Vector{String
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.ingest, config.graph, config.config_file, config.loaded_at
+        config.ingest, config.graph, config.rust, config.config_file, config.loaded_at
     )
 end
 
@@ -1716,7 +1825,7 @@ function with_discovery_results(config::RepliBuildConfig;
         new_compile,  # Updated
         config.link, config.binary, config.wrap,
         config.llvm, config.workflow, config.cache, config.dependencies, config.types,
-        config.ingest, config.graph, config.config_file, config.loaded_at
+        config.ingest, config.graph, config.rust, config.config_file, config.loaded_at
     )
 end
 
@@ -1941,7 +2050,7 @@ export RepliBuildConfig,
        ProjectConfig, PathsConfig, DiscoveryConfig, CompileConfig,
        LinkConfig, BinaryConfig, WrapConfig, LLVMConfig,
        WorkflowConfig, CacheConfig, DependenciesConfig, DependencyItem, TypesConfig,
-       IngestConfig, GraphConfig,
+       IngestConfig, GraphConfig, RustConfig,
        load_config, save_config, create_default_config,
        merge_compile_flags, with_source_files, with_include_dirs, with_discovery_results,
        get_output_path, get_build_path, get_cache_path,

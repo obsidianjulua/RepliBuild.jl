@@ -5445,6 +5445,11 @@ Complete compilation workflow: discover sources, compile, link, create binary.
 This is the main entry point for building a project.
 """
 function compile_project(config::RepliBuildConfig)
+    # Everything below takes any language that is not C for C++. A Rust
+    # project never gets here: `RustBuild.build_rust_project` builds it.
+    config.rust === nothing ||
+        error("compile_project: $(config.project.name) is a [rust] project, which cargo builds " *
+              "(RustBuild.build_rust_project), not the C/C++ pipeline")
     println("RepliBuild | $(config.project.name)")
 
     start_time = time()

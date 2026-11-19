@@ -1364,3 +1364,122 @@ The `jlcs.ffe_call` module differs only in the declaration (`func.func
 private @f2_make(f64, f64) -> !llvm.struct<(f64, f64)>`) and the call
 (`%r = jlcs.ffe_call %v0, %v1 { callee = @f2_make } : (f64, f64) ->
 !llvm.struct<(f64, f64)>`).
+
+---
+---
+
+# Part III. Linux, and the build side as built
+
+Measured and built 2026-11-19 on Linux x86-64: rustc 1.97.1 (its own LLVM
+22.1.6), cargo 1.97, Julia 1.13.4, libJLCS on the system LLVM/MLIR 23.1.5.
+Parts I and II measured on Windows and changed no code. This part answers
+§9's "Linux" list, records two findings that change the plan, and says what
+of §15's walk now exists in `src/`.
+
+## 17. Answers first
+
+1. **The Linux measurements agree with Windows'.** A `define` line alone gives
+   a correct call; the existing extractors read a Rust library; a thunk that
+   states the define line's signature is right where `jlcs.ffe_call` is
+   wrong. rustc's LLVM (22) and the thunk's (23) are different majors here,
+   and agreed: §13.2's "different majors untested" has one data point.
+2. **A Rust panic is caught through a JIT'd thunk frame.** Julia →
+   `rb_catch` (Rust, `catch_unwind`) → a thunk JIT'd by libJLCS making a
+   plain call → a Rust function that panics: caught twice, the message
+   recovered, the next call right. Part I §6.3 measured this only with a C
+   stand-in for the thunk. Through `jlcs.try_call` the same panic is a
+   segfault, so §13.3's rule stands: a Rust thunk makes the plain call and
+   the catching frame is Rust's.
+3. **An optimized build keeps its functions when incremental compilation is
+   on.** §4.3 found that above opt-level 0 a small `pub fn` gets no symbol,
+   and had only an unstable flag against it. rustc does not make that
+   inference under `-C incremental`: of a 17-function crate, 5 kept a symbol
+   at opt-level 1, 4 at opt-level 3, and all 17 at opt-level 3 with
+   incremental on (and one codegen unit, so still one `.ll`). `[rust]
+   opt_level` above 0 therefore builds a release profile that keeps
+   incremental and debug info. It is how rustc behaves, not a promise: the
+   surface is read from the library.
+4. **Above opt-level 1, LLVM merges functions with the same code** and keeps
+   one name as an IR alias of the other: `@c_add = unnamed_addr alias i32
+   (i32, i32), ptr @…3add`. The alias is exported, has no `define` line and
+   often no DIE. Left unread it is a function missing from the surface with
+   no word said. `RustABI.aliases` reads it; the row carries `alias_of`, and
+   the target's types when it has no DIE of its own.
+5. **Steps 1 to 4 of §15's walk are built** (§19). `RepliBuild.build` on a
+   `[rust]` project writes the library and a `compilation_metadata.json`
+   that says, for every function of the crate, how it is called. `wrap` is
+   not built: steps 5 to 7.
+
+## 18. Linux measurements
+
+| | Windows (Parts I, II) | Linux |
+|---|---|---|
+| rustc's LLVM | the system's (MSYS2), or its own (rustup) | its own, 22.1.6; the system's is 23.1.5 |
+| DWARF | version 4, one CU per crate, std without DWARF | version 4, one CU per crate, **std with DWARF**: 436,491 dump lines for a 17-function crate, 1,498 of them the crate's |
+| Exports of a `dylib` | 1,919 | 1,743 (opt-level 3), all of std among them |
+| Reproducible link | needs `--no-insert-timestamp` | the same bytes from a clean rebuild, nothing asked |
+| `ccall` with the C rule on a two-scalar return | wrong for `{ double, double }`, `{ i16, i16 }` | wrong for `{ i32, i32 }`, `{ i16, i16 }`; **right by coincidence** for `{ i32, double }`, `{ ptr, i64 }`, `{ double, double }`, where SysV's C rule uses the same two registers |
+| `ccall` with `UInt128` | wrong | right |
+| A hidden return pointer | the first argument | the first argument on x86-64; its own register (x8) on AArch64, which a `ccall` cannot name |
+
+- **The surface filter is the whole difference between 17 functions and
+  1,743**, and the DWARF pass must not build what it will not read: a unit
+  is turned into a DIE tree only when it names a wanted symbol.
+- **`ccall` being right by coincidence on SysV is not a reason to use it.**
+  The rule is §13.2's: `ccall` where every IR type is a scalar or a pointer,
+  and a thunk otherwise. On AArch64 a hidden return pointer is "otherwise".
+- **A `String` out and in**: `make_greeting` returns one through the hidden
+  pointer; read at its DWARF layout; `string_len_owned` takes it by value
+  (a pointer to the caller's copy) and frees it. Run in
+  `test/rust_test/verify.jl`.
+- cargo: `cargo rustc --lib --crate-type dylib -- --emit=llvm-ir,link` puts
+  the library at `<target>/debug/lib<crate>.so` and, with one codegen unit,
+  the IR at `<target>/debug/deps/<crate>.ll`. `--message-format=json` names
+  the library and says whether it is `fresh`. `cargo metadata --no-deps`
+  needs no network.
+
+## 19. What is built
+
+| §15 step | Where | What it does |
+|---|---|---|
+| 1. The build | `Builder/RustBuild.jl`, `[rust]` in `ConfigurationManager` | cargo and rustc build and link; the flags of §12.6, stated as a whole `dev` profile so the crate's own `[profile]` does not decide; the metadata key |
+| 2. Artifacts and surface | `RustBuild.find_artifact`, `RustABI.surface`, `RustABI.v0_root` | the library from cargo's messages; exported ∩ defined in the crate's IR ∩ rooted in the crate by its v0 path (or unmangled) |
+| 3. Define lines and the join | `RustABI.definitions`, `aliases`, `join_function` | each parameter's `pass` (`ignore`, `direct`, `pair`, `cast`, `indirect`) and the IR parameters it takes; anything that does not match in exactly one way is refused with its reason |
+| 4. The Rust DWARF pass | `Builder/RustDWARF.jl` | scoped type keys, variant parts with the discriminant and each variant's value, pointer kinds, fat pointers, methods by nesting; only what the surface reaches |
+
+Departures from Parts I and II, each measured:
+
+- **The join does not use §4.2's rule as written** ("2 if the DWARF shape is
+  two scalars"). rustc's own rule for when a type is two scalars is not
+  DWARF's to state (an array of two is not; a struct of two is). So each
+  option is checked against the IR types it would take, and the assignment
+  must be unique: a shape rustc lays out another way fails to match instead
+  of matching wrongly.
+- **v0 roots are parsed, not demangled.** The demangler does not print an
+  `impl` block's own path, which is where the item lives. `v0_root` was
+  checked against the binutils demangler on every symbol where the two say
+  the same thing: 672 of 3,660 exported symbols, no difference, none unread.
+- **The crate's own `#[no_mangle]` functions are part of the surface.** They
+  are the crate's, and the IR states their call like any other. One that
+  takes a record the C way (one `{ double, double }` argument) is refused:
+  that shape is not in the join yet.
+- **`#[track_caller]`** passes a caller location DWARF does not list. Such a
+  function is refused, and the reason names the attribute.
+
+## 20. The walk from here
+
+5. **The dialect**: the call form of §13.3 and the `void(void**, void*)`
+   thunk. Needs an `ABI_VERSION` bump and a republished artifact.
+6. **The catching frame, before the generator.** At opt-level 0 no function
+   is `nounwind`, so every call without it is one panic from ending Julia.
+   It is the first piece of §15's step 7, moved up: a generated crate with
+   `__rb_catch` alone.
+7. **GeneratorRust**: Julia types and names from the metadata, `ccall`
+   where every IR type is a scalar or a pointer, the thunk otherwise.
+8. **The rest of the generated crate**: drop functions, declared
+   instantiations, `dyn` forwarders.
+
+Not built, and not on that list: a `[rust]` crate from a `[dependencies]`
+checkout (the Hub's shape); `discover` on a Cargo project; the environment
+doctor reporting cargo and rustc; statics; a C-ABI record argument; Windows
+and AArch64 runs of what is built here.

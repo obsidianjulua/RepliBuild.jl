@@ -108,6 +108,10 @@ const PRESERVED_TOML_KEYS = [
     # sources, not that the project is one: losing the section turns a graph
     # build back into one library compiled from every file found.
     ("graph", "*"),
+    # The whole [rust] section. Discovery scans C and C++ sources and writes a
+    # C or C++ project; losing the section turns a Cargo crate into a project
+    # with no source files.
+    ("rust", "*"),
 ]
 
 """
@@ -720,6 +724,7 @@ function generate_config(root_dir::String, scan::ScanResults, binaries::Vector{B
         types_config,
         nothing,  # ingest: discovery is source-build mode by definition
         nothing,  # graph: a discovered project is one library
+        nothing,  # rust: discovery scans C and C++ sources
         joinpath(root_dir, "replibuild.toml"),  # config_file
         now()                                    # loaded_at
     )

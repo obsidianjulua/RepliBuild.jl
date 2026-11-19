@@ -1,0 +1,42 @@
+@c_add = unnamed_addr alias i32 (i32, i32), ptr @_RNvCs1hrDFCe5rCe_4lean3add
+define noundef range(i8 0, 3) i8 @_RNvCs1hrDFCe5rCe_4lean10level_next(i8 noundef range(i8 0, 3) %l) unnamed_addr #0 !dbg !16 {
+define { i16, i16 } @_RNvCs1hrDFCe5rCe_4lean10two16_swap(i16 noundef %t.0, i16 noundef %t.1) unnamed_addr #0 !dbg !26 {
+define noundef i32 @_RNvCs1hrDFCe5rCe_4lean11checked_div(i32 noundef %a, i32 noundef %b) unnamed_addr #1 !dbg !38 {
+define noundef double @_RNvCs1hrDFCe5rCe_4lean11rec_sum_ref(ptr noalias noundef readonly align 8 captures(none) dereferenceable(16) %r) unnamed_addr #2 !dbg !51 {
+define void @_RNvCs1hrDFCe5rCe_4lean11unit_circle(ptr dead_on_unwind noalias noundef writable writeonly sret([24 x i8]) align 8 captures(none) dereferenceable(24) initializes((0, 16)) %_0) unnamed_addr #3 !dbg !71 {
+define void @_RNvCs1hrDFCe5rCe_4lean1z(i32 noundef %a) unnamed_addr #0 !dbg !93 {
+define noundef i32 @_RNvCs1hrDFCe5rCe_4lean3add(i32 noundef %a, i32 noundef %b) unnamed_addr #0 !dbg !104 {
+define noundef double @_RNvCs1hrDFCe5rCe_4lean4area(ptr noalias noundef readonly align 8 captures(none) dereferenceable(24) %s) unnamed_addr #2 !dbg !111 {
+define noundef zeroext i1 @_RNvCs1hrDFCe5rCe_4lean4flag(i1 noundef zeroext %b) unnamed_addr #0 !dbg !204 {
+define { i32, double } @_RNvCs1hrDFCe5rCe_4lean4pair(i32 noundef %a, double noundef %b) unnamed_addr #0 !dbg !213 {
+define void @_RNvCs1hrDFCe5rCe_4lean4rect(ptr dead_on_unwind noalias noundef writable writeonly sret([24 x i8]) align 8 captures(none) dereferenceable(24) initializes((0, 24)) %_0, double noundef %w, double noundef %h) unnamed_addr #3 !dbg !227 {
+define noundef i128 @_RNvCs1hrDFCe5rCe_4lean4wide(i128 noundef %x) unnamed_addr #0 !dbg !236 {
+define { ptr, i64 } @_RNvCs1hrDFCe5rCe_4lean5hello() unnamed_addr #0 !dbg !256 {
+define { i32, i32 } @_RNvCs1hrDFCe5rCe_4lean5maybe(i32 noundef %x) unnamed_addr #0 !dbg !260 {
+define noundef i24 @_RNvCs1hrDFCe5rCe_4lean6b3_rot(i24 noundef %0) unnamed_addr #0 !dbg !282 {
+define noundef double @_RNvCs1hrDFCe5rCe_4lean6f2_dot(double noundef %a.0, double noundef %a.1, double noundef %b.0, double noundef %b.1) unnamed_addr #0 !dbg !294 {
+define { double, double } @_RNvCs1hrDFCe5rCe_4lean7f2_make(double noundef %x, double noundef %y) unnamed_addr #0 !dbg !308 {
+define noundef i32 @_RNvCs1hrDFCe5rCe_4lean7located(i32 noundef %x, ptr noalias noundef readonly align 8 captures(none) dereferenceable(24) %0) unnamed_addr #2 !dbg !316 {
+define noundef double @_RNvCs1hrDFCe5rCe_4lean7rec_sum(ptr dead_on_return noalias noundef readonly align 8 captures(none) dereferenceable(16) %r) unnamed_addr #2 !dbg !325 {
+define noundef i64 @_RNvCs1hrDFCe5rCe_4lean7str_len(ptr noalias noundef nonnull readonly captures(none) %s.0, i64 noundef returned %s.1) unnamed_addr #0 !dbg !336 {
+define noundef double @_RNvCs1hrDFCe5rCe_4lean8dyn_area(ptr noundef nonnull %a.0, ptr noalias noundef readonly align 8 captures(none) dereferenceable(32) %a.1) unnamed_addr #1 !dbg !343 {
+define void @_RNvCs1hrDFCe5rCe_4lean8rec_make(ptr dead_on_unwind noalias noundef writable writeonly sret([16 x i8]) align 8 captures(none) dereferenceable(16) initializes((0, 15)) %_0, i8 noundef %a, double noundef %b, i16 noundef %c, i32 noundef %d) unnamed_addr #3 !dbg !362 {
+define noundef range(i32 0, 1114112) i32 @_RNvCs1hrDFCe5rCe_4lean9char_code(i32 noundef returned range(i32 0, 1114112) %c) unnamed_addr #0 !dbg !373 {
+define noundef i32 @_RNvCs1hrDFCe5rCe_4lean9opt_ref_d(ptr noalias noundef readonly align 8 captures(address_is_null) dereferenceable_or_null(16) %0) unnamed_addr #2 !dbg !381 {
+define noundef double @_RNvCs1hrDFCe5rCe_4lean9slice_sum(ptr noalias noundef nonnull readonly align 8 captures(none) %xs.0, i64 noundef range(i64 0, 1152921504606846976) %xs.1) unnamed_addr #4 !dbg !409 {
+define { double, i32 } @_RNvMCs1hrDFCe5rCe_4leanNtB2_3Acc3new() unnamed_addr #0 !dbg !433 {
+define noundef double @_RNvMCs1hrDFCe5rCe_4leanNtB2_3Acc4mean(ptr noalias noundef readonly align 8 captures(none) dereferenceable(16) %self) unnamed_addr #2 !dbg !442 {
+define void @_RNvMCs1hrDFCe5rCe_4leanNtB2_3Acc4push(ptr noalias noundef align 8 captures(none) dereferenceable(16) %self, double noundef %x) unnamed_addr #5 !dbg !452 {
+define noundef double @_RNvXs_Cs1hrDFCe5rCe_4leanNtB4_5ShapeNtB4_4Area4area(ptr noalias noundef readonly align 8 captures(none) dereferenceable(24) %self) unnamed_addr #2 !dbg !464 {
+define noundef double @cpoint_norm({ double, double } %0) unnamed_addr #0 !dbg !499 {
+attributes #0 = { mustprogress nofree norecurse nosync nounwind nonlazybind willreturn memory(none) uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #1 = { nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #2 = { mustprogress nofree norecurse nosync nounwind nonlazybind willreturn memory(argmem: read) uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #3 = { mustprogress nofree norecurse nosync nounwind nonlazybind willreturn memory(argmem: write) uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #4 = { nofree norecurse nosync nounwind nonlazybind memory(argmem: read) uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #5 = { mustprogress nofree norecurse nosync nounwind nonlazybind willreturn memory(argmem: readwrite) uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #6 = { cold noinline noreturn nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #7 = { nounwind nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #8 = { nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none) }
+attributes #9 = { nocallback nofree nosync nounwind willreturn memory(inaccessiblemem: write) }
+attributes #10 = { noreturn }

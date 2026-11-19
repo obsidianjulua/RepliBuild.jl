@@ -45,7 +45,7 @@ folder holding `replibuild.toml` unless they are absolute.
 
 | Key | Default | Meaning |
 |:----|:--------|:--------|
-| `language` | `"cpp"` | `"c"` or `"cpp"`, in lower case. Chooses the compiler. Anything other than `"c"` is treated as C++. |
+| `language` | `"cpp"` | `"c"` or `"cpp"`, in lower case. Chooses the compiler. Anything other than `"c"` is treated as C++. A project with a `[rust]` section is `"rust"` and needs no `language`. |
 | `module_name` | CamelCase of the project name | The Julia module's name, and the wrapper file's (`julia/<module_name>.jl`). |
 | `shim_headers` | none | Headers that define the macros in `[wrap.macros]`, written as in an `#include`. Used only together with `[wrap.macros]` or `shim_defines`. |
 | `shim_defines` | none | `#define`s placed before those headers, in that one generated file: `"NAME"` or `"NAME=VALUE"`. Compiles a single-header library's implementation. Needs `shim_headers`. |
@@ -172,6 +172,29 @@ An unknown key or a wrong type in `[graph]` is an error. In a graph project
 `[compile]`, `[types]` and the `[wrap]` keys other than `module_name` do not
 apply: flags come from CMake.
 
+## `[rust]`
+
+Present: the project is a Rust crate, and cargo builds it.
+
+**In progress.** `RepliBuild.build` works on a Rust crate; `RepliBuild.wrap`
+does not yet, so there is no generated Julia module for one today.
+
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `manifest` | `"Cargo.toml"` | The crate's `Cargo.toml`, relative to the project root. |
+| `package` | the manifest's own package | The package to wrap, by its Cargo name. Needed when the manifest is a workspace. |
+| `opt_level` | `0` | The optimization level the crate is compiled at, `0` to `3`. |
+| `features` | none | Cargo features to turn on: `["simd"]`. |
+| `default_features` | `true` | `false` turns the crate's default features off. |
+
+The crate is built as it is: it needs no `extern "C"`, no `#[repr(C)]` and no
+other change. `cargo` and `rustc` must be installed; `REPLIBUILD_TOOL_CARGO`
+and `REPLIBUILD_TOOL_RUSTC` name particular ones.
+
+An unknown key or a wrong type in `[rust]` is an error. In a Rust project
+`[compile]`, `[link]` and `[types]` do not apply, and `[rust]` cannot be
+combined with `[graph]` or `[ingest]`.
+
 ## `[paths]`, `[binary]`, `[cache]`
 
 | Key | Default | Meaning |
@@ -212,7 +235,7 @@ recipe does not need them.
 alone. `discover(path; force = true)` scans again and rewrites it, keeping
 these keys from the old file:
 
-- `[dependencies]`, `[graph]` and `[platform.*]`, whole;
+- `[dependencies]`, `[graph]`, `[rust]` and `[platform.*]`, whole;
 - `[types] templates`, `template_headers`, `records`;
 - `[wrap] macros`, `varargs`, `cstring_owned`, `rename`, `shim_headers`,
   `shim_defines`, `exclude_symbols`, `surface_types_only`,

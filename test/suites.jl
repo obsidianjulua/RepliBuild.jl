@@ -21,6 +21,7 @@
 #   :cpp      GeneratorCpp, the shared generator code, IRGen, Debug
 #   :dialect  src/mlir and IRGen: the JLCS dialect and the IR it is fed
 #   :graph    BuildGraph, CMakeGraph, GraphGenerators, GraphBuild, GraphMode
+#   :rust     the Rust front end: RustBuild, RustABI, RustDWARF
 #
 # `areas_of_path` maps a changed path to areas; a file is selected when it
 # shares an area with a changed path. A path no rule knows selects everything.
@@ -185,6 +186,10 @@ const TESTS = TestFile[
     T("test_graph_build.jl", :unit, [:graph]),
     T("test_graph_generators.jl", :unit, [:graph]),
     T("test_graph_mode.jl", :unit, [:graph]),
+    # The Rust front end, on vendored dumps and IR (test/fixtures/rust).
+    T("test_rust_abi.jl", :unit, [:rust, :build]),
+    T("test_rust_dwarf.jl", :unit, [:rust]),
+    T("test_rust_config.jl", :unit, [:rust, :build]),
     T("test_cross_library_types.jl", :unit, [:graph, :c, :cpp]),
 
     # ── dev: compiles, links or JITs ─────────────────────────────────────────
@@ -275,6 +280,8 @@ const TESTS = TestFile[
     T("test_graph_generators_live.jl", :dev, [:graph], locks = ["graph_generators_test"]),
     T("test_graph_mode_live.jl", :dev, [:graph], locks = ["graph_mode_test"]),
     T("test_cross_library_types_live.jl", :dev, [:graph, :cpp], locks = ["xlib_test"]),
+    # The Rust front end, with cargo.
+    T("test_rust_build_live.jl", :dev, [:rust, :build], locks = ["rust_test"]),
 ]
 
 # Quarantined: Tier 1's own suites (CLAUDE.md). Wired into no suite on purpose;
@@ -293,13 +300,17 @@ const NOTHING_PATHS = ["docs/", "README.md", "CHANGELOG.md", "CLAUDE.md", "LICEN
 const GRAPH_FILES = ("src/Builder/BuildGraph.jl", "src/Builder/CMakeGraph.jl", "src/Builder/GraphGenerators.jl",
                      "src/Builder/GraphBuild.jl", "src/Builder/GraphMode.jl")
 const DWARF_FILES = ("src/Builder/Compiler.jl", "src/Builder/DWARFParser.jl")
+const RUST_FILES = ("src/Builder/RustBuild.jl", "src/Builder/RustABI.jl", "src/Builder/RustDWARF.jl")
 
 """
     areas_of_path(path) -> Vector{Symbol} | :all | Symbol[]
 
 The areas a change to `path` (repository-relative, `/`-separated) exercises.
 `:all` for a path everything depends on, an empty vector for a path no test
-needs to run for (docs, the Hub guide). Graph files are `:graph` alone; the
+needs to run for (docs, the Hub guide). Graph files are `:graph` alone and the
+Rust front end's files `:rust` alone (its tests also list `:build`, for the
+build's seams they read: the symbol table, the DWARF dumper, the `define`-line
+readers); the
 DWARF sources are `:dwarf` and both generators (they read what they parse);
 the other builder files are `:build`; the shared generator code is both
 generators; IRGen and the dialect are `:dialect` and `:cpp`.
@@ -309,6 +320,7 @@ function areas_of_path(path::AbstractString)
     any(e -> p == e || startswith(p, e), EVERYTHING_PATHS) && return :all
     any(e -> p == e || startswith(p, e), NOTHING_PATHS) && return Symbol[]
     p in GRAPH_FILES && return [:graph]
+    p in RUST_FILES && return [:rust]
     p in DWARF_FILES && return [:dwarf, :build, :c, :cpp]
     startswith(p, "src/Builder/") && return [:build]
     startswith(p, "src/Wrapper/C/") && return [:c]

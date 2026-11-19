@@ -377,6 +377,16 @@ read metadata.
 """
 _read_json(path::AbstractString) = JSON.parse(read(path, String); dicttype=Dict{String,Any})
 
+"""
+    _parse_json(text)
+
+`_read_json` for JSON that is not a file: what a tool printed (cargo's
+`metadata`, and its build messages, one object per line). The same types on
+both JSON majors, for the reason `_read_json` gives. The hygiene test counts
+this and `_read_json` as the only two places `src/` parses JSON.
+"""
+_parse_json(text::AbstractString) = JSON.parse(String(text); dicttype=Dict{String,Any})
+
 # ============================================================================
 # LOAD MODULES
 # ============================================================================
@@ -893,6 +903,12 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
             return GraphMode.build_graph_project(config)
         end
 
+        # Rust: cargo and rustc compile and link the crate; RepliBuild sets
+        # their flags and reads the library, its DWARF and the IR back.
+        if config.rust !== nothing
+            return abspath(RustBuild.build_rust_project(config))
+        end
+
         # Compile the project (C++ → IR → library + metadata)
         library_path = Compiler.compile_project(config)
 
@@ -991,6 +1007,15 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
             isempty(headers) || error("wrap: `headers` does not apply to a [graph] project; " *
                                       "each library's headers come from its own include path.")
             return GraphMode.wrap_graph_project(config)
+        end
+
+        # Rust: the build writes the metadata a wrapper is generated from;
+        # the generator that reads it is not built yet.
+        if config.rust !== nothing
+            error("wrap: wrappers for a [rust] project are not built yet. `build` writes " *
+                  joinpath(ConfigurationManager.get_output_path(config), "compilation_metadata.json") *
+                  ", which says how each function of the crate is called; the generator that reads it " *
+                  "is the next piece (docs/updates/RUST_FRONT_END.md).")
         end
 
         # Find library

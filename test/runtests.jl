@@ -194,7 +194,7 @@ include(joinpath(@__DIR__, "suites.jl"))
     @test count(t -> t.suite === :unit, TESTS) > 5
     @test count(t -> t.suite === :dev, TESTS) > 5
     @test all(t -> t.suite in (:unit, :dev), TESTS)
-    known_areas = Set([:build, :dwarf, :c, :cpp, :dialect, :graph])
+    known_areas = Set([:build, :dwarf, :c, :cpp, :dialect, :graph, :rust])
     @test all(t -> !isempty(t.areas) && issubset(Set(t.areas), known_areas), TESTS)
     @test all(f -> issubset(Set(f.areas), known_areas), FIXTURES)
     jobs = Set(vcat(["fixture:" * f.name for f in FIXTURES], [t.file for t in TESTS]))
@@ -217,6 +217,7 @@ include(joinpath(@__DIR__, "suites.jl"))
 
     # The change map answers for every source file, and the whole-tree paths exist.
     @test areas_of_path("src/Builder/GraphMode.jl") == [:graph]
+    @test areas_of_path("src/Builder/RustABI.jl") == [:rust]
     @test areas_of_path("src/Wrapper/C/GeneratorC.jl") == [:c]
     @test areas_of_path("src/Wrapper/Utils.jl") == [:c, :cpp]
     @test areas_of_path("src/Builder/Compiler.jl") == [:dwarf, :build, :c, :cpp]

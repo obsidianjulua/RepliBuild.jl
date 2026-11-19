@@ -71,11 +71,13 @@ The `Wrapper` package generates Julia FFI modules from DWARF metadata and binary
 | `Wrapper.Cpp.IdentifiersCpp` | `src/Wrapper/Cpp/IdentifiersCpp.jl` | Namespace stripping, operator sanitization |
 | `Wrapper.Cpp.UtilsCpp` | `src/Wrapper/Cpp/UtilsCpp.jl` | C++ formatting helpers |
 | `Wrapper.Cpp.STLWrappers` | `src/Wrapper/Cpp/STLWrappers.jl` | STL container type detection and accessor generation |
-| `Wrapper.Rust.GeneratorRust` | `src/Wrapper/Rust/GeneratorRust.jl` | Experimental Rust generator — requires `extern "C"` + `#[repr(C)]` surfaces |
+| `RustBuild` | `src/Builder/RustBuild.jl` | `build` for a `[rust]` project: cargo and rustc compile and link the crate, and the result is read back into `compilation_metadata.json` |
+| `RustABI` | `src/Builder/RustABI.jl` | How each Rust function is called, read from the `define` lines of rustc's IR and matched to its DWARF parameters; a function that does not match is refused |
+| `RustDWARF` | `src/Builder/RustDWARF.jl` | rustc's DWARF: records, enums that carry data, pointer kinds, methods |
 
 ### Language selection
 
-`wrap.language` is an extensible dispatch key — `"c"` and `"cpp"` are the first two targets, with additional language generators planned:
+`wrap.language` selects the generator: `"c"` or `"cpp"`. A Rust project is selected by its `[rust]` section instead, and takes a path of its own from `build` on (`RustBuild`); its wrapper generator is not built yet.
 
 ```toml
 [wrap]
@@ -83,7 +85,7 @@ language = "c"   # selects C generator + clang toolchain
 language = "cpp" # selects C++ generator + clang++ toolchain (default)
 ```
 
-`discover()` sets this automatically based on the scanned source files. Adding a new language means adding a generator under `src/Wrapper/<Lang>/` and registering it in `Wrapper/Generator.jl`.
+`discover()` sets this automatically based on the scanned source files. A new language is more than a generator: the build pipeline takes any language that is not C for C++, so a language with its own compiler branches off before it, as Rust does.
 
 ### Tier selection logic
 

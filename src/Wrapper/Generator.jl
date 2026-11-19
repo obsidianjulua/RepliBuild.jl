@@ -43,6 +43,11 @@ function wrap_library(config::RepliBuildConfig, library_path::String;
                      aot_compile=nothing,
                      graph_imports=nothing)
 
+    # The two generators read C and C++ metadata, and take any language that
+    # is not C for C++. A Rust project's metadata is another shape.
+    config.rust === nothing ||
+        error("wrap_library: $(config.project.name) is a [rust] project; the C and C++ generators " *
+              "do not read its metadata")
 
     if !isfile(library_path)
         error("Library not found: $library_path")

@@ -25,7 +25,7 @@ const REPO_ROOT = dirname(dirname(@__DIR__))
 # ── Prerequisites ────────────────────────────────────────────────────────────
 
 const _TOOLS = Dict(:clang => "clang", :clangxx => "clang++", :cmake => "cmake",
-                    :git => "git", :nm => "nm")
+                    :git => "git", :nm => "nm", :cargo => "cargo", :rustc => "rustc")
 
 """
     have(need::Symbol) -> Bool
@@ -39,7 +39,7 @@ tool it names through it, and the runtests CI runners have none), `:llvm_link`
 that `LLVMEnvironment.with_llvm_env` sets, which can reach a bin, such as
 apt.llvm.org's `/usr/lib/llvm-N/bin`, that the user's `PATH` does not), or a tool
 on `PATH`:
-`:clang`, `:clangxx`, `:cmake`, `:git`, `:nm`. An unknown name is an error rather
+`:clang`, `:clangxx`, `:cmake`, `:git`, `:nm`, `:cargo`, `:rustc`. An unknown name is an error rather
 than `false`, because a misspelt prerequisite would otherwise skip its file
 forever and look like a machine without the tool.
 """

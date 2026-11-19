@@ -22,6 +22,11 @@ Ingest and llmcall are John's features with julia dont use them clancker.
 | 2 | MLIR thunks via the JLCS dialect (`libJLCS.so`) | C++ methods, by-value aggregates, packed structs, unions, virtual dispatch, EH |
 | 3 | `ccall` | Everything else; the default for C |
 
+A **Rust front end is in progress** (branch work since 2026-11-19): `build` on a
+`[rust]` project works, `wrap` does not exist yet. It wraps plain Rust, never
+`extern "C"`; design and measurements are `docs/updates/RUST_FRONT_END.md`, the
+rules are under "Rust front end" below.
+
 Positioning: a hands-on dev tool for wrapping libraries **from source**, not a
 JLL/BinaryBuilder replacement. DWARF from the real compile is the source of truth —
 RepliBuild operates on what Clang already resolved, not on a source AST.
@@ -452,6 +457,14 @@ If you are asked to work on it:
   wrapped before it, so a type an earlier library owns is imported, never
   emitted again (`Wrapper/TypeImports.jl`; the invariant under Generators).
   (`test_graph_mode.jl`, devtests `test_graph_mode_live.jl`.)
+- `Builder/RustBuild.jl`, `RustABI.jl`, `RustDWARF.jl` — the Rust front end's
+  build side. `RustBuild.build_rust_project`: cargo and rustc compile AND link
+  the crate (`cargo rustc --crate-type dylib -- --emit=llvm-ir,link`, the
+  profile stated whole), then `compilation_metadata.json` with `"language":
+  "rust"`: one row per function (`RustABI.join_function`) and the types they
+  reach (`RustDWARF`). `RustABI` and `RustDWARF` are text in, tables out, and
+  run no tool. (`test_rust_abi.jl`, `test_rust_dwarf.jl`, `test_rust_config.jl`,
+  devtests `test_rust_build_live.jl`.)
 - `Builder/PackageRegistry.jl` — `~/.replibuild/` registry. **A project builds
   where it lives.** An entry points at the project's own TOML; `register` builds
   and wraps in place, vendors the output to `builds/<hash_config>/` (immutable:
@@ -1909,6 +1922,59 @@ beside it that `path =` does not name is stale and lacks recent versions. 3.3.2
 is a permanent hole there. Registration is manual and
 outward-facing, so ask first.
 
+### Rust front end (in progress)
+
+- **A Rust project never enters the C/C++ pipeline.** `compile_project`, the
+  generators and ~30 sites in `Compiler.jl` take any language that is not C
+  for C++ (`language == :c ? a : b`). `[rust]` selects the front end
+  (`config.rust`, like `config.graph`), `build` branches on it, and
+  `compile_project` and `wrap_library` refuse a Rust config. Anything that
+  copies a `RepliBuildConfig` carries `config.rust`: `resolve_dependencies`
+  runs before the branch.
+- **rustc's ABI is read, never predicted.** The call is the function's
+  `define` line in the IR of THAT build (`RustABI.definitions`), read as text;
+  rustc's IR is never loaded into an LLVM. DWARF says what each parameter is,
+  and `join_function` matches the two: every option (`ignore`, `direct`,
+  `pair`, `cast`, `indirect`) is checked against the IR types it would take,
+  and a function whose IR parameters are not all accounted for in exactly ONE
+  way is a refusal with its reason, never a guess. A new way rustc passes
+  something goes into `_options` and the return arm together.
+- **`ccall` is right for a Rust function only where every IR type is a scalar
+  or a pointer.** A two-scalar return (`{ i32, i32 }`: `Option<i32>`) is wrong
+  through `ccall` and right through a thunk that states the define line; on
+  SysV some pairs come out right by coincidence, which is not evidence. A
+  hidden return pointer is the first argument on x86-64 only (AArch64: x8).
+  A Rust panic through `jlcs.try_call` segfaults: the catching frame must be
+  Rust's (`catch_unwind`), outside a thunk that makes a plain call.
+- **The surface is exported ∩ defined in the crate's IR ∩ the crate's own.**
+  "The crate's own" is the root of the v0 mangled path (`RustABI.v0_root`,
+  which parses the name: an `impl` block's path is not in the demangled
+  text), or a name rustc did not mangle. Never the crate's name appearing in
+  a symbol: an instantiation of `core`'s generic carries it as a suffix. A
+  Rust library exports the standard library (1,743 symbols for 17 functions)
+  and its DWARF holds std's too.
+- **A symbol with no `define` line can still be a function**: above opt-level
+  1 LLVM merges functions with the same code and keeps one as an IR alias
+  (`RustABI.aliases`, row key `alias_of`). Without the alias table it leaves
+  the surface silently.
+- **An optimized build keeps incremental compilation on.** Above opt-level 0
+  rustc gives a small `pub fn` no symbol unless incremental is on (4 of 17
+  kept one at opt-level 3; 17 of 17 with it). `cargo_args` states the whole
+  profile (`codegen-units=1`, so exactly one `<crate>.ll`); changing one
+  setting there needs the surface re-measured.
+- **`RustDWARF` builds a unit's DIE tree only when the unit names a wanted
+  symbol**, and resolves after the tree is built, so DIE order cannot matter.
+  Types are keyed by SCOPED name (`core::option::Option<i32>::Some`); two
+  layouts under one key are marked `conflict` and have no shape. A constant
+  that may not fit `Int64` (a niche discriminant) is carried as a decimal
+  string; `_number` answers `nothing` for a location expression.
+- `rust_metadata.key` gates re-extraction (library, IR, toolchain, generator
+  fingerprint) and is removed before one. `_generator_fingerprint` does not
+  see the contents of UNTRACKED files: while a new `src/` file is untracked,
+  delete the key to re-extract.
+- `src/` parses JSON in two places only: `_read_json` (a file) and
+  `_parse_json` (text a tool printed). `test_json_mmap_hygiene.jl` holds both.
+
 ## Debugging Tier 2 thunks
 
 Start here for any ABI question: register state is observable.
@@ -2009,6 +2075,13 @@ Start here for any ABI question: register state is observable.
   `graph_generators_test/` (configured with cmake and Ninja) and
   `graph_mode_test/` (a CMake project; its test writes a `[graph]` TOML into a
   copy, since `test/*/*.toml` is untracked) are graph mode's live fixtures.
+
+- Rust: `test/rust_test/crate` is the live fixture crate (one directory
+  deeper than the others: `test/*/*.toml` is untracked and would take its
+  `Cargo.toml`); `test/rust_test/verify.jl` is its child-process probe.
+  `test/fixtures/rust/lean_o{0,3}.*` are vendored from `lean.rs` by
+  `test/tools/gen_rust_fixtures.jl` (IR lines as `.ir.txt`: `*.ll` is
+  ignored).
 
 - **A test that pins emitted text pins the part it is about** (the thunk and
   the return type, the type of one position), not a whole call. Six tests went
@@ -2292,6 +2365,16 @@ don't file them as defects. Never extrapolate a narrow entry into "X is unbuilt"
 read the generator output first. (User-facing C++ RAII — `Managed<T>` finalizers with
 DWARF-resolved destructors — **is** built.)
 
+- **Rust, everything after the build** (2026-11-19;
+  `docs/updates/RUST_FRONT_END.md` §20): the dialect call form that passes a
+  define line through verbatim (an `ABI_VERSION` bump), the generated crate
+  (catching frame first, then drop functions, declared generic
+  instantiations, `dyn` forwarders), and GeneratorRust. Also unbuilt on the
+  build side: a crate from a `[dependencies]` checkout, `discover` on a Cargo
+  project, the doctor reporting cargo and rustc (`build` still asks the
+  C/C++ doctor first), statics, an `extern "C"` function taking a record the
+  C way, a crate with several codegen units. Measured on Linux x86-64 only;
+  AArch64 and Windows runs of the built part are not done.
 - Toolchain records by value that still trap (narrowed 2026-11-13; `tuple`,
   `optional` and `complex` are laid out, above): one with a virtual base, a
   struct (not a union) holding an empty record as a member, and anything
