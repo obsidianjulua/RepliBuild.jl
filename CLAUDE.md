@@ -1146,6 +1146,27 @@ the test named when you touch the area.
   refuses a wrapper whose parsed text defines one method twice.
   (`test_factory_ctor_collisions.jl`, devtests
   `test_factory_ctor_collisions_live.jl`, `test_cpp_finalizers.jl`.)
+- **A type's constructor keeps its name over a function of that name**
+  (2026-11-18, `NameScreen._constructor_clashes`). C gives struct tags a
+  namespace of their own, so a global or a no-argument function named like a
+  struct (curl's `const struct Curl_ssl *Curl_ssl;`, `struct pool
+  *pool(void);`) defined the same Julia method as the struct's
+  zero-initializer `T()`: the later replaced the earlier silently, and
+  `_assert_no_duplicate_methods` then refused the whole wrap. The name
+  screen lets a function stand beside a type of its name, since methods
+  beside a type are its constructors; that is wrong only when the type's own
+  emitted text already defines that signature. `_screen_verdict` now moves
+  such a kept function to `name_` (reason `:type_constructor`, through the
+  one existing mechanism, `_function_alternative`) and the wrap's `names:`
+  report says so; `T()` stays the zeroed record for every struct, union,
+  byte blob and bitfield record, in both generators. It reads the text with
+  the guard's own `_method_definitions`, and only when a kept function shares
+  a name with a type. A global's `<name>_ptr` accessor is named from the
+  library's spelling and screened on its own, never derived from the moved
+  value accessor: `conf_ptr()`, `Dict_ptr()`, not `Dict__ptr()`.
+  `[wrap.rename]` still chooses a function's name first; it does not reach
+  global accessors. (`test_type_name_collisions.jl`, devtests
+  `test_type_name_collisions_live.jl`, `test_name_screen.jl`.)
 - **A pointer or reference return is typed from its declaration**
   (`_typed_pointer_return`, both generators): `T*`, `const T*`, `T&`, `T**` give
   `Ptr{T}`/`Ptr{Ptr{T}}` when `T` is a type the module emits
@@ -2225,8 +2246,9 @@ the module or added methods to Base, `unsigned __int128`, the `char8/16/32_t`
 traps, `extern "C"` functions that throw, alias symbols; then signed
 bitfields, by-value `char`, `signed char*` returns, C strings on the `ccall`
 paths, C++ globals outside the global namespace, pure virtual methods,
-operator names, a record's pointer to a factory class, and factories that
-share a constructor signature. Still open:
+operator names, a record's pointer to a factory class, factories that share
+a constructor signature, and a global or no-argument function named like its
+struct. Still open:
 
 - **Same-named enums in two scopes collapse** (`Mode`, `ns::Mode`): one's
   enumerators are bound nowhere and its functions return the other type. The
@@ -2235,14 +2257,18 @@ share a constructor signature. Still open:
   moves as C++ does, but the caller's Julia value is an immutable bits copy,
   so using it again is a use-after-free. What owns a move-only object on the
   Julia side is John's call.
-- **A C global named like its struct tag refuses the wrap** (found
-  2026-11-18): curl's `const struct Curl_ssl *Curl_ssl;` gives the struct's
-  zero-initializer `Curl_ssl()` and the global's accessor `Curl_ssl()`, one
-  signature twice. The accessor used to replace the zero-initializer
-  silently; `_assert_no_duplicate_methods` now refuses the wrapper, so the
-  Hub's curl cannot be re-wrapped until the accessor takes a name of its own
-  (the name screen lets a function stand beside a type of its name, which is
-  right for every signature but this one).
+- **A function named like a struct shadows the struct's field constructor
+  for some argument types** (found 2026-11-18): `struct pair { int a; int b;
+  };` beside `int pair(int a, int b);` gives the type `pair` one more method,
+  `pair(::Integer, ::Integer)`, so `pair(1, 2)` calls the C function and
+  `pair(Cint(1), Cint(2))` builds the struct. No text defines a method twice
+  (the field constructor is implicit), so neither the duplicate-method guard
+  nor `_constructor_clashes` sees it.
+- **Two library names that collide after a move are refused, not resolved**:
+  a library that defines both a struct-named global `conf` and its own
+  `conf_`, or a global `conf` beside a function `conf_ptr(void)`. The
+  duplicate-method guard refuses the wrap; `_function_alternative` checks
+  Julia's names only.
 - **Factory constructors take the strict C type**: `Animal(4)` is a
   `MethodError` (`Animal(legs::Cint)`) while `make_animal(4)` takes any
   `Integer`. Relaxing it changes every factory class's text and makes
