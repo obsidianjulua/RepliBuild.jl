@@ -1404,7 +1404,11 @@ of §15's walk now exists in `src/`.
    (i32, i32), ptr @…3add`. The alias is exported, has no `define` line and
    often no DIE. Left unread it is a function missing from the surface with
    no word said. `RustABI.aliases` reads it; the row carries `alias_of`, and
-   the target's types when it has no DIE of its own.
+   the target's types when it has no DIE of its own (`own_debug_info`
+   false). Those are right for the call and may not be the Rust types the
+   function was written with: `flip(Side) -> Side` and `flag(bool) -> bool`
+   are one function once optimized, and the library does not say which the
+   merged one was. What a wrapper shows for such a function is undecided.
 5. **Steps 1 to 5 of §15's walk are built** (§19). `RepliBuild.build` on a
    `[rust]` project writes the library and a `compilation_metadata.json`
    that says, for every function of the crate, how it is called; the dialect

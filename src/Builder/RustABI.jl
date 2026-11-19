@@ -699,6 +699,11 @@ end
 function _scalar_matches(leaf::Leaf, ir::AbstractString)::Bool
     leaf.class === :ptr   && return ir == "ptr"
     leaf.class === :bool  && return ir == "i1"
+    # One byte that only ever holds 0 or 1 is one bit in the call, whatever
+    # its type: a two-variant enum, a `Result<(), E>` with nothing in either
+    # arm (every `fmt` returns one). rustc knows the range and writes `i1`;
+    # DWARF says only "one byte", so the IR decides between the two.
+    (leaf.size == 1 && leaf.class in (:int, :mixed) && ir == "i1") && return true
     leaf.class === :int   && return ir == "i$(8 * leaf.size)"
     leaf.class === :float && return (leaf.size == 4 && ir == "float") || (leaf.size == 8 && ir == "double") ||
                                     (leaf.size == 2 && ir == "half") || (leaf.size == 16 && ir == "fp128")

@@ -57,6 +57,13 @@ pub fn slot_d(s: &Slot) -> u32 { match s { Slot::Empty => 0, Slot::Full(r) => r.
 pub fn maybe(x: i32) -> Option<i32> { if x >= 0 { Some(x + 1) } else { None } }
 pub fn opt_ref_d(r: Option<&Rec>) -> u32 { r.map(|r| r.d).unwrap_or(0) }
 
+// --- one byte that is only ever 0 or 1 is one bit in the call ----------------------
+pub enum Side { Left, Right }
+pub fn flip(s: Side) -> Side { match s { Side::Left => Side::Right, Side::Right => Side::Left } }
+pub fn check(x: i32) -> Result<(), ()> { if x >= 0 { Ok(()) } else { Err(()) } }
+pub struct Opts { pub scale: f64, pub on: bool }
+pub fn opts(scale: f64) -> Opts { Opts { scale, on: scale > 0.0 } }
+
 // --- owned values: the callee or the caller must drop them -------------------------
 pub fn make_greeting(name: &str) -> String { format!("hello {name}") }
 pub fn string_len_owned(s: String) -> usize { s.len() }

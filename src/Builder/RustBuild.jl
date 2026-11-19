@@ -595,8 +595,10 @@ Everything `compilation_metadata.json` holds for a Rust library.
   (`RustABI.surface`), as `RustABI.join_function` writes it, plus `path`, its
   Rust path as the demangler prints it. Sorted by path, then symbol. A symbol
   that is an alias of another function (LLVM merged two with the same code)
-  has `alias_of`, that function's symbol: its call is that function's, and
-  so are its types when it has no DIE of its own.
+  has `alias_of`, that function's symbol: its call is that function's. When
+  it has no DIE of its own (`own_debug_info` false) its types are that
+  function's too, which is right for the call and may name other Rust types
+  than the merged function was written with.
 - `types`: every type those functions reach (`RustDWARF.describe_functions`).
 - `skipped`: exported definitions that were left out, each with its reason.
 
@@ -637,11 +639,16 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
         own = get(dwarf_functions, sym, nothing)
         row = RustABI.join_function(sym, defs[tsym], own === nothing ? get(dwarf_functions, tsym, nothing) : own, types)
         row["path"] = get(paths, sym, sym)
+        row["own_debug_info"] = own !== nothing
         if tsym != sym
             row["alias_of"] = tsym
             if own === nothing
-                # The types are the target's, which has the same code. The
-                # name is this symbol's own, read off its path.
+                # The types are the TARGET's, which has the same code and so
+                # the same call, and not necessarily the same Rust types:
+                # `flip(Side) -> Side` and `flag(bool) -> bool` are one
+                # function once optimized, and nothing in the library says
+                # which types the merged one had. `own_debug_info` is false.
+                # The name is this symbol's own, read off its path.
                 (row["scope"], row["name"]) = _path_scope_name(row["path"])
                 row["owner"] = nothing
             end

@@ -265,6 +265,48 @@ end
     @test r["refusal"] !== nothing && occursin("do not match", r["refusal"])
 end
 
+@testset "Rust ABI: one byte that is only 0 or 1 is one bit" begin
+    # rustc passes such a byte as `i1`: a two-variant enum, a `Result<(), E>`
+    # with nothing in either arm (what every `fmt` returns), a `bool`. DWARF
+    # says "one byte"; the define line says which.
+    unit = Dict{String,Any}("kind" => "struct", "size" => 0, "fields" => Any[])
+    types = Dict{String,Any}(
+        "u8" => Dict{String,Any}("kind" => "base", "size" => 1, "encoding" => "unsigned"),
+        "f64" => Dict{String,Any}("kind" => "base", "size" => 8, "encoding" => "float"),
+        "bool" => Dict{String,Any}("kind" => "base", "size" => 1, "encoding" => "boolean"),
+        "Side" => Dict{String,Any}("kind" => "c_enum", "size" => 1, "enumerators" => Any[Any["L", 0], Any["R", 1]]),
+        "Res::Ok" => unit, "Res::Err" => unit,
+        "Res" => Dict{String,Any}("kind" => "enum", "size" => 1, "fields" => Any[],
+                                  "discriminant" => Dict{String,Any}("offset" => 0, "type" => "u8", "size" => 1),
+                                  "variants" => Any[Dict{String,Any}("name" => "Ok", "discr_value" => 0, "type" => "Res::Ok", "offset" => 0),
+                                                    Dict{String,Any}("name" => "Err", "discr_value" => 1, "type" => "Res::Err", "offset" => 0)]),
+        "Opts" => Dict{String,Any}("kind" => "struct", "size" => 16, "fields" => Any[
+            Dict{String,Any}("name" => "scale", "offset" => 0, "type" => "f64"),
+            Dict{String,Any}("name" => "on", "offset" => 8, "type" => "bool")]))
+    dwarf(ret, params...) = Dict{String,Any}("name" => "f", "scope" => String[], "owner" => nothing, "return" => ret,
+                                             "parameters" => Any[Dict{String,Any}("name" => "p$i", "type" => t) for (i, t) in enumerate(params)])
+    def(ret, params...) = RA.IRDefinition("f", String[], "", ret, String[],
+                                          [RA.IRParam(t, String[], "%$i") for (i, t) in enumerate(params)], false, false, "")
+    join(d, w) = RA.join_function("f", d, w, types)
+    # The enum, as a parameter and a return.
+    r = join(def("i1", "i1"), dwarf("Side", "Side"))
+    @test r["refusal"] === nothing && r["return"]["pass"] == "direct" && r["parameters"][1]["pass"] == "direct"
+    # ...and as a whole byte, which is how a wider range is passed: both are the type's one byte.
+    @test join(def("i8", "i8"), dwarf("Side", "Side"))["refusal"] === nothing
+    # `Result<(), E>`: its one byte is the discriminant.
+    r = join(def("i1"), dwarf("Res"))
+    @test r["refusal"] === nothing && r["return"]["pass"] == "direct"
+    # Beside a double, in a pair.
+    r = join(def("{ double, i1 }"), dwarf("Opts"))
+    @test r["refusal"] === nothing && r["return"]["pass"] == "pair"
+    r = join(def("void", "double", "i1"), dwarf(nothing, "Opts"))
+    @test r["refusal"] === nothing && r["parameters"][1]["pass"] == "pair"
+    # One bit is never a wider value's call, and a wider integer is never a bool's.
+    @test join(def("i1"), dwarf("f64"))["refusal"] !== nothing
+    @test join(def("i16"), dwarf("Side"))["refusal"] !== nothing
+    @test join(def("i8"), dwarf("bool"))["refusal"] !== nothing
+end
+
 @testset "Rust ABI: merged functions are aliases" begin
     # Unoptimized, `c_add` is a function of its own; optimized it has `add`'s
     # code, and LLVM keeps the name as an alias with no `define` and no DIE.

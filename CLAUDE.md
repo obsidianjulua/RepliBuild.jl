@@ -1967,7 +1967,12 @@ outward-facing, so ask first.
 - **A symbol with no `define` line can still be a function**: above opt-level
   1 LLVM merges functions with the same code and keeps one as an IR alias
   (`RustABI.aliases`, row key `alias_of`). Without the alias table it leaves
-  the surface silently.
+  the surface silently. The merged function usually has no DIE, so its row
+  carries its TARGET's types and `own_debug_info: false`: the call is right
+  and the Rust types may not be (`flip(Side)` merged into `flag(bool)`).
+  Nothing in the library says what they were; a generator must not present
+  such a row's types as the function's own. A one-byte value that is only 0
+  or 1 (a `bool`, a two-variant enum, `Result<(), E>`) is `i1` in the call.
 - **An optimized build keeps incremental compilation on.** Above opt-level 0
   rustc gives a small `pub fn` no symbol unless incremental is on (4 of 17
   kept one at opt-level 3; 17 of 17 with it). `cargo_args` states the whole

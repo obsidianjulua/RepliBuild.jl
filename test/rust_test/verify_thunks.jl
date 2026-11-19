@@ -114,6 +114,18 @@ case("char_and_plain_scalars") do
      at(call("c_add", Int32(20), Int32(22)), Int32, 0), at(call("rb_fix::checked_div", Int32(9), Int32(3)), Int32, 0)) ==
         (0xe9, 5, 42, 3)
 end
+# One byte that is only ever 0 or 1 crosses as one bit: a two-variant enum, a
+# `Result<(), ()>`, and a `bool` beside a `f64` in a pair.
+case("one_bit_values") do
+    flips = [call("rb_fix::flip", UInt8(s))[1] for s in 0:1]
+    result = TYPES[FN["rb_fix::check"]["return"]["type"]]
+    tag(name) = only(v for v in result["variants"] if v["name"] == name)["discr_value"]
+    ok = call("rb_fix::check", Int32(1))[1]; err = call("rb_fix::check", Int32(-1))[1]
+    on = call("rb_fix::opts", 2.0); off = call("rb_fix::opts", -2.0)
+    o(buf) = (at(buf, Float64, offset("rb_fix::Opts", "scale")), buf[offset("rb_fix::Opts", "on")+1])
+    (flips, ok == tag("Ok"), err == tag("Err"), o(on), o(off)) == ([1, 0], true, true, (2.0, 0x01), (-2.0, 0x00)) ? true :
+        (flips, ok, err, o(on), o(off))
+end
 # A zero-sized argument is not passed, and a zero-sized result is not returned.
 case("zero_sized") do
     isempty(call("rb_fix::z", Int32(1)))

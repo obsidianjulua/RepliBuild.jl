@@ -162,7 +162,7 @@ if requires("Rust thunks (live)", :libJLCS, :cargo, :rustc, :nm)
             @test haskey(v, "PROBE_DONE")
             expected = ["thunks_for_every_callable", "option_i32", "two_field_record", "record_of_two_doubles", "tuple",
                         "str_returned", "method_returning_a_record", "trait_object", "three_byte_integer", "u128",
-                        "bool", "fieldless_enum", "char_and_plain_scalars", "zero_sized",
+                        "bool", "fieldless_enum", "char_and_plain_scalars", "one_bit_values", "zero_sized",
                         "record_through_hidden_pointer", "enum_with_data", "string_out_and_in", "slices",
                         "box_and_niche", "wrong_calls_are_errors"]
             for name in expected

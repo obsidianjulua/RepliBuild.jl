@@ -129,6 +129,10 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         @test fn["rb_fix::make_area"]["return"]["pass"] == "pair"          # Box<dyn Area>: data and vtable
         @test pass("rb_fix::dyn_area") == [("a", "pair", [1, 2])]
         @test pass("rb_fix::b3_rot") == [("x", "cast", [1])]
+        # One byte that is only ever 0 or 1 is `i1` in the call, whatever its type.
+        @test fn["rb_fix::flip"]["ir"]["return"]["type"] == "i1" && pass("rb_fix::flip") == [("s", "direct", [1])]
+        @test fn["rb_fix::check"]["ir"]["return"]["type"] == "i1" && fn["rb_fix::check"]["return"]["pass"] == "direct"
+        @test fn["rb_fix::opts"]["ir"]["return"]["type"] == "{ double, i1 }" && fn["rb_fix::opts"]["return"]["pass"] == "pair"
         @test pass("rb_fix::string_len_owned") == [("s", "indirect", [1])]
         @test fn["rb_fix::make_greeting"]["return"]["type"] == "alloc::string::String"
         @test fn["rb_fix::boxed"]["return"]["pass"] == "direct"
@@ -195,8 +199,28 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         # The same calls, read from other define lines and other DIEs.
         for path in plain
             fn[path]["refusal"] === nothing || continue
-            @test (path, [(p["type"], p["pass"], p["ir"]) for p in fn3[path]["parameters"]], fn3[path]["return"]["pass"]) ==
-                  (path, [(p["type"], p["pass"], p["ir"]) for p in fn[path]["parameters"]], fn[path]["return"]["pass"])
+            @test (path, [(p["pass"], p["ir"]) for p in fn3[path]["parameters"]], fn3[path]["return"]["pass"]) ==
+                  (path, [(p["pass"], p["ir"]) for p in fn[path]["parameters"]], fn[path]["return"]["pass"])
+            # ...and the same types, wherever the function still has debug info of its own.
+            fn3[path]["own_debug_info"] || continue
+            @test (path, [p["type"] for p in fn3[path]["parameters"]], fn3[path]["return"]["type"]) ==
+                  (path, [p["type"] for p in fn[path]["parameters"]], fn[path]["return"]["type"])
+        end
+        @test all(f -> f["own_debug_info"], md["functions"])            # unoptimized, nothing is merged
+        # Optimized, LLVM merges functions whose code is the same and keeps one
+        # as an alias with no debug info. Its call is its target's; its types
+        # are reported as its target's and marked as not its own. `flip` takes
+        # an enum and `flag` a bool, and they are one function here.
+        for f in md3["functions"]
+            f["own_debug_info"] && continue
+            @test haskey(f, "alias_of") && f["refusal"] === nothing
+            target = only(g for g in md3["functions"] if g["symbol"] == f["alias_of"])
+            @test [p["type"] for p in f["parameters"]] == [p["type"] for p in target["parameters"]]
+        end
+        if haskey(fn3["rb_fix::flip"], "alias_of")
+            @test fn3["rb_fix::flip"]["alias_of"] == fn3["rb_fix::flag"]["symbol"] && !fn3["rb_fix::flip"]["own_debug_info"]
+            @test fn3["rb_fix::flip"]["name"] == "flip" && fn3["rb_fix::flip"]["scope"] == ["rb_fix"]
+            @test fn["rb_fix::flip"]["parameters"][1]["type"] == "rb_fix::Side"      # what the unoptimized build knows
         end
         # Optimized, the compiler proves what cannot unwind, and says what can.
         @test fn3["rb_fix::add"]["nounwind"] && !fn3["rb_fix::checked_div"]["nounwind"]
