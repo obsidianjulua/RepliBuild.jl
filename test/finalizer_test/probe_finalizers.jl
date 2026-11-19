@@ -25,7 +25,8 @@ collect_all() = (for _ in 1:4; GC.gc(true); end; yield())
 @noinline function rect_areas(n)
     t = 0.0
     for _ in 1:n
-        t += M.area(M.Rect(2.0, 3.0))
+        # `make_rect_nx` takes the same arguments, so the factory is named.
+        t += M.area(M.Rect(Val(:make_rect), 2.0, 3.0))
     end
     return t
 end

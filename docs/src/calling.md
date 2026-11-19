@@ -339,6 +339,13 @@ wrapper may turn that class into a Julia type you construct directly:
 (`M.area(r)`), and the object is deleted by the garbage collector.
 `methods(M.Rect)` shows whether your wrapper has this.
 
+When two factories of one class take the same argument types, name the one you
+want: with `make_animal(int)` and `make_animal_doubled(int)`,
+`M.Animal(Val(:make_animal), Cint(4))` and
+`M.Animal(Val(:make_animal_doubled), Cint(4))` call each, and a bare
+`M.Animal(Cint(4))` is a `MethodError` that lists both. The type's docstring
+names them.
+
 ## What a pointer argument accepts
 
 In a C++ wrapper, every pointer parameter, every reference and the object of a

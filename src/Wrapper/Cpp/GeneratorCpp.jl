@@ -1092,7 +1092,86 @@ end
 const _IDIOMATIC_ADOPT = "Base.Val(:_rb_adopt)"
 
 """
-    _idiomatic_early_type(cls_nm, deleter_doc) -> String
+    _factory_ctor_plan(factories, julia_name) -> Vector{NamedTuple}
+
+The constructors a factory class (the idiomatic wrapper) gets, one per
+factory function, in the factories' order: `factory` (the function's Julia
+name, `julia_name(name, mangled)`, the main loop's derivation), `sig_parts`
+(`name::Type` per parameter), `call_args`, and `tagged`.
+
+A constructor takes the factory's parameters, so two factories whose
+parameters have one Julia dispatch signature gave the class one method
+twice: `make_animal(int legs)` and `make_animal_doubled(int half)` both made
+`Animal(::Cint)`. Included as a file the later definition replaced the
+earlier with no message (`Animal(Cint(4))` made 8 legs), and in a
+precompiled package Julia refused the overwrite, so the package did not load
+(2026-11-18). The dedup keyed on the parameter TEXT, names included.
+
+Signatures are compared as `_method_sig_keys` compares them, by the type each
+C alias names on this host (`_concrete_sig_type`: `Cint` and `Int32` are one
+type, `Clong` and `Clonglong` one on LP64). A signature one factory has stays
+its plain constructor, so a class with no collision keeps its text. A
+signature several factories share is none of theirs: each is `tagged`, and
+its constructor takes `::Base.Val{:<factory>}` first, so the caller names the
+factory and the bare call is a `MethodError` listing them. A factory listed
+twice (one function, two DWARF entries) is one entry, the first.
+"""
+function _factory_ctor_plan(factories, julia_name::Function)
+    entries = NamedTuple{(:factory, :sig_parts, :call_args, :key),
+                         Tuple{String,Vector{String},Vector{String},String}}[]
+    seen = Set{Tuple{String,String}}()
+    for fac_func in factories
+        fac_jl = julia_name(String(fac_func["name"]), String(get(fac_func, "mangled", "")))
+        sig_parts  = String[]
+        call_args  = String[]
+        types      = String[]
+        used_names = Set{String}()
+        for (i, p) in enumerate(get(fac_func, "parameters", Any[]))
+            p_nm = make_cpp_identifier(get(p, "name", "arg$(i)"))
+            while p_nm in used_names; p_nm = "$(p_nm)_$(i)"; end
+            push!(used_names, p_nm)
+            p_jt = String(get(p, "julia_type", "Any"))
+            push!(sig_parts, "$p_nm::$p_jt")
+            push!(call_args, p_nm)
+            push!(types, _concrete_sig_type(p_jt))
+        end
+        key = join(types, ",")
+        (fac_jl, key) in seen && continue
+        push!(seen, (fac_jl, key))
+        push!(entries, (factory = fac_jl, sig_parts = sig_parts, call_args = call_args, key = key))
+    end
+    sharers = Dict{String,Int}()
+    for e in entries
+        sharers[e.key] = get(sharers, e.key, 0) + 1
+    end
+    return [(factory = e.factory, sig_parts = e.sig_parts, call_args = e.call_args,
+             tagged = sharers[e.key] > 1) for e in entries]
+end
+
+"""
+    _factory_ctor_doc(cls_nm, plan) -> String
+
+The lines a factory class's docstring adds when factories share a signature
+(`_factory_ctor_plan`): how to call each of them. Empty when none is tagged,
+so a class with no collision keeps its docstring.
+"""
+function _factory_ctor_doc(cls_nm::AbstractString, plan)::String
+    tagged = sort!([e for e in plan if e.tagged]; by = e -> e.factory)
+    isempty(tagged) && return ""
+    lines = String["",
+                   "",
+                   "Factories that take the same argument types are called by name, never",
+                   "positionally (`$cls_nm(args...)` with those types is a `MethodError`):",
+                   ""]
+    for e in tagged
+        args = join(["Val(:$(e.factory))"; e.call_args], ", ")
+        push!(lines, "- `$cls_nm($args)` calls `$(e.factory)`")
+    end
+    return join(lines, "\n")
+end
+
+"""
+    _idiomatic_early_type(cls_nm, deleter_doc; factory_doc = "") -> String
 
 The type of a factory class (the idiomatic wrapper) that a record's field
 names, without its constructors. `struct Cage { Animal *pet; }` emits
@@ -1105,16 +1184,18 @@ record by value or by pointer, the holder included, or another factory class.
 So they are outer constructors in the idiomatic section, after every type, and
 reach `new` through the one inner constructor here, which only stores the
 handle; they attach the finalizer as the inner ones do. A class no field names
-keeps its inner constructors, so its text does not change.
+keeps its inner constructors, so its text does not change. `factory_doc` is
+what `_factory_ctor_doc` adds to the docstring.
 """
-function _idiomatic_early_type(cls_nm::AbstractString, deleter_doc::AbstractString)::String
+function _idiomatic_early_type(cls_nm::AbstractString, deleter_doc::AbstractString;
+                               factory_doc::AbstractString = "")::String
     return """
     \"\"\"
         $cls_nm
 
     Idiomatic Julia wrapper for C++ class `$cls_nm`.
     Memory is automatically managed: when Julia's GC collects this object,
-    its finalizer $deleter_doc.
+    its finalizer $deleter_doc.$factory_doc
     \"\"\"
     mutable struct $cls_nm
         handle::Ptr{Cvoid}
@@ -3563,34 +3644,29 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # may take a record, even the one holding the pointer.
             early = cls_nm in idiomatic_named_early
 
-            # Build one inner constructor block per factory function.
+            # One constructor per factory function. A dispatch signature that
+            # several factories share is no factory's positional constructor:
+            # each of them is called by name (`_factory_ctor_plan`).
             ctor_blocks = String[]
-            seen_ctor_sigs = Set{String}()
-
-            for fac_func in factories
-                fac_jl     = _sanitize_julia_fn(String(fac_func["name"]),
-                                                String(get(fac_func, "mangled", "")))
-                fac_params = get(fac_func, "parameters", Any[])
-
-                sig_parts  = String[]
-                call_args  = String[]
-                used_names = Set{String}()
-
-                for (i, p) in enumerate(fac_params)
-                    p_nm = make_cpp_identifier(get(p, "name", "arg$(i)"))
-                    while p_nm in used_names; p_nm = "$(p_nm)_$(i)"; end
-                    push!(used_names, p_nm)
-                    p_jt = get(p, "julia_type", "Any")
-                    push!(sig_parts, "$p_nm::$p_jt")
-                    push!(call_args, p_nm)
+            plan = _factory_ctor_plan(factories, _sanitize_julia_fn)
+            let shared = sort!(unique!([e.factory for e in plan if e.tagged]))
+                if !isempty(shared)
+                    println("  wrap: class $cls_nm has factories sharing a constructor signature, ",
+                            "each called by name as $cls_nm(Val(:<factory>), …): ", join(shared, ", "))
                 end
+            end
+            factory_doc = _factory_ctor_doc(cls_nm, plan)
 
-                param_sig = join(sig_parts, ", ")
-                call_sig  = join(call_args, ", ")
-
-                # Deduplicate identical constructor signatures (duplicate DWARF entries)
-                param_sig in seen_ctor_sigs && continue
-                push!(seen_ctor_sigs, param_sig)
+            for e in plan
+                fac_jl   = e.factory
+                # The early type's own constructor takes this tag (`_IDIOMATIC_ADOPT`).
+                e.tagged && fac_jl == "_rb_adopt" &&
+                    Base.error("factory `_rb_adopt` of $cls_nm: the name is the factory class's own constructor tag")
+                call_sig = join(e.call_args, ", ")
+                # A shared signature takes the factory's name first, as a `Val`.
+                param_sig = e.tagged ?
+                    join(["::Base.Val{:$(fac_jl)}"; e.sig_parts], ", ") :
+                    join(e.sig_parts, ", ")
 
                 push!(ctor_blocks, early ? """
                 function $cls_nm($param_sig)
@@ -3619,7 +3695,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             ctors_str = join(ctor_blocks, "\n")
 
             if early
-                push!(early_types, _idiomatic_early_type(cls_nm, deleter_doc))
+                push!(early_types, _idiomatic_early_type(cls_nm, deleter_doc; factory_doc = factory_doc))
                 push!(struct_chunks, """
                 # Constructors of $cls_nm. Its type is defined ahead of the records,
                 # since a record's field names it (Idiomatic Class Types).
@@ -3640,7 +3716,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
             Idiomatic Julia wrapper for C++ class `$cls_nm`.
             Memory is automatically managed: when Julia's GC collects this object,
-            its finalizer $deleter_doc.
+            its finalizer $deleter_doc.$factory_doc
             \"\"\"
             mutable struct $cls_nm
                 handle::Ptr{Cvoid}
@@ -3683,6 +3759,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # Method proxies for $cls_nm
             """)
 
+            # One proxy per dispatch signature. Keyed by the text, parameter
+            # names included, two overloads one Julia signature stands for
+            # (`f(long a)`, `f(long long b)` on LP64; `f(Foo*)`, `f(Bar*)`,
+            # both `::Any` here) were one method defined twice. Proxies of one
+            # signature calling one raw wrapper are one proxy (the raw wrapper
+            # dispatches); calling different ones (a `[wrap.rename]` of one
+            # overload) is no proxy at all, named, never a pick.
+            proxies = Tuple{String,String,String,String}[]   # (key, raw_jl, text, proxy_nm)
             seen_proxy_sigs = Set{String}()
 
             for meth in methods
@@ -3718,10 +3802,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 other_sig    = join(sig_parts, ", ")
                 call_sig_str = join(call_args, ", ")
 
-                # Deduplicate (same method may appear twice due to DWARF duplicate entries)
-                proxy_key = "$(proxy_nm)($(cls_nm), $(other_sig))"
-                proxy_key in seen_proxy_sigs && continue
-                push!(seen_proxy_sigs, proxy_key)
+                # Deduplicate (same method may appear twice due to DWARF duplicate
+                # entries), by dispatch signature (`_concrete_sig_type`).
+                proxy_key = "$(proxy_nm)($(cls_nm)," *
+                    join((_concrete_sig_type(String(last(split(s, "::"; limit = 2)))) for s in sig_parts), ",") * ")"
 
                 full_sig = isempty(other_sig) ? "obj::$cls_nm" : "obj::$cls_nm, $other_sig"
 
@@ -3731,10 +3815,24 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 # deleting destructor, on the object the call was about to use
                 # (`area(Rect(2, 3))`: a segfault in the thunk, 2026-11-10).
                 # The proxy keeps the owner alive across the call.
-                push!(struct_chunks, """
+                push!(proxies, (proxy_key, raw_jl, """
                 $proxy_nm($full_sig) = GC.@preserve obj $raw_jl($call_sig_str)
-                """)
+                """, proxy_nm))
+            end
 
+            targets = Dict{String,Set{String}}()
+            for (k, raw, _, _) in proxies
+                push!(get!(targets, k, Set{String}()), raw)
+            end
+            split_keys = sort!([k for (k, t) in targets if length(t) > 1])
+            isempty(split_keys) ||
+                println("  wrap: no method proxy of $cls_nm for $(length(split_keys)) signature(s) its overloads ",
+                        "share under different Julia names (call those directly): ",
+                        join(("$k → " * join(sort!(collect(targets[k])), ", ") for k in split_keys), "; "))
+            for (k, _, text, proxy_nm) in proxies
+                (k in seen_proxy_sigs || length(targets[k]) > 1) && continue
+                push!(seen_proxy_sigs, k)
+                push!(struct_chunks, text)
                 push!(exports, proxy_nm)
             end
 
