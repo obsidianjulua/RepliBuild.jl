@@ -336,7 +336,7 @@ end
 @testset "E. producer liveness matches the recorded split" begin
     td = read(joinpath(PROJECT, "src", "mlir", "JLCSOps.td"), String)
     mnemonics = [m.captures[1] for m in eachmatch(r"JLCS_Op<\"([a-z_]+)\"", td)]
-    @test length(mnemonics) == 14
+    @test length(mnemonics) == 15
 
     # Emission sites only: the producers build IR as TEXT, so a mnemonic is
     # "produced" iff some .jl under src/ writes the string `jlcs.<mnemonic>`.
@@ -351,11 +351,13 @@ end
     corpus = join(jl_sources, "\n")
     produced = Set(m for m in mnemonics if occursin("jlcs.$m", corpus))
 
-    # dtor_call, get_field and set_field joined this set on 2026-08-13.
+    # dtor_call, get_field and set_field joined this set on 2026-08-13;
+    # native_call on 2026-11-19, produced by RustThunks.
     expected_produced = Set([
         "type_info", "ffe_call", "try_call", "vcall", "marshal_arg",
         "marshal_ret", "scope", "ctor_call", "dtor_call", "yield",
         "load_array_element", "store_array_element", "get_field", "set_field",
+        "native_call",
     ])
     missing_now = sort(collect(setdiff(expected_produced, produced)))
     extra_now = sort(collect(setdiff(produced, expected_produced)))
@@ -373,6 +375,15 @@ end
     # FunctionGen, and must NOT be conjured by the scope lowering instead.
     fg = read(joinpath(PROJECT, "src", "IRGen", "ir_gen", "FunctionGen.jl"), String)
     @test occursin("jlcs.dtor_call", fg)
+
+    # native_call is the Rust front end's and nobody else's: the C and C++
+    # thunk generators state a C record rule on every call (ffe_call,
+    # try_call), and a call that states none must not appear among them.
+    rt = read(joinpath(PROJECT, "src", "IRGen", "RustThunks.jl"), String)
+    @test occursin("jlcs.native_call", rt)
+    for (root, _, files) in walkdir(joinpath(PROJECT, "src", "IRGen", "ir_gen")), f in files
+        @test (f, occursin("jlcs.native_call", read(joinpath(root, f), String))) == (f, false)
+    end
 end
 
 end # testset

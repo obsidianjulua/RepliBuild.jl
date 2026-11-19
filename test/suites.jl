@@ -190,6 +190,7 @@ const TESTS = TestFile[
     T("test_rust_abi.jl", :unit, [:rust, :build]),
     T("test_rust_dwarf.jl", :unit, [:rust]),
     T("test_rust_config.jl", :unit, [:rust, :build]),
+    T("test_rust_thunks.jl", :unit, [:rust]),
     T("test_cross_library_types.jl", :unit, [:graph, :c, :cpp]),
 
     # ── dev: compiles, links or JITs ─────────────────────────────────────────
@@ -282,6 +283,7 @@ const TESTS = TestFile[
     T("test_cross_library_types_live.jl", :dev, [:graph, :cpp], locks = ["xlib_test"]),
     # The Rust front end, with cargo.
     T("test_rust_build_live.jl", :dev, [:rust, :build], locks = ["rust_test"]),
+    T("test_rust_thunks_live.jl", :dev, [:rust, :dialect], locks = ["rust_test"]),
 ]
 
 # Quarantined: Tier 1's own suites (CLAUDE.md). Wired into no suite on purpose;
@@ -300,7 +302,8 @@ const NOTHING_PATHS = ["docs/", "README.md", "CHANGELOG.md", "CLAUDE.md", "LICEN
 const GRAPH_FILES = ("src/Builder/BuildGraph.jl", "src/Builder/CMakeGraph.jl", "src/Builder/GraphGenerators.jl",
                      "src/Builder/GraphBuild.jl", "src/Builder/GraphMode.jl")
 const DWARF_FILES = ("src/Builder/Compiler.jl", "src/Builder/DWARFParser.jl")
-const RUST_FILES = ("src/Builder/RustBuild.jl", "src/Builder/RustABI.jl", "src/Builder/RustDWARF.jl")
+const RUST_FILES = ("src/Builder/RustBuild.jl", "src/Builder/RustABI.jl", "src/Builder/RustDWARF.jl",
+                    "src/IRGen/RustThunks.jl")
 
 """
     areas_of_path(path) -> Vector{Symbol} | :all | Symbol[]

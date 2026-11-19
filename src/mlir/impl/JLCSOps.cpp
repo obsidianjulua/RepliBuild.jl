@@ -220,6 +220,31 @@ LogicalResult SetFieldOp::verify() {
     return verifyPtrOperand(getOperation(), getStructValue(), "structValue");
 }
 
+// native_call states its callee and, per operand, the attributes its call
+// site and declaration carry. The lowering copies them as they are, so their
+// shape is checked here: a string where a dictionary belongs would otherwise
+// be a cast failure in a pass.
+LogicalResult NativeCallOp::verify() {
+    if (!(*this)->getAttrOfType<FlatSymbolRefAttr>("callee"))
+        return emitOpError() << "requires a 'callee' symbol reference attribute";
+    if (getNumResults() > 1)
+        return emitOpError() << "returns at most one value, and has " << getNumResults();
+    Attribute attrs = (*this)->getAttr("arg_attrs");
+    if (!attrs)
+        return success();
+    auto perArg = dyn_cast<ArrayAttr>(attrs);
+    if (!perArg)
+        return emitOpError() << "'arg_attrs' must be an array of dictionaries, one per operand";
+    if (perArg.size() != getArgs().size())
+        return emitOpError() << "'arg_attrs' has " << perArg.size() << " entrie(s) for "
+                             << getArgs().size() << " operand(s); each operand needs exactly one";
+    for (Attribute a : perArg)
+        if (!isa<DictionaryAttr>(a))
+            return emitOpError() << "'arg_attrs' must hold dictionaries (an operand with "
+                                 << "no attribute is `{}`)";
+    return success();
+}
+
 LogicalResult DestructorCallOp::verify() {
     return verifyPtrOperand(getOperation(), getObjPtr(), "obj_ptr");
 }
