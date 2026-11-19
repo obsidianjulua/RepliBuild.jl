@@ -92,6 +92,8 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         @test isdir(joinpath(_RBL_DIR, "build", "rust", "target"))
         root = joinpath(_RBL_DIR, "build", "rust", "root")
         @test isfile(joinpath(root, "Cargo.toml")) && isfile(joinpath(root, "lib.rs")) && isfile(joinpath(root, "Cargo.lock"))
+        # ...and the per-type lines, written from what the build found, with their record.
+        @test isfile(joinpath(root, "rb_glue.rs")) && isfile(joinpath(root, "rb_glue.json"))
         @test sort!(readdir(joinpath(_RBL_DIR, "crate"))) == ["Cargo.lock", "Cargo.toml", "src"]
         @test crate_tree == _rbl_tree(joinpath(_RBL_DIR, "crate"))
         @test isfile(key_path)
@@ -207,20 +209,29 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
                   (path, [p["type"] for p in fn[path]["parameters"]], fn[path]["return"]["type"])
         end
         @test all(f -> f["own_debug_info"], md["functions"])            # unoptimized, nothing is merged
-        # Optimized, LLVM merges functions whose code is the same and keeps one
-        # as an alias with no debug info. Its call is its target's; its types
-        # are reported as its target's and marked as not its own. `flip` takes
-        # an enum and `flag` a bool, and they are one function here.
-        for f in md3["functions"]
-            f["own_debug_info"] && continue
-            @test haskey(f, "alias_of") && f["refusal"] === nothing
-            target = only(g for g in md3["functions"] if g["symbol"] == f["alias_of"])
-            @test [p["type"] for p in f["parameters"]] == [p["type"] for p in target["parameters"]]
-        end
-        if haskey(fn3["rb_fix::flip"], "alias_of")
-            @test fn3["rb_fix::flip"]["alias_of"] == fn3["rb_fix::flag"]["symbol"] && !fn3["rb_fix::flip"]["own_debug_info"]
-            @test fn3["rb_fix::flip"]["name"] == "flip" && fn3["rb_fix::flip"]["scope"] == ["rb_fix"]
-            @test fn["rb_fix::flip"]["parameters"][1]["type"] == "rb_fix::Side"      # what the unoptimized build knows
+        # Optimized, LLVM merges functions whose code is the same: `flip` takes
+        # an enum and `flag` a bool, and they are one function once compiled,
+        # as are `slot_make` and `opt_box`, and `string_ref_len` and `secret_len`.
+        if !occursin("building without them", out3)
+            # The build's two LLVM options keep each a function of its own, so
+            # each has its own `define` line and its own debug info: its own types.
+            @test all(f -> f["own_debug_info"], md3["functions"])
+            @test !any(f -> haskey(f, "alias_of"), md3["functions"])
+            @test fn3["rb_fix::flip"]["parameters"][1]["type"] == "rb_fix::Side" && fn3["rb_fix::flip"]["return"]["type"] == "rb_fix::Side"
+            @test fn3["rb_fix::flag"]["parameters"][1]["type"] == "bool"
+            @test fn3["rb_fix::slot_make"]["return"]["type"] == "rb_fix::Slot"
+            @test fn3["rb_fix::string_ref_len"]["parameters"][1]["type"] == "&alloc::string::String"
+        else
+            # A rustc whose LLVM refuses those options: a merged function is an
+            # alias with no debug info. Its call is its target's; its types are
+            # reported as its target's and marked as not its own.
+            @info "this rustc's LLVM does not take the options that keep merged functions apart"
+            for f in md3["functions"]
+                f["own_debug_info"] && continue
+                @test haskey(f, "alias_of") && f["refusal"] === nothing
+                target = only(g for g in md3["functions"] if g["symbol"] == f["alias_of"])
+                @test [p["type"] for p in f["parameters"]] == [p["type"] for p in target["parameters"]]
+            end
         end
         # Optimized, the compiler proves what cannot unwind, and says what can.
         @test fn3["rb_fix::add"]["nounwind"] && !fn3["rb_fix::checked_div"]["nounwind"]
@@ -235,6 +246,82 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         failed = sort!([k * ": " * val for (k, val) in v if k != "PROBE_DONE" && !startswith(val, "PASS")])
         @test failed == String[]
         @test length(v) >= 16
+    end
+
+    @testset "what a value owns is the compiler's answer" begin
+        RG = RepliBuild.RustGlue
+        md3 = RepliBuild._read_json(meta_path)                       # the optimized build, which is the one on disk
+        @test md3["build"]["opt_level"] == 3
+        for m in (md, md3)
+            g = m["glue"]
+            owns(k) = g[k]["owns"]
+            @test owns("alloc::string::String") && owns("alloc::vec::Vec<f64, alloc::alloc::Global>")
+            @test owns("alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>") && owns("rb_fix::Named") && owns("rb_fix::Slot")
+            # One integer, and `impl Drop`: nothing in its layout says it must be dropped.
+            @test owns("rb_fix::Guard")
+            # A raw pointer, and no drop code: nothing in its layout says it need not be.
+            @test !owns("rb_fix::View")
+            @test !owns("rb_fix::Rec") && !owns("rb_fix::Shape") && !owns("core::option::Option<i32>")
+            # Defined in a private module, exported from the crate's root: found under the path that is public.
+            @test g["rb_fix::inner::Token"]["spelling"] == "rb_fix::Token" && owns("rb_fix::inner::Token")
+            @test g["alloc::vec::Vec<f64, alloc::alloc::Global>"]["spelling"] == "alloc::vec::Vec<f64>"
+            @test haskey(g["alloc::vec::Vec<f64, alloc::alloc::Global>"], "vec") && !haskey(g["alloc::string::String"], "vec")
+            # No path outside the crate names it: said, with the compiler's own reason.
+            @test collect(keys(m["glue_refused"])) == ["rb_fix::hidden::Secret"]
+            @test occursin("module `hidden` is private", m["glue_refused"]["rb_fix::hidden::Secret"])
+            @test sort(m["glue_helpers"]) == ["__rb_string_new", "__rb_string_view"]
+            # Every type the functions move was asked about, and no other.
+            @test Set(RG.wanted(m["functions"], m["types"])) == union(Set(keys(g)), Set(keys(m["glue_refused"])))
+            @test allunique(e["drop"] for e in values(g))
+        end
+        @test occursin("ownership: ", out) && occursin("no drop function (1)", out)
+        # One line of the file per answered type; the crate's own tree as it was.
+        root = joinpath(_RBL_DIR, "build", "rust", "root")
+        @test count(l -> startswith(l, "#[no_mangle]"), readlines(joinpath(root, "rb_glue.rs"))) == length(md3["glue"])
+        @test crate_tree == _rbl_tree(joinpath(_RBL_DIR, "crate"))
+        # Each drop function is in the library and is its own: asked with no
+        # value it says which it is, so none was merged into another. A copy
+        # is opened, so this process holds no handle on the path a later
+        # build writes to.
+        exported = RepliBuild.Compiler._runtime_symbol_names(lib)
+        @test all(e -> e["drop"] in exported, values(md3["glue"]))
+        copy = tempname() * "." * Libdl.dlext
+        cp(lib, copy)
+        h = Libdl.dlopen(copy)
+        asked = 0
+        for e in values(md3["glue"])
+            n = parse(UInt, match(r"(\d+)$", e["drop"]).captures[1])
+            @test ccall(Libdl.dlsym(h, e["drop"]), UInt, (Ptr{Cvoid}, Ptr{Cvoid}), C_NULL, C_NULL) == n
+            asked += 1
+        end
+        @test asked == length(md3["glue"]) >= 20
+    end
+
+    @testset "the per-type lines follow the crate" begin
+        mktempdir() do dir
+            cp(joinpath(_RBL_DIR, "crate"), joinpath(dir, "crate"))
+            src = joinpath(dir, "crate", "src", "lib.rs")
+            toml = joinpath(dir, "replibuild.toml")
+            write(toml, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\n")
+            build() = withenv("REPLIBUILD_JULIA_ENV" => "none") do
+                redirect_stdout(() -> RepliBuild.build(toml), devnull)
+            end
+            glue(lib) = RepliBuild._read_json(joinpath(dirname(lib), "compilation_metadata.json"))["glue"]
+            write(src, "pub struct A { pub s: String }\npub fn a() -> A { A { s: String::new() } }\n")
+            g1 = glue(build())
+            @test g1["rb_fix::A"]["owns"] && !haskey(g1, "rb_fix::B")
+            # `A` is gone: the line written for it no longer compiles. The build
+            # starts over without the old lines and writes the ones this crate needs.
+            write(src, "pub struct B { pub v: Vec<u8> }\npub fn b() -> B { B { v: Vec::new() } }\n")
+            g2 = glue(build())
+            @test g2["rb_fix::B"]["owns"] && !haskey(g2, "rb_fix::A")
+            @test !occursin("rb_fix::A", read(joinpath(dir, "build", "rust", "root", "rb_glue.rs"), String))
+            # A crate that moves nothing owned has no line at all.
+            write(src, "pub fn plain(x: i32) -> i32 { x + 1 }\n")
+            g3 = glue(build())
+            @test isempty(g3)
+            @test read(joinpath(dir, "build", "rust", "root", "rb_glue.rs"), String) == RepliBuild.RustGlue.glue_text(RepliBuild.RustGlue.Row[])[1]
+        end
     end
 
     @testset "a Rust project stays out of the C and C++ pipeline" begin

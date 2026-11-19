@@ -352,6 +352,15 @@ function _type_key(t::_Table, die::Die)::String
         end
         desc = Dict{String,Any}("name" => name, "scope" => _scope(die), "size" => size,
                                 "align" => align, "fields" => fields)
+        # What a generic type was instantiated with, in order (`Vec<f64>`:
+        # `T` is `f64`). The element type of a `Vec` is nowhere else: its
+        # buffer is a pointer to bytes.
+        params = Dict{String,Any}[]
+        for c in die.children
+            c.tag in ("template_type_param", "template_type_parameter") || continue
+            push!(params, Dict{String,Any}("name" => get(c.attrs, "name", ""), "type" => _type_key_of(t, c)))
+        end
+        isempty(params) || (desc["params"] = params)
         vp = findfirst(c -> c.tag == "variant_part", die.children)
         if vp !== nothing
             desc["kind"] = "enum"

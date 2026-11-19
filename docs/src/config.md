@@ -176,12 +176,23 @@ apply: flags come from CMake.
 
 Present: the project is a Rust crate, and cargo builds it.
 
-**In progress.** `build`, `wrap` and `use` work on a Rust crate for functions
-that take and return plain data: numbers, `bool`, `char`, strings and slices
-in, and records, tuples, enums and `Option` of those out. A function that
-hands over a value which owns memory (`String`, `Vec`, `Box`) or a trait
-object is in the module as a stub that says so, and is listed in the module's
-`UNSUPPORTED`. A Rust panic arrives as a `RepliBuild.RustRuntime.RustPanic`.
+**In progress.** `build`, `wrap` and `use` work on a Rust crate's functions
+that have a symbol in the library:
+
+- numbers, `bool`, `char`, strings and slices in; records, tuples, enums and
+  `Option` out;
+- a `String` is a Julia `String` and a `Vec` a Julia `Vector`, both ways;
+- anything else that owns something (a `Box`, a record holding a `String`)
+  is a Julia object that frees it when Julia collects the object. Passing it
+  to a Rust function by value moves it: the object is empty afterwards. The
+  module's `OWNED` lists those types;
+- a `Result` returned is its value, or a thrown
+  `RepliBuild.RustRuntime.RustError` holding the error;
+- a Rust panic arrives as a `RepliBuild.RustRuntime.RustPanic`.
+
+Generic and `#[inline]` functions, and trait objects, are not wrapped yet.
+A function that is not wrapped is in the module as a stub that says why, and
+is listed in the module's `UNSUPPORTED`.
 
 | Key | Default | Meaning |
 |:----|:--------|:--------|

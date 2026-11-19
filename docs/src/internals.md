@@ -74,10 +74,14 @@ The `Wrapper` package generates Julia FFI modules from DWARF metadata and binary
 | `RustBuild` | `src/Builder/RustBuild.jl` | `build` for a `[rust]` project: cargo and rustc compile and link the crate, and the result is read back into `compilation_metadata.json` |
 | `RustABI` | `src/Builder/RustABI.jl` | How each Rust function is called, read from the `define` lines of rustc's IR and matched to its DWARF parameters; a function that does not match is refused |
 | `RustDWARF` | `src/Builder/RustDWARF.jl` | rustc's DWARF: records, enums that carry data, pointer kinds, methods |
+| `RustGlue` | `src/Builder/RustGlue.jl` | The Rust the build writes per type so a value can be dropped: which types, how each is spelled in source, and what the built library says of each |
+| `RustThunks` | `src/IRGen/RustThunks.jl` | One thunk per Rust function, from its metadata row |
+| `RustRuntime` | `src/RustRuntime.jl` | What a Rust wrapper calls at run time: the library, a call through a thunk, `RustPanic`, `RustError`, `drop!` |
+| `GeneratorRust` | `src/Wrapper/Rust/GeneratorRust.jl` | `wrap` for a `[rust]` project: the Julia module, from the metadata alone |
 
 ### Language selection
 
-`wrap.language` selects the generator: `"c"` or `"cpp"`. A Rust project is selected by its `[rust]` section instead, and takes a path of its own from `build` on (`RustBuild`); its wrapper generator is not built yet.
+`wrap.language` selects the generator: `"c"` or `"cpp"`. A Rust project is selected by its `[rust]` section instead, and takes a path of its own from `build` on (`RustBuild`) and through `wrap` (`GeneratorRust`).
 
 ```toml
 [wrap]

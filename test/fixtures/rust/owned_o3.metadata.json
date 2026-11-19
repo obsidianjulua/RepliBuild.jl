@@ -1,0 +1,4186 @@
+{
+ "crate": {
+  "disambiguator": "aFbpx7NP8XW",
+  "name": "rb_fix",
+  "package": "rb-fix",
+  "root": "rb_fix_rb"
+ },
+ "functions": [
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(16)"
+      ],
+      "name": "%b",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "box_d",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "b",
+     "pass": "direct",
+     "type": "&rb_fix::Rec"
+    }
+   ],
+   "path": "rb_fix::box_d",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "u32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5box_d"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%d",
+      "type": "i32"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noalias",
+      "noundef",
+      "nonnull",
+      "align 8"
+     ],
+     "type": "ptr"
+    }
+   },
+   "name": "boxed",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "d",
+     "pass": "direct",
+     "type": "u32"
+    }
+   ],
+   "path": "rb_fix::boxed",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5boxed"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([16 x i8])",
+       "align 1",
+       "captures(none)",
+       "dereferenceable(16)",
+       "initializes((0, 16))"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%0",
+      "type": "i8"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "bytes16",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2
+     ],
+     "name": "seed",
+     "pass": "direct",
+     "type": "u8"
+    }
+   ],
+   "path": "rb_fix::bytes16",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "[u8; 16]"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7bytes16"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_return",
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 1",
+       "captures(none)",
+       "dereferenceable(16)"
+      ],
+      "name": "%b",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noundef",
+      "range(i32 0, 4081)"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "bytes16_sum",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "b",
+     "pass": "indirect",
+     "type": "[u8; 16]"
+    }
+   ],
+   "path": "rb_fix::bytes16_sum",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "u32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix11bytes16_sum"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%x",
+      "type": "i32"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef",
+      "zeroext"
+     ],
+     "type": "i1"
+    }
+   },
+   "name": "check",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "x",
+     "pass": "direct",
+     "type": "i32"
+    }
+   ],
+   "path": "rb_fix::check",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "core::result::Result<(), ()>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5check"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%0",
+      "type": "i32"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%1",
+      "type": "i32"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef",
+      "range(i8 -1, 2)"
+     ],
+     "type": "i8"
+    }
+   },
+   "name": "compare",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "a",
+     "pass": "direct",
+     "type": "i32"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "b",
+     "pass": "direct",
+     "type": "i32"
+    }
+   ],
+   "path": "rb_fix::compare",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "core::cmp::Ordering"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7compare"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(address, read_provenance)"
+      ],
+      "name": "%s.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%s.1",
+      "type": "i64"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%k",
+      "type": "i64"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "find_word",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2,
+      3
+     ],
+     "name": "s",
+     "pass": "pair",
+     "type": "&str"
+    },
+    {
+     "ir": [
+      4
+     ],
+     "name": "k",
+     "pass": "direct",
+     "type": "usize"
+    }
+   ],
+   "path": "rb_fix::find_word",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "core::option::Option<alloc::string::String>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9find_word"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "zeroext"
+      ],
+      "name": "%b",
+      "type": "i1"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef",
+      "zeroext"
+     ],
+     "type": "i1"
+    }
+   },
+   "name": "flag",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "b",
+     "pass": "direct",
+     "type": "bool"
+    }
+   ],
+   "path": "rb_fix::flag",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "bool"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix4flag"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "zeroext"
+      ],
+      "name": "%s",
+      "type": "i1"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef",
+      "zeroext"
+     ],
+     "type": "i1"
+    }
+   },
+   "name": "flip",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "s",
+     "pass": "direct",
+     "type": "rb_fix::Side"
+    }
+   ],
+   "path": "rb_fix::flip",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "rb_fix::Side"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix4flip"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 4",
+       "captures(none)",
+       "dereferenceable(24)",
+       "initializes((0, 24))"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%k",
+      "type": "float"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "grid",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2
+     ],
+     "name": "k",
+     "pass": "direct",
+     "type": "f32"
+    }
+   ],
+   "path": "rb_fix::grid",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "[[f32; 2]; 3]"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix4grid"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "returned"
+      ],
+      "name": "%id",
+      "type": "i32"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "guard",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "id",
+     "pass": "direct",
+     "type": "u32"
+    }
+   ],
+   "path": "rb_fix::guard",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "rb_fix::Guard"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5guard"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "returned"
+      ],
+      "name": "%0",
+      "type": "i32"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "guard_release",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "g",
+     "pass": "direct",
+     "type": "rb_fix::Guard"
+    }
+   ],
+   "path": "rb_fix::guard_release",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "u32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix13guard_release"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "dead_on_return",
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%ws",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "join_words",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2
+     ],
+     "name": "ws",
+     "pass": "indirect",
+     "type": "alloc::vec::Vec<alloc::string::String, alloc::alloc::Global>"
+    }
+   ],
+   "path": "rb_fix::join_words",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "alloc::string::String"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix10join_words"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "range(i8 0, 3)"
+      ],
+      "name": "%l",
+      "type": "i8"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef",
+      "range(i8 0, 3)"
+     ],
+     "type": "i8"
+    }
+   },
+   "name": "level_next",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "l",
+     "pass": "direct",
+     "type": "rb_fix::Level"
+    }
+   ],
+   "path": "rb_fix::level_next",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "rb_fix::Level"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix10level_next"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%k",
+      "type": "i32"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "{ ptr, ptr }"
+    }
+   },
+   "name": "make_area",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "k",
+     "pass": "direct",
+     "type": "u32"
+    }
+   ],
+   "path": "rb_fix::make_area",
+   "refusal": null,
+   "return": {
+    "pass": "pair",
+    "type": "alloc::boxed::Box<dyn rb_fix::Area, alloc::alloc::Global>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9make_area"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(address, read_provenance)"
+      ],
+      "name": "%0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%1",
+      "type": "i64"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "make_greeting",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2,
+      3
+     ],
+     "name": "name",
+     "pass": "pair",
+     "type": "&str"
+    }
+   ],
+   "path": "rb_fix::make_greeting",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "alloc::string::String"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix13make_greeting"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([32 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(address, read_provenance)"
+      ],
+      "name": "%s.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%s.1",
+      "type": "i64"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "name_and_len",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2,
+      3
+     ],
+     "name": "s",
+     "pass": "pair",
+     "type": "&str"
+    }
+   ],
+   "path": "rb_fix::name_and_len",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "(alloc::string::String, usize)"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix12name_and_len"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([32 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(none)"
+      ],
+      "name": "%name.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%name.1",
+      "type": "i64"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%id",
+      "type": "i32"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "named",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2,
+      3
+     ],
+     "name": "name",
+     "pass": "pair",
+     "type": "&str"
+    },
+    {
+     "ir": [
+      4
+     ],
+     "name": "id",
+     "pass": "direct",
+     "type": "u32"
+    }
+   ],
+   "path": "rb_fix::named",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "rb_fix::Named"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5named"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)",
+       "initializes((0, 24))"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "dead_on_return",
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%n",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "named_into_name",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2
+     ],
+     "name": "n",
+     "pass": "indirect",
+     "type": "rb_fix::Named"
+    }
+   ],
+   "path": "rb_fix::named_into_name",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "alloc::string::String"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix15named_into_name"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%n",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef",
+      "range(i64 0, -9223372036854775808)"
+     ],
+     "type": "i64"
+    }
+   },
+   "name": "named_len",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "n",
+     "pass": "direct",
+     "type": "&rb_fix::Named"
+    }
+   ],
+   "path": "rb_fix::named_len",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "usize"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9named_len"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%d",
+      "type": "i32"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noalias",
+      "noundef",
+      "align 8"
+     ],
+     "type": "ptr"
+    }
+   },
+   "name": "opt_box",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "d",
+     "pass": "direct",
+     "type": "u32"
+    }
+   ],
+   "path": "rb_fix::opt_box",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "core::option::Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7opt_box"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "zeroext"
+      ],
+      "name": "%some",
+      "type": "i1"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "range(i56 1694364648734976, 1694364648734978)"
+     ],
+     "type": "i56"
+    }
+   },
+   "name": "opt_bytes",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "some",
+     "pass": "direct",
+     "type": "bool"
+    }
+   ],
+   "path": "rb_fix::opt_bytes",
+   "refusal": null,
+   "return": {
+    "pass": "cast",
+    "type": "core::option::Option<[u8; 6]>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9opt_bytes"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "range(i8 -1, 2)"
+      ],
+      "name": "%o",
+      "type": "i8"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef",
+      "range(i32 -1, 2)"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "ordering_sign",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "o",
+     "pass": "direct",
+     "type": "core::cmp::Ordering"
+    }
+   ],
+   "path": "rb_fix::ordering_sign",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "i32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix13ordering_sign"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(address)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(address, read_provenance)"
+      ],
+      "name": "%s.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%s.1",
+      "type": "i64"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "parse_int",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2,
+      3
+     ],
+     "name": "s",
+     "pass": "pair",
+     "type": "&str"
+    }
+   ],
+   "path": "rb_fix::parse_int",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "core::result::Result<i32, alloc::string::String>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9parse_int"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(16)"
+      ],
+      "name": "%r",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "rec_sum_ref",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "r",
+     "pass": "direct",
+     "type": "&rb_fix::Rec"
+    }
+   ],
+   "path": "rb_fix::rec_sum_ref",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix11rec_sum_ref"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%n",
+      "type": "i32"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "recs",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2
+     ],
+     "name": "n",
+     "pass": "direct",
+     "type": "u32"
+    }
+   ],
+   "path": "rb_fix::recs",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "alloc::vec::Vec<rb_fix::Rec, alloc::alloc::Global>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix4recs"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "align 8",
+       "captures(none)"
+      ],
+      "name": "%rs.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef",
+       "range(i64 0, 576460752303423488)"
+      ],
+      "name": "%rs.1",
+      "type": "i64"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "recs_total",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1,
+      2
+     ],
+     "name": "rs",
+     "pass": "pair",
+     "type": "&[rb_fix::Rec]"
+    }
+   ],
+   "path": "rb_fix::recs_total",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix10recs_total"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "secret",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [],
+   "path": "rb_fix::secret",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "rb_fix::hidden::Secret"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix6secret"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%s",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef",
+      "range(i64 0, -9223372036854775808)"
+     ],
+     "type": "i64"
+    }
+   },
+   "name": "secret_len",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "s",
+     "pass": "direct",
+     "type": "&rb_fix::hidden::Secret"
+    }
+   ],
+   "path": "rb_fix::secret_len",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "usize"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix10secret_len"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%s",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "shout",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "s",
+     "pass": "direct",
+     "type": "&mut alloc::string::String"
+    }
+   ],
+   "path": "rb_fix::shout",
+   "refusal": null,
+   "return": {
+    "pass": "ignore",
+    "type": null
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5shout"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(8)"
+      ],
+      "name": "%s",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "slot_d",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "s",
+     "pass": "direct",
+     "type": "&rb_fix::Slot"
+    }
+   ],
+   "path": "rb_fix::slot_d",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "u32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix6slot_d"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%d",
+      "type": "i32"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noalias",
+      "noundef",
+      "align 8"
+     ],
+     "type": "ptr"
+    }
+   },
+   "name": "slot_make",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "d",
+     "pass": "direct",
+     "type": "u32"
+    }
+   ],
+   "path": "rb_fix::slot_make",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "rb_fix::Slot"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9slot_make"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "align 8",
+       "captures(address)"
+      ],
+      "name": "%0",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "slot_take",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "s",
+     "pass": "direct",
+     "type": "rb_fix::Slot"
+    }
+   ],
+   "path": "rb_fix::slot_take",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "u32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9slot_take"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%n",
+      "type": "i32"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "squares",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2
+     ],
+     "name": "n",
+     "pass": "direct",
+     "type": "u32"
+    }
+   ],
+   "path": "rb_fix::squares",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "alloc::vec::Vec<f64, alloc::alloc::Global>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7squares"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_return",
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%s",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noundef",
+      "range(i64 0, -9223372036854775808)"
+     ],
+     "type": "i64"
+    }
+   },
+   "name": "string_len_owned",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "s",
+     "pass": "indirect",
+     "type": "alloc::string::String"
+    }
+   ],
+   "path": "rb_fix::string_len_owned",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "usize"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix16string_len_owned"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%s",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef",
+      "range(i64 0, -9223372036854775808)"
+     ],
+     "type": "i64"
+    }
+   },
+   "name": "string_ref_len",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "s",
+     "pass": "direct",
+     "type": "&alloc::string::String"
+    }
+   ],
+   "path": "rb_fix::string_ref_len",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "usize"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix14string_ref_len"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([32 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%id",
+      "type": "i32"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(none)"
+      ],
+      "name": "%text.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%text.1",
+      "type": "i64"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "token",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2
+     ],
+     "name": "id",
+     "pass": "direct",
+     "type": "u32"
+    },
+    {
+     "ir": [
+      3,
+      4
+     ],
+     "name": "text",
+     "pass": "pair",
+     "type": "&str"
+    }
+   ],
+   "path": "rb_fix::token",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "rb_fix::inner::Token"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5token"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%t",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "token_id",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "t",
+     "pass": "direct",
+     "type": "&rb_fix::inner::Token"
+    }
+   ],
+   "path": "rb_fix::token_id",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "u32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix8token_id"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "align 8",
+       "captures(address)"
+      ],
+      "name": "%0",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "unbox_d",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "b",
+     "pass": "direct",
+     "type": "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>"
+    }
+   ],
+   "path": "rb_fix::unbox_d",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "u32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7unbox_d"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%v",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%x",
+      "type": "double"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "vec_push",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "v",
+     "pass": "direct",
+     "type": "&mut alloc::vec::Vec<f64, alloc::alloc::Global>"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "x",
+     "pass": "direct",
+     "type": "f64"
+    }
+   ],
+   "path": "rb_fix::vec_push",
+   "refusal": null,
+   "return": {
+    "pass": "ignore",
+    "type": null
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix8vec_push"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_return",
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%v",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "vec_sum",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "v",
+     "pass": "indirect",
+     "type": "alloc::vec::Vec<f64, alloc::alloc::Global>"
+    }
+   ],
+   "path": "rb_fix::vec_sum",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7vec_sum"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "align 8",
+       "captures(address, read_provenance)"
+      ],
+      "name": "%xs.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef",
+       "range(i64 0, 1152921504606846976)"
+      ],
+      "name": "%xs.1",
+      "type": "i64"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "{ ptr, i64 }"
+    }
+   },
+   "name": "view",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1,
+      2
+     ],
+     "name": "xs",
+     "pass": "pair",
+     "type": "&[f64]"
+    }
+   ],
+   "path": "rb_fix::view",
+   "refusal": null,
+   "return": {
+    "pass": "pair",
+    "type": "rb_fix::View"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix4view"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "readnone",
+       "captures(none)"
+      ],
+      "name": "%v.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef",
+       "returned"
+      ],
+      "name": "%v.1",
+      "type": "i64"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i64"
+    }
+   },
+   "name": "view_len",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1,
+      2
+     ],
+     "name": "v",
+     "pass": "pair",
+     "type": "rb_fix::View"
+    }
+   ],
+   "path": "rb_fix::view_len",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "usize"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix8view_len"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(address, read_provenance)"
+      ],
+      "name": "%s.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%s.1",
+      "type": "i64"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "words",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2,
+      3
+     ],
+     "name": "s",
+     "pass": "pair",
+     "type": "&str"
+    }
+   ],
+   "path": "rb_fix::words",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "alloc::vec::Vec<alloc::string::String, alloc::alloc::Global>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5words"
+  }
+ ],
+ "glue": {
+  "alloc::boxed::Box<dyn rb_fix::Area, alloc::alloc::Global>": {
+   "drop": "__rb_drop_1",
+   "owns": true,
+   "spelling": "alloc::boxed::Box<dyn rb_fix::Area>"
+  },
+  "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>": {
+   "drop": "__rb_drop_2",
+   "owns": true,
+   "spelling": "alloc::boxed::Box<rb_fix::Rec>"
+  },
+  "alloc::string::String": {
+   "drop": "__rb_drop_3",
+   "owns": true,
+   "spelling": "alloc::string::String"
+  },
+  "alloc::vec::Vec<alloc::string::String, alloc::alloc::Global>": {
+   "drop": "__rb_drop_4",
+   "owns": true,
+   "spelling": "alloc::vec::Vec<alloc::string::String>",
+   "vec": {
+    "new": "__rb_vec_new_4",
+    "view": "__rb_vec_view_4"
+   }
+  },
+  "alloc::vec::Vec<f64, alloc::alloc::Global>": {
+   "drop": "__rb_drop_5",
+   "owns": true,
+   "spelling": "alloc::vec::Vec<f64>",
+   "vec": {
+    "new": "__rb_vec_new_5",
+    "view": "__rb_vec_view_5"
+   }
+  },
+  "alloc::vec::Vec<rb_fix::Rec, alloc::alloc::Global>": {
+   "drop": "__rb_drop_6",
+   "owns": true,
+   "spelling": "alloc::vec::Vec<rb_fix::Rec>",
+   "vec": {
+    "new": "__rb_vec_new_6",
+    "view": "__rb_vec_view_6"
+   }
+  },
+  "core::option::Option<[u8; 6]>": {
+   "drop": "__rb_drop_8",
+   "owns": false,
+   "spelling": "core::option::Option<[u8; 6]>"
+  },
+  "core::option::Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>": {
+   "drop": "__rb_drop_9",
+   "owns": true,
+   "spelling": "core::option::Option<alloc::boxed::Box<rb_fix::Rec>>"
+  },
+  "core::option::Option<alloc::string::String>": {
+   "drop": "__rb_drop_10",
+   "owns": true,
+   "spelling": "core::option::Option<alloc::string::String>"
+  },
+  "core::result::Result<(), ()>": {
+   "drop": "__rb_drop_12",
+   "owns": false,
+   "spelling": "core::result::Result<(), ()>"
+  },
+  "core::result::Result<i32, alloc::string::String>": {
+   "drop": "__rb_drop_13",
+   "owns": true,
+   "spelling": "core::result::Result<i32, alloc::string::String>"
+  },
+  "rb_fix::Guard": {
+   "drop": "__rb_drop_17",
+   "owns": true,
+   "spelling": "rb_fix::Guard"
+  },
+  "rb_fix::Named": {
+   "drop": "__rb_drop_18",
+   "owns": true,
+   "spelling": "rb_fix::Named"
+  },
+  "rb_fix::Rec": {
+   "drop": "__rb_drop_20",
+   "owns": false,
+   "spelling": "rb_fix::Rec"
+  },
+  "rb_fix::Slot": {
+   "drop": "__rb_drop_22",
+   "owns": true,
+   "spelling": "rb_fix::Slot"
+  },
+  "rb_fix::View": {
+   "drop": "__rb_drop_24",
+   "owns": false,
+   "spelling": "rb_fix::View"
+  },
+  "rb_fix::inner::Token": {
+   "drop": "__rb_drop_26",
+   "owns": true,
+   "spelling": "rb_fix::Token"
+  }
+ },
+ "glue_helpers": [
+  "__rb_string_new",
+  "__rb_string_view"
+ ],
+ "glue_refused": {
+  "rb_fix::hidden::Secret": "no path names `rb_fix::hidden::Secret` from outside the crate (module `hidden` is private)"
+ },
+ "language": "rust",
+ "library": "librb_fix.so",
+ "library_sha": "0000000000000000000000000000000000000000000000000000000000000000",
+ "metadata_version": "rust-2",
+ "skipped": [],
+ "toolchain": {
+  "rustc": "1.97.1"
+ },
+ "types": {
+  "&[f64]": {
+   "align": 8,
+   "fat": "slice",
+   "fields": [
+    {
+     "align": 8,
+     "name": "data_ptr",
+     "offset": 0,
+     "type": "*f64"
+    },
+    {
+     "align": 8,
+     "name": "length",
+     "offset": 8,
+     "type": "usize"
+    }
+   ],
+   "kind": "struct",
+   "name": "&[f64]",
+   "scope": [],
+   "size": 16
+  },
+  "&[rb_fix::Rec]": {
+   "align": 8,
+   "fat": "slice",
+   "fields": [
+    {
+     "align": 8,
+     "name": "data_ptr",
+     "offset": 0,
+     "type": "*rb_fix::Rec"
+    },
+    {
+     "align": 8,
+     "name": "length",
+     "offset": 8,
+     "type": "usize"
+    }
+   ],
+   "kind": "struct",
+   "name": "&[rb_fix::Rec]",
+   "scope": [],
+   "size": 16
+  },
+  "&[usize; 4]": {
+   "kind": "pointer",
+   "name": "&[usize; 4]",
+   "pointer": "ref",
+   "size": 8,
+   "target": "[usize; 4]"
+  },
+  "&alloc::string::String": {
+   "kind": "pointer",
+   "name": "&alloc::string::String",
+   "pointer": "ref",
+   "size": 8,
+   "target": "alloc::string::String"
+  },
+  "&mut alloc::string::String": {
+   "kind": "pointer",
+   "name": "&mut alloc::string::String",
+   "pointer": "mut_ref",
+   "size": 8,
+   "target": "alloc::string::String"
+  },
+  "&mut alloc::vec::Vec<f64, alloc::alloc::Global>": {
+   "kind": "pointer",
+   "name": "&mut alloc::vec::Vec<f64, alloc::alloc::Global>",
+   "pointer": "mut_ref",
+   "size": 8,
+   "target": "alloc::vec::Vec<f64, alloc::alloc::Global>"
+  },
+  "&rb_fix::Named": {
+   "kind": "pointer",
+   "name": "&rb_fix::Named",
+   "pointer": "ref",
+   "size": 8,
+   "target": "rb_fix::Named"
+  },
+  "&rb_fix::Rec": {
+   "kind": "pointer",
+   "name": "&rb_fix::Rec",
+   "pointer": "ref",
+   "size": 8,
+   "target": "rb_fix::Rec"
+  },
+  "&rb_fix::Slot": {
+   "kind": "pointer",
+   "name": "&rb_fix::Slot",
+   "pointer": "ref",
+   "size": 8,
+   "target": "rb_fix::Slot"
+  },
+  "&rb_fix::hidden::Secret": {
+   "kind": "pointer",
+   "name": "&rb_fix::hidden::Secret",
+   "pointer": "ref",
+   "size": 8,
+   "target": "rb_fix::hidden::Secret"
+  },
+  "&rb_fix::inner::Token": {
+   "kind": "pointer",
+   "name": "&rb_fix::inner::Token",
+   "pointer": "ref",
+   "size": 8,
+   "target": "rb_fix::inner::Token"
+  },
+  "&str": {
+   "align": 8,
+   "fat": "slice",
+   "fields": [
+    {
+     "align": 8,
+     "name": "data_ptr",
+     "offset": 0,
+     "type": "*u8"
+    },
+    {
+     "align": 8,
+     "name": "length",
+     "offset": 8,
+     "type": "usize"
+    }
+   ],
+   "kind": "struct",
+   "name": "&str",
+   "scope": [],
+   "size": 16
+  },
+  "()": {
+   "encoding": "unsigned",
+   "kind": "base",
+   "name": "()",
+   "size": 0
+  },
+  "(alloc::string::String, usize)": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 0,
+     "type": "alloc::string::String"
+    },
+    {
+     "align": 8,
+     "name": "__1",
+     "offset": 24,
+     "type": "usize"
+    }
+   ],
+   "kind": "struct",
+   "name": "(alloc::string::String, usize)",
+   "scope": [],
+   "size": 32,
+   "tuple": true
+  },
+  "*const f64": {
+   "kind": "pointer",
+   "name": "*const f64",
+   "pointer": "const_ptr",
+   "size": 8,
+   "target": "f64"
+  },
+  "*const u8": {
+   "kind": "pointer",
+   "name": "*const u8",
+   "pointer": "const_ptr",
+   "size": 8,
+   "target": "u8"
+  },
+  "*dyn rb_fix::Area": {
+   "kind": "pointer",
+   "name": "*dyn rb_fix::Area",
+   "pointer": "other",
+   "size": 8,
+   "target": "dyn rb_fix::Area"
+  },
+  "*f64": {
+   "kind": "pointer",
+   "name": "*f64",
+   "pointer": "other",
+   "size": 8,
+   "target": "f64"
+  },
+  "*rb_fix::Rec": {
+   "kind": "pointer",
+   "name": "*rb_fix::Rec",
+   "pointer": "other",
+   "size": 8,
+   "target": "rb_fix::Rec"
+  },
+  "*u8": {
+   "kind": "pointer",
+   "name": "*u8",
+   "pointer": "other",
+   "size": 8,
+   "target": "u8"
+  },
+  "[[f32; 2]; 3]": {
+   "count": 3,
+   "element": "[f32; 2]",
+   "kind": "array",
+   "name": "[[f32; 2]; 3]",
+   "size": 24
+  },
+  "[f32; 2]": {
+   "count": 2,
+   "element": "f32",
+   "kind": "array",
+   "name": "[f32; 2]",
+   "size": 8
+  },
+  "[u8; 16]": {
+   "count": 16,
+   "element": "u8",
+   "kind": "array",
+   "name": "[u8; 16]",
+   "size": 16
+  },
+  "[u8; 6]": {
+   "count": 6,
+   "element": "u8",
+   "kind": "array",
+   "name": "[u8; 6]",
+   "size": 6
+  },
+  "[usize; 4]": {
+   "count": 4,
+   "element": "usize",
+   "kind": "array",
+   "name": "[usize; 4]",
+   "size": 32
+  },
+  "alloc::alloc::Global": {
+   "align": 1,
+   "fields": [],
+   "kind": "struct",
+   "name": "Global",
+   "scope": [
+    "alloc",
+    "alloc"
+   ],
+   "size": 0
+  },
+  "alloc::boxed::Box<dyn rb_fix::Area, alloc::alloc::Global>": {
+   "align": 8,
+   "fat": "dyn",
+   "fields": [
+    {
+     "align": 8,
+     "name": "pointer",
+     "offset": 0,
+     "type": "*dyn rb_fix::Area"
+    },
+    {
+     "align": 8,
+     "name": "vtable",
+     "offset": 8,
+     "type": "&[usize; 4]"
+    }
+   ],
+   "kind": "struct",
+   "name": "alloc::boxed::Box<dyn rb_fix::Area, alloc::alloc::Global>",
+   "scope": [],
+   "size": 16
+  },
+  "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>": {
+   "kind": "pointer",
+   "name": "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>",
+   "pointer": "box",
+   "size": 8,
+   "target": "rb_fix::Rec"
+  },
+  "alloc::raw_vec::RawVec<alloc::string::String, alloc::alloc::Global>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "inner",
+     "offset": 0,
+     "type": "alloc::raw_vec::RawVecInner<alloc::alloc::Global>"
+    },
+    {
+     "align": 1,
+     "name": "_marker",
+     "offset": 16,
+     "type": "core::marker::PhantomData<alloc::string::String>"
+    }
+   ],
+   "kind": "struct",
+   "name": "RawVec<alloc::string::String, alloc::alloc::Global>",
+   "params": [
+    {
+     "name": "T",
+     "type": "alloc::string::String"
+    },
+    {
+     "name": "A",
+     "type": "alloc::alloc::Global"
+    }
+   ],
+   "scope": [
+    "alloc",
+    "raw_vec"
+   ],
+   "size": 16
+  },
+  "alloc::raw_vec::RawVec<f64, alloc::alloc::Global>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "inner",
+     "offset": 0,
+     "type": "alloc::raw_vec::RawVecInner<alloc::alloc::Global>"
+    },
+    {
+     "align": 1,
+     "name": "_marker",
+     "offset": 16,
+     "type": "core::marker::PhantomData<f64>"
+    }
+   ],
+   "kind": "struct",
+   "name": "RawVec<f64, alloc::alloc::Global>",
+   "params": [
+    {
+     "name": "T",
+     "type": "f64"
+    },
+    {
+     "name": "A",
+     "type": "alloc::alloc::Global"
+    }
+   ],
+   "scope": [
+    "alloc",
+    "raw_vec"
+   ],
+   "size": 16
+  },
+  "alloc::raw_vec::RawVec<rb_fix::Rec, alloc::alloc::Global>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "inner",
+     "offset": 0,
+     "type": "alloc::raw_vec::RawVecInner<alloc::alloc::Global>"
+    },
+    {
+     "align": 1,
+     "name": "_marker",
+     "offset": 16,
+     "type": "core::marker::PhantomData<rb_fix::Rec>"
+    }
+   ],
+   "kind": "struct",
+   "name": "RawVec<rb_fix::Rec, alloc::alloc::Global>",
+   "params": [
+    {
+     "name": "T",
+     "type": "rb_fix::Rec"
+    },
+    {
+     "name": "A",
+     "type": "alloc::alloc::Global"
+    }
+   ],
+   "scope": [
+    "alloc",
+    "raw_vec"
+   ],
+   "size": 16
+  },
+  "alloc::raw_vec::RawVec<u8, alloc::alloc::Global>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "inner",
+     "offset": 0,
+     "type": "alloc::raw_vec::RawVecInner<alloc::alloc::Global>"
+    },
+    {
+     "align": 1,
+     "name": "_marker",
+     "offset": 16,
+     "type": "core::marker::PhantomData<u8>"
+    }
+   ],
+   "kind": "struct",
+   "name": "RawVec<u8, alloc::alloc::Global>",
+   "params": [
+    {
+     "name": "T",
+     "type": "u8"
+    },
+    {
+     "name": "A",
+     "type": "alloc::alloc::Global"
+    }
+   ],
+   "scope": [
+    "alloc",
+    "raw_vec"
+   ],
+   "size": 16
+  },
+  "alloc::raw_vec::RawVecInner<alloc::alloc::Global>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "ptr",
+     "offset": 8,
+     "type": "core::ptr::unique::Unique<u8>"
+    },
+    {
+     "align": 8,
+     "name": "cap",
+     "offset": 0,
+     "type": "core::num::niche_types::UsizeNoHighBit"
+    },
+    {
+     "align": 1,
+     "name": "alloc",
+     "offset": 16,
+     "type": "alloc::alloc::Global"
+    }
+   ],
+   "kind": "struct",
+   "name": "RawVecInner<alloc::alloc::Global>",
+   "params": [
+    {
+     "name": "A",
+     "type": "alloc::alloc::Global"
+    }
+   ],
+   "scope": [
+    "alloc",
+    "raw_vec"
+   ],
+   "size": 16
+  },
+  "alloc::string::String": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "vec",
+     "offset": 0,
+     "type": "alloc::vec::Vec<u8, alloc::alloc::Global>"
+    }
+   ],
+   "kind": "struct",
+   "name": "String",
+   "scope": [
+    "alloc",
+    "string"
+   ],
+   "size": 24
+  },
+  "alloc::vec::Vec<alloc::string::String, alloc::alloc::Global>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "buf",
+     "offset": 0,
+     "type": "alloc::raw_vec::RawVec<alloc::string::String, alloc::alloc::Global>"
+    },
+    {
+     "align": 8,
+     "name": "len",
+     "offset": 16,
+     "type": "usize"
+    }
+   ],
+   "kind": "struct",
+   "name": "Vec<alloc::string::String, alloc::alloc::Global>",
+   "params": [
+    {
+     "name": "T",
+     "type": "alloc::string::String"
+    },
+    {
+     "name": "A",
+     "type": "alloc::alloc::Global"
+    }
+   ],
+   "scope": [
+    "alloc",
+    "vec"
+   ],
+   "size": 24
+  },
+  "alloc::vec::Vec<f64, alloc::alloc::Global>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "buf",
+     "offset": 0,
+     "type": "alloc::raw_vec::RawVec<f64, alloc::alloc::Global>"
+    },
+    {
+     "align": 8,
+     "name": "len",
+     "offset": 16,
+     "type": "usize"
+    }
+   ],
+   "kind": "struct",
+   "name": "Vec<f64, alloc::alloc::Global>",
+   "params": [
+    {
+     "name": "T",
+     "type": "f64"
+    },
+    {
+     "name": "A",
+     "type": "alloc::alloc::Global"
+    }
+   ],
+   "scope": [
+    "alloc",
+    "vec"
+   ],
+   "size": 24
+  },
+  "alloc::vec::Vec<rb_fix::Rec, alloc::alloc::Global>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "buf",
+     "offset": 0,
+     "type": "alloc::raw_vec::RawVec<rb_fix::Rec, alloc::alloc::Global>"
+    },
+    {
+     "align": 8,
+     "name": "len",
+     "offset": 16,
+     "type": "usize"
+    }
+   ],
+   "kind": "struct",
+   "name": "Vec<rb_fix::Rec, alloc::alloc::Global>",
+   "params": [
+    {
+     "name": "T",
+     "type": "rb_fix::Rec"
+    },
+    {
+     "name": "A",
+     "type": "alloc::alloc::Global"
+    }
+   ],
+   "scope": [
+    "alloc",
+    "vec"
+   ],
+   "size": 24
+  },
+  "alloc::vec::Vec<u8, alloc::alloc::Global>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "buf",
+     "offset": 0,
+     "type": "alloc::raw_vec::RawVec<u8, alloc::alloc::Global>"
+    },
+    {
+     "align": 8,
+     "name": "len",
+     "offset": 16,
+     "type": "usize"
+    }
+   ],
+   "kind": "struct",
+   "name": "Vec<u8, alloc::alloc::Global>",
+   "params": [
+    {
+     "name": "T",
+     "type": "u8"
+    },
+    {
+     "name": "A",
+     "type": "alloc::alloc::Global"
+    }
+   ],
+   "scope": [
+    "alloc",
+    "vec"
+   ],
+   "size": 24
+  },
+  "bool": {
+   "encoding": "boolean",
+   "kind": "base",
+   "name": "bool",
+   "size": 1
+  },
+  "core::cmp::Ordering": {
+   "align": 1,
+   "enumerators": [
+    [
+     "Less",
+     -1
+    ],
+    [
+     "Equal",
+     0
+    ],
+    [
+     "Greater",
+     1
+    ]
+   ],
+   "kind": "c_enum",
+   "name": "Ordering",
+   "scope": [
+    "core",
+    "cmp"
+   ],
+   "size": 1,
+   "underlying": "i8"
+  },
+  "core::marker::PhantomData<alloc::string::String>": {
+   "align": 1,
+   "fields": [],
+   "kind": "struct",
+   "name": "PhantomData<alloc::string::String>",
+   "params": [
+    {
+     "name": "T",
+     "type": "alloc::string::String"
+    }
+   ],
+   "scope": [
+    "core",
+    "marker"
+   ],
+   "size": 0
+  },
+  "core::marker::PhantomData<f64>": {
+   "align": 1,
+   "fields": [],
+   "kind": "struct",
+   "name": "PhantomData<f64>",
+   "params": [
+    {
+     "name": "T",
+     "type": "f64"
+    }
+   ],
+   "scope": [
+    "core",
+    "marker"
+   ],
+   "size": 0
+  },
+  "core::marker::PhantomData<rb_fix::Rec>": {
+   "align": 1,
+   "fields": [],
+   "kind": "struct",
+   "name": "PhantomData<rb_fix::Rec>",
+   "params": [
+    {
+     "name": "T",
+     "type": "rb_fix::Rec"
+    }
+   ],
+   "scope": [
+    "core",
+    "marker"
+   ],
+   "size": 0
+  },
+  "core::marker::PhantomData<u8>": {
+   "align": 1,
+   "fields": [],
+   "kind": "struct",
+   "name": "PhantomData<u8>",
+   "params": [
+    {
+     "name": "T",
+     "type": "u8"
+    }
+   ],
+   "scope": [
+    "core",
+    "marker"
+   ],
+   "size": 0
+  },
+  "core::num::niche_types::UsizeNoHighBit": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 0,
+     "type": "usize"
+    }
+   ],
+   "kind": "struct",
+   "name": "UsizeNoHighBit",
+   "scope": [
+    "core",
+    "num",
+    "niche_types"
+   ],
+   "size": 8
+  },
+  "core::option::Option<[u8; 6]>": {
+   "align": 1,
+   "discriminant": {
+    "align": 1,
+    "offset": 0,
+    "size": 1,
+    "type": "u8"
+   },
+   "fields": [],
+   "kind": "enum",
+   "name": "Option<[u8; 6]>",
+   "scope": [
+    "core",
+    "option"
+   ],
+   "size": 7,
+   "variants": [
+    {
+     "default": false,
+     "discr_value": 0,
+     "name": "None",
+     "offset": 0,
+     "type": "core::option::Option<[u8; 6]>::None"
+    },
+    {
+     "default": false,
+     "discr_value": 1,
+     "name": "Some",
+     "offset": 0,
+     "type": "core::option::Option<[u8; 6]>::Some"
+    }
+   ]
+  },
+  "core::option::Option<[u8; 6]>::None": {
+   "align": 1,
+   "fields": [],
+   "kind": "struct",
+   "name": "None",
+   "params": [
+    {
+     "name": "T",
+     "type": "[u8; 6]"
+    }
+   ],
+   "scope": [
+    "core",
+    "option",
+    "Option<[u8; 6]>"
+   ],
+   "size": 7
+  },
+  "core::option::Option<[u8; 6]>::Some": {
+   "align": 1,
+   "fields": [
+    {
+     "align": 1,
+     "name": "__0",
+     "offset": 1,
+     "type": "[u8; 6]"
+    }
+   ],
+   "kind": "struct",
+   "name": "Some",
+   "params": [
+    {
+     "name": "T",
+     "type": "[u8; 6]"
+    }
+   ],
+   "scope": [
+    "core",
+    "option",
+    "Option<[u8; 6]>"
+   ],
+   "size": 7
+  },
+  "core::option::Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>": {
+   "align": 8,
+   "discriminant": {
+    "align": 8,
+    "offset": 0,
+    "size": 8,
+    "type": "u64"
+   },
+   "fields": [],
+   "kind": "enum",
+   "name": "Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>",
+   "scope": [
+    "core",
+    "option"
+   ],
+   "size": 8,
+   "variants": [
+    {
+     "default": false,
+     "discr_value": 0,
+     "name": "None",
+     "offset": 0,
+     "type": "core::option::Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>::None"
+    },
+    {
+     "default": true,
+     "name": "Some",
+     "offset": 0,
+     "type": "core::option::Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>::Some"
+    }
+   ]
+  },
+  "core::option::Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>::None": {
+   "align": 8,
+   "fields": [],
+   "kind": "struct",
+   "name": "None",
+   "params": [
+    {
+     "name": "T",
+     "type": "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>"
+    }
+   ],
+   "scope": [
+    "core",
+    "option",
+    "Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>"
+   ],
+   "size": 8
+  },
+  "core::option::Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>::Some": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 0,
+     "type": "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>"
+    }
+   ],
+   "kind": "struct",
+   "name": "Some",
+   "params": [
+    {
+     "name": "T",
+     "type": "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>"
+    }
+   ],
+   "scope": [
+    "core",
+    "option",
+    "Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>"
+   ],
+   "size": 8
+  },
+  "core::option::Option<alloc::string::String>": {
+   "align": 8,
+   "discriminant": {
+    "align": 8,
+    "offset": 0,
+    "size": 8,
+    "type": "u64"
+   },
+   "fields": [],
+   "kind": "enum",
+   "name": "Option<alloc::string::String>",
+   "scope": [
+    "core",
+    "option"
+   ],
+   "size": 24,
+   "variants": [
+    {
+     "default": false,
+     "discr_value": "18446744073709551615",
+     "name": "None",
+     "offset": 0,
+     "type": "core::option::Option<alloc::string::String>::None"
+    },
+    {
+     "default": true,
+     "name": "Some",
+     "offset": 0,
+     "type": "core::option::Option<alloc::string::String>::Some"
+    }
+   ]
+  },
+  "core::option::Option<alloc::string::String>::None": {
+   "align": 8,
+   "fields": [],
+   "kind": "struct",
+   "name": "None",
+   "params": [
+    {
+     "name": "T",
+     "type": "alloc::string::String"
+    }
+   ],
+   "scope": [
+    "core",
+    "option",
+    "Option<alloc::string::String>"
+   ],
+   "size": 24
+  },
+  "core::option::Option<alloc::string::String>::Some": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 0,
+     "type": "alloc::string::String"
+    }
+   ],
+   "kind": "struct",
+   "name": "Some",
+   "params": [
+    {
+     "name": "T",
+     "type": "alloc::string::String"
+    }
+   ],
+   "scope": [
+    "core",
+    "option",
+    "Option<alloc::string::String>"
+   ],
+   "size": 24
+  },
+  "core::ptr::non_null::NonNull<u8>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "pointer",
+     "offset": 0,
+     "type": "*const u8"
+    }
+   ],
+   "kind": "struct",
+   "name": "NonNull<u8>",
+   "params": [
+    {
+     "name": "T",
+     "type": "u8"
+    }
+   ],
+   "scope": [
+    "core",
+    "ptr",
+    "non_null"
+   ],
+   "size": 8
+  },
+  "core::ptr::unique::Unique<u8>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "pointer",
+     "offset": 0,
+     "type": "core::ptr::non_null::NonNull<u8>"
+    },
+    {
+     "align": 1,
+     "name": "_marker",
+     "offset": 8,
+     "type": "core::marker::PhantomData<u8>"
+    }
+   ],
+   "kind": "struct",
+   "name": "Unique<u8>",
+   "params": [
+    {
+     "name": "T",
+     "type": "u8"
+    }
+   ],
+   "scope": [
+    "core",
+    "ptr",
+    "unique"
+   ],
+   "size": 8
+  },
+  "core::result::Result<(), ()>": {
+   "align": 1,
+   "discriminant": {
+    "align": 1,
+    "offset": 0,
+    "size": 1,
+    "type": "u8"
+   },
+   "fields": [],
+   "kind": "enum",
+   "name": "Result<(), ()>",
+   "scope": [
+    "core",
+    "result"
+   ],
+   "size": 1,
+   "variants": [
+    {
+     "default": false,
+     "discr_value": 0,
+     "name": "Ok",
+     "offset": 0,
+     "type": "core::result::Result<(), ()>::Ok"
+    },
+    {
+     "default": false,
+     "discr_value": 1,
+     "name": "Err",
+     "offset": 0,
+     "type": "core::result::Result<(), ()>::Err"
+    }
+   ]
+  },
+  "core::result::Result<(), ()>::Err": {
+   "align": 1,
+   "fields": [
+    {
+     "align": 1,
+     "name": "__0",
+     "offset": 1,
+     "type": "()"
+    }
+   ],
+   "kind": "struct",
+   "name": "Err",
+   "params": [
+    {
+     "name": "T",
+     "type": "()"
+    },
+    {
+     "name": "E",
+     "type": "()"
+    }
+   ],
+   "scope": [
+    "core",
+    "result",
+    "Result<(), ()>"
+   ],
+   "size": 1
+  },
+  "core::result::Result<(), ()>::Ok": {
+   "align": 1,
+   "fields": [
+    {
+     "align": 1,
+     "name": "__0",
+     "offset": 1,
+     "type": "()"
+    }
+   ],
+   "kind": "struct",
+   "name": "Ok",
+   "params": [
+    {
+     "name": "T",
+     "type": "()"
+    },
+    {
+     "name": "E",
+     "type": "()"
+    }
+   ],
+   "scope": [
+    "core",
+    "result",
+    "Result<(), ()>"
+   ],
+   "size": 1
+  },
+  "core::result::Result<i32, alloc::string::String>": {
+   "align": 8,
+   "discriminant": {
+    "align": 8,
+    "offset": 0,
+    "size": 8,
+    "type": "u64"
+   },
+   "fields": [],
+   "kind": "enum",
+   "name": "Result<i32, alloc::string::String>",
+   "scope": [
+    "core",
+    "result"
+   ],
+   "size": 24,
+   "variants": [
+    {
+     "default": false,
+     "discr_value": "18446744073709551615",
+     "name": "Ok",
+     "offset": 0,
+     "type": "core::result::Result<i32, alloc::string::String>::Ok"
+    },
+    {
+     "default": true,
+     "name": "Err",
+     "offset": 0,
+     "type": "core::result::Result<i32, alloc::string::String>::Err"
+    }
+   ]
+  },
+  "core::result::Result<i32, alloc::string::String>::Err": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 0,
+     "type": "alloc::string::String"
+    }
+   ],
+   "kind": "struct",
+   "name": "Err",
+   "params": [
+    {
+     "name": "T",
+     "type": "i32"
+    },
+    {
+     "name": "E",
+     "type": "alloc::string::String"
+    }
+   ],
+   "scope": [
+    "core",
+    "result",
+    "Result<i32, alloc::string::String>"
+   ],
+   "size": 24
+  },
+  "core::result::Result<i32, alloc::string::String>::Ok": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 4,
+     "name": "__0",
+     "offset": 8,
+     "type": "i32"
+    }
+   ],
+   "kind": "struct",
+   "name": "Ok",
+   "params": [
+    {
+     "name": "T",
+     "type": "i32"
+    },
+    {
+     "name": "E",
+     "type": "alloc::string::String"
+    }
+   ],
+   "scope": [
+    "core",
+    "result",
+    "Result<i32, alloc::string::String>"
+   ],
+   "size": 24
+  },
+  "dyn rb_fix::Area": {
+   "align": 1,
+   "fields": [],
+   "kind": "struct",
+   "name": "dyn rb_fix::Area",
+   "scope": [],
+   "size": 0
+  },
+  "f32": {
+   "encoding": "float",
+   "kind": "base",
+   "name": "f32",
+   "size": 4
+  },
+  "f64": {
+   "encoding": "float",
+   "kind": "base",
+   "name": "f64",
+   "size": 8
+  },
+  "i32": {
+   "encoding": "signed",
+   "kind": "base",
+   "name": "i32",
+   "size": 4
+  },
+  "i8": {
+   "encoding": "signed",
+   "kind": "base",
+   "name": "i8",
+   "size": 1
+  },
+  "rb_fix::Guard": {
+   "align": 4,
+   "fields": [
+    {
+     "align": 4,
+     "name": "id",
+     "offset": 0,
+     "type": "u32"
+    }
+   ],
+   "kind": "struct",
+   "name": "Guard",
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 4
+  },
+  "rb_fix::Level": {
+   "align": 1,
+   "enumerators": [
+    [
+     "Low",
+     0
+    ],
+    [
+     "Mid",
+     1
+    ],
+    [
+     "High",
+     2
+    ]
+   ],
+   "kind": "c_enum",
+   "name": "Level",
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 1,
+   "underlying": "u8"
+  },
+  "rb_fix::Named": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "name",
+     "offset": 0,
+     "type": "alloc::string::String"
+    },
+    {
+     "align": 4,
+     "name": "id",
+     "offset": 24,
+     "type": "u32"
+    }
+   ],
+   "kind": "struct",
+   "name": "Named",
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 32
+  },
+  "rb_fix::Rec": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 1,
+     "name": "a",
+     "offset": 14,
+     "type": "u8"
+    },
+    {
+     "align": 8,
+     "name": "b",
+     "offset": 0,
+     "type": "f64"
+    },
+    {
+     "align": 2,
+     "name": "c",
+     "offset": 12,
+     "type": "u16"
+    },
+    {
+     "align": 4,
+     "name": "d",
+     "offset": 8,
+     "type": "u32"
+    }
+   ],
+   "kind": "struct",
+   "name": "Rec",
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 16
+  },
+  "rb_fix::Side": {
+   "align": 1,
+   "enumerators": [
+    [
+     "Left",
+     0
+    ],
+    [
+     "Right",
+     1
+    ]
+   ],
+   "kind": "c_enum",
+   "name": "Side",
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 1,
+   "underlying": "u8"
+  },
+  "rb_fix::Slot": {
+   "align": 8,
+   "discriminant": {
+    "align": 8,
+    "offset": 0,
+    "size": 8,
+    "type": "u64"
+   },
+   "fields": [],
+   "kind": "enum",
+   "name": "Slot",
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 8,
+   "variants": [
+    {
+     "default": false,
+     "discr_value": 0,
+     "name": "Empty",
+     "offset": 0,
+     "type": "rb_fix::Slot::Empty"
+    },
+    {
+     "default": true,
+     "name": "Full",
+     "offset": 0,
+     "type": "rb_fix::Slot::Full"
+    }
+   ]
+  },
+  "rb_fix::Slot::Empty": {
+   "align": 8,
+   "fields": [],
+   "kind": "struct",
+   "name": "Empty",
+   "scope": [
+    "rb_fix",
+    "Slot"
+   ],
+   "size": 8
+  },
+  "rb_fix::Slot::Full": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 0,
+     "type": "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>"
+    }
+   ],
+   "kind": "struct",
+   "name": "Full",
+   "scope": [
+    "rb_fix",
+    "Slot"
+   ],
+   "size": 8
+  },
+  "rb_fix::View": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "p",
+     "offset": 0,
+     "type": "*const f64"
+    },
+    {
+     "align": 8,
+     "name": "n",
+     "offset": 8,
+     "type": "usize"
+    }
+   ],
+   "kind": "struct",
+   "name": "View",
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 16
+  },
+  "rb_fix::hidden::Secret": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "v",
+     "offset": 0,
+     "type": "alloc::vec::Vec<u8, alloc::alloc::Global>"
+    }
+   ],
+   "kind": "struct",
+   "name": "Secret",
+   "scope": [
+    "rb_fix",
+    "hidden"
+   ],
+   "size": 24
+  },
+  "rb_fix::inner::Token": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 4,
+     "name": "id",
+     "offset": 24,
+     "type": "u32"
+    },
+    {
+     "align": 8,
+     "name": "text",
+     "offset": 0,
+     "type": "alloc::string::String"
+    }
+   ],
+   "kind": "struct",
+   "name": "Token",
+   "scope": [
+    "rb_fix",
+    "inner"
+   ],
+   "size": 32
+  },
+  "u16": {
+   "encoding": "unsigned",
+   "kind": "base",
+   "name": "u16",
+   "size": 2
+  },
+  "u32": {
+   "encoding": "unsigned",
+   "kind": "base",
+   "name": "u32",
+   "size": 4
+  },
+  "u64": {
+   "encoding": "unsigned",
+   "kind": "base",
+   "name": "u64",
+   "size": 8
+  },
+  "u8": {
+   "encoding": "unsigned",
+   "kind": "base",
+   "name": "u8",
+   "size": 1
+  },
+  "usize": {
+   "encoding": "unsigned",
+   "kind": "base",
+   "name": "usize",
+   "size": 8
+  }
+ }
+}

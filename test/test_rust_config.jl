@@ -221,12 +221,26 @@ end
     # One line makes the crate part of the library, under its CRATE name...
     @test occursin("\nextern crate rb_fix;\n", files["lib.rs"])
     # ...and the rest is RepliBuild's own: the frame that ends a panic, which
-    # only Rust may do. Nothing else of the crate is named or touched.
+    # only Rust may do, and what drops, reads and builds a value Rust owns.
+    # Nothing else of the crate is named or touched.
     code = join((l for l in split(files["lib.rs"], '\n') if !startswith(strip(l), "//")), "\n")
     @test count("rb_fix", code) == 1
     @test occursin("pub extern \"C\" fn __rb_catch(", code) && occursin("catch_unwind(AssertUnwindSafe(|| thunk(args, ret)))", code)
     @test occursin("pub extern \"C\" fn __rb_panic_message(buf: *mut u8, cap: usize) -> usize", code)
-    @test count("#[no_mangle]", code) == 2
+    # A drop that panics ends inside the library too.
+    @test occursin("unsafe fn __rb_drop<T>(p: *mut T) -> usize", code) &&
+          occursin("catch_unwind(AssertUnwindSafe(|| core::ptr::drop_in_place(p)))", code)
+    # A `String` is built from text that was checked, and read by the standard library's own functions.
+    @test occursin("pub unsafe extern \"C\" fn __rb_string_new(data: *const u8, len: usize, out: *mut String) -> u8", code)
+    @test occursin("core::str::from_utf8(bytes)", code)
+    @test occursin("pub unsafe extern \"C\" fn __rb_string_view(s: *const String, data: *mut *const u8, len: *mut usize)", code)
+    @test occursin("unsafe fn __rb_vec_view<T>(", code) && occursin("unsafe fn __rb_vec_new<T>(", code)
+    @test count("#[no_mangle]", code) == 4
+    # The per-type lines are a file of their own, which the build writes from what it found.
+    @test endswith(rstrip(code), "include!(\"rb_glue.rs\");") && !haskey(files, "rb_glue.rs")
+    @test occursin("\nextern crate alloc;\n", code)
+    # A crate attribute comes before every item.
+    @test findfirst("#![allow(improper_ctypes_definitions)]", code).start < findfirst("extern crate", code).start
     # A panic outside that frame still goes to whatever hook was there before.
     @test occursin("previous(info)", code)
     feat = TOML.parse(RB.root_files(rc(; features = ["a", "b"], default_features = false), crate)["Cargo.toml"])
@@ -240,6 +254,8 @@ end
         c = RB.Crate("rb-fix", "rb_fix", joinpath(up, "Cargo.toml"), up)
         root = RB._write_root(r, c)
         @test root == RB.root_dir(r) && isfile(joinpath(root, "Cargo.toml")) && isfile(joinpath(root, "lib.rs"))
+        # `lib.rs` includes it, so it is there from the first build on, empty.
+        @test read(joinpath(root, "rb_glue.rs"), String) == RepliBuild.RustGlue.glue_text(RepliBuild.RustGlue.Row[])[1]
         @test !isfile(joinpath(root, "Cargo.lock"))            # the crate has none to start from
         stamp = mtime(joinpath(root, "Cargo.toml"))
         sleep(0.05)
@@ -271,7 +287,9 @@ end
         i = findfirst(==(needed[1]), args)
         @test i !== nothing && args[i+1] == needed[2]
     end
-    @test "--lib" in args && "--message-format=json-render-diagnostics" in args
+    # The compiler's messages come as JSON: an error names its file and line, which is how
+    # a per-type line that does not compile is found.
+    @test "--lib" in args && "--message-format=json" in args
     # What the root crate's own manifest says is not said again.
     @test !("--crate-type" in args) && !("--package" in args) && !("--features" in args) && !("--locked" in args)
     # The profile is stated whole: a debug build at 0, with one IR file per crate.
@@ -296,8 +314,15 @@ end
 end
 
 @testset "cargo: the flags every rustc of the build gets" begin
-    ours = ["--emit=llvm-ir,link", "-Csymbol-mangling-version=v0", "--cap-lints=warn"]
+    plain = ["--emit=llvm-ir,link", "-Csymbol-mangling-version=v0", "--cap-lints=warn"]
+    # A function the optimizer merged into another stays a function, with its own debug info.
+    @test RB.MERGED_FUNCTION_FLAGS == ["-Cllvm-args=-mergefunc-use-aliases=false", "-Cllvm-args=-mergefunc-preserve-debug-info"]
+    ours = vcat(plain, RB.MERGED_FUNCTION_FLAGS)
     @test RB.rustflags(; base = Dict{String,String}()) == ours
+    # ...unless this rustc's LLVM does not know those options, which it says by refusing to start.
+    @test RB.rustflags(; base = Dict{String,String}(), keep_merged = false) == plain
+    @test RB._unknown_llvm_argument("rustc: Unknown command line argument '-mergefunc-use-aliases=false'.  Try: 'rustc --help'")
+    @test !RB._unknown_llvm_argument("error[E0308]: mismatched types") && !RB._unknown_llvm_argument("Unknown command line argument '-foo'")
     # The user's own flags stay, in front; either spelling of them.
     @test RB.rustflags(; base = Dict("RUSTFLAGS" => "-C target-cpu=native  -g")) == vcat(["-C", "target-cpu=native", "-g"], ours)
     @test RB.rustflags(; base = Dict("CARGO_ENCODED_RUSTFLAGS" => "-Clink-arg=-fuse-ld=lld\x1f--cfg\x1ffoo=\"a b\"",
@@ -310,6 +335,8 @@ end
     end
     env = Dict(split(e, '='; limit = 2)[1] => split(e, '='; limit = 2)[2] for e in cmd.env)
     @test split(env["CARGO_ENCODED_RUSTFLAGS"], '\x1f') == vcat(["-g"], ours)
+    without = withenv(() -> RB._cargo(tc, ["metadata"], tempdir(); keep_merged = false), "RUSTFLAGS" => nothing, "CARGO_ENCODED_RUSTFLAGS" => nothing)
+    @test any(e -> e == "CARGO_ENCODED_RUSTFLAGS=" * join(plain, '\x1f'), without.env)
     @test !haskey(env, "RUSTFLAGS") && env["CARGO_TERM_COLOR"] == "never"
 end
 

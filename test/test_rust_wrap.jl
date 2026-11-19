@@ -158,10 +158,10 @@ end
     @test occursin("Base.propertynames(::Rec) = (:a, :b, :c, :d,)", text)
     @test occursin("function Rec(f1, f2, f3, f4)", text)
     # A fieldless enum is a Julia enum, its members under its name.
-    @test occursin("@enum Level::UInt8 begin\n    Level_Low = 0\n    Level_Mid = 1\n    Level_High = 2\nend", text)
+    @test occursin("@enum Level::Base.UInt8 begin\n    Level_Low = 0\n    Level_Mid = 1\n    Level_High = 2\nend", text)
     # An enum with data says which variant it is, and gives that variant's record.
     @test occursin("function RepliBuild.RustRuntime.variant(x::Shape)", text)
-    @test occursin("_d == 1 && return :Rect", text)
+    @test occursin("_d == Base.UInt64(0x1) && return :Rect", text)
     @test occursin("struct Shape_Rect\n", text) && occursin("f === :w && return Base.unsafe_load(Base.Ptr{Base.Float64}(_p + 8))", text)
     @test occursin("f === :Rect && return (RepliBuild.RustRuntime.variant(x) === :Rect ? Base.unsafe_load(Base.Ptr{Shape_Rect}(_p))", text)
     # A fat pointer and a tuple get no type of their own.
@@ -181,7 +181,7 @@ end
         "Boxed" => rec("Box<u8>"), "Nested" => rec("Boxed", "u64"),
         "alloc::string::String" => rec("u64", "u64", "u64"),
         "&[u8]" => merge(rec("*const u8", "u64"), Dict{String,Any}("fat" => "slice")))
-    ctx = GR.Ctx(types, Dict{String,String}(), Dict{String,GR.T}())
+    ctx = GR.Ctx(Dict{String,Any}("types" => types))
     @test !GR.owns(ctx, "u64") && !GR.owns(ctx, "Plain") && !GR.owns(ctx, "Borrows") && !GR.owns(ctx, nothing)
     @test !GR.owns(ctx, "&u8") && !GR.owns(ctx, "*const u8")          # a pointer handed over as itself is the caller's
     @test !GR.owns(ctx, "&[u8]")                                      # a borrowed slice
@@ -189,4 +189,138 @@ end
     @test GR.owns(ctx, "Raw")                                         # a raw pointer inside a record may be owned
     @test GR.owns(ctx, "alloc::string::String")
     @test GR.owns(ctx, "no::such::Type")                              # what is not described is not assumed plain
+
+    # That is the fallback. The compiler's answer, where the build has it, is the one used:
+    # a record with a raw pointer is plain when the compiler says nothing drops it, and a
+    # type is movable when the build has its drop function.
+    @test GR.unmovable(ctx, "Plain") === nothing && GR.unmovable(ctx, "&u8") === nothing && GR.unmovable(ctx, "u64") === nothing
+    @test occursin("may own memory", GR.unmovable(ctx, "Raw")) && occursin("built without a drop function", GR.unmovable(ctx, "Raw"))
+    @test occursin("owns its value", GR.unmovable(ctx, "Box<u8>"))
+    answered = GR.Ctx(Dict{String,Any}("types" => types,
+        "glue" => Dict{String,Any}("Raw" => Dict{String,Any}("drop" => "__rb_drop_1", "owns" => false, "spelling" => "Raw"),
+                                   "Boxed" => Dict{String,Any}("drop" => "__rb_drop_2", "owns" => true, "spelling" => "Boxed")),
+        "glue_refused" => Dict{String,Any}("Nested" => "no path names it")))
+    @test GR.unmovable(answered, "Raw") === nothing && GR.unmovable(answered, "Boxed") === nothing
+    @test GR.classify(answered, "Raw").kind === :blob && GR.classify(answered, "Boxed").kind === :owned
+    @test occursin("the build has no drop function for it: no path names it", GR.unmovable(answered, "Nested"))
+end
+
+@testset "Rust wrapper: what Rust must drop" begin
+    md = RepliBuild._read_json(rust_fixture("owned_o3.metadata.json"))
+    (text, report) = GR.generate(md; module_name = "Owned", library_path = "/somewhere/librb_fix.so", generator = "test")
+    ex = Meta.parseall(text)
+    @test !any(a -> a isa Expr && a.head in (:incomplete, :error), ex.args)
+    reasons = Dict(r["name"] => r["reason"] for r in report if r["tier"] == "unsupported")
+    # The one function left out returns the one type no path outside the crate names.
+    @test collect(keys(reasons)) == ["secret"]
+    @test occursin("it returns a `rb_fix::hidden::Secret`, which may own memory", reasons["secret"]) &&
+          occursin("no path names `rb_fix::hidden::Secret` from outside the crate", reasons["secret"])
+
+    # A `String` out is a Julia String: copied, and Rust's dropped there.
+    @test occursin("return _rb_string_take!(_ret_p)", body(text, "make_greeting"))
+    # By value in, it is built by Rust from the Julia string, for the callee to drop.
+    owned = body(text, "string_len_owned")
+    @test occursin("function string_len_owned(a1::Base.Union{Base.AbstractString,RustString})", owned)
+    @test occursin("_rb_string_new!(a1_p, a1)", owned)
+    # A shared reference takes the object that holds one, or a Julia string as one made for the call.
+    ref = body(text, "string_ref_len")
+    @test occursin("function string_ref_len(a1::Base.Union{RustString,Base.AbstractString,Base.Ptr})", ref)
+    @test occursin("a1_r = a1 isa Base.AbstractString ? RustString(a1) : a1", ref)
+    @test occursin("a1 isa Base.AbstractString && RepliBuild.RustRuntime.drop!(a1_r)", ref)
+    # A mutable reference must be to a String that stays.
+    @test occursin("function shout(a1::Base.Union{RustString,Base.Ptr})", body(text, "shout"))
+    # A string is checked before it is Rust's.
+    @test occursin("Base.isvalid(a1_s) || Base.throw(Base.ArgumentError(", body(text, "parse_int"))
+
+    # A `Vec` of plain data is copied whole and dropped; of strings, read element by element.
+    squares = body(text, "squares")
+    @test occursin("RepliBuild.RustRuntime.vec_copy(Base.Float64, _rb_vec_view_", squares)
+    @test occursin(r"_rb_drop_\d+\(_q\); _v end\)", squares)
+    @test occursin("RepliBuild.RustRuntime.vec_copy(Rec, _rb_vec_view_", body(text, "recs"))
+    @test occursin("RepliBuild.RustRuntime.vec_read(Base.String, _e -> _rb_string_at(_e), _rb_vec_view_", body(text, "words"))
+    @test occursin("function vec_sum(a1::Base.Union{Base.AbstractVector,Vec_f64})", body(text, "vec_sum"))
+    @test occursin("function vec_push(a1::Base.Union{Vec_f64,Base.Ptr}, a2::Base.Real)", body(text, "vec_push"))
+
+    # `Result`: the value, or the error thrown. `Option` and a tuple: taken apart.
+    parse_int = body(text, "parse_int")
+    @test occursin(r"\? Base\.unsafe_load\(Base\.Ptr\{Base\.Int32\}\(_ret_p( \+ \d+)?\)\) : Base\.throw\(RepliBuild\.RustRuntime\.RustError\(_rb_string_take!\(_ret_p\)\)\)\)", parse_int)
+    @test occursin("? nothing : Base.throw(RepliBuild.RustRuntime.RustError(nothing)))", body(text, "check"))
+    @test occursin(r"== Base\.UInt64\(0x[0-9a-f]+\) \? nothing : _rb_string_take!\(_ret_p\)\)", body(text, "find_word"))
+    @test occursin(r"return \(_rb_string_take!\(_ret_p( \+ \d+)?\), Base\.unsafe_load\(Base\.Ptr\{Base\.UInt64\}", body(text, "name_and_len"))
+
+    # A `Box` is an object holding the pointer: returned, moved in, and passed where `&Rec` is taken.
+    @test occursin("return Box_Rec(_RbRaw(), ", body(text, "boxed"))
+    @test occursin("_rb_take!(a1::Box_Rec)", body(text, "unbox_d"))
+    box_d = body(text, "box_d")
+    @test occursin("function box_d(a1::Base.Union{Rec,Base.RefValue{Rec},Base.Ptr,Box_Rec})", box_d)
+    @test occursin("(a1_r isa Box_Rec ? _rb_target(a1_r) : _rb_address(a1_r))", box_d)
+    @test occursin(" == 0 ? nothing : Box_Rec(_RbRaw(), ", body(text, "opt_box"))
+    @test occursin("return Slot(_RbRaw(), ", body(text, "slot_make")) && occursin("_rb_take!(a1::Slot)", body(text, "slot_take"))
+    @test occursin("function slot_d(a1::Base.Union{Slot,Base.Ptr})", body(text, "slot_d"))
+
+    # The types. What is dropped is the compiler's answer, not the shape's: `Guard` is one
+    # integer with drop code, `View` a raw pointer without.
+    @test occursin("mutable struct Named\n    _rb_bytes::Base.NTuple{32,Base.UInt8}\n    _rb_owned::Base.Bool\n", text)
+    @test occursin("mutable struct Guard\n", text) && occursin("\nstruct View\n", text) && occursin("\nstruct Rec\n", text)
+    @test count("Base.finalizer(RepliBuild.RustRuntime.drop!, x)", text) == count("\nmutable struct ", text) > 5
+    @test occursin("f === :name && return _rb_string_at(_p)", text) && occursin("Base.propertynames(::Named) = (:name, :id,)", text)
+    @test occursin("function RustString(s::Base.AbstractString)", text) && occursin("Base.String(x::RustString) = ", text)
+    @test occursin("function Vec_f64(v::Base.AbstractVector)", text) && occursin("Base.collect(x::Vec_f64) = ", text)
+    @test occursin("Base.getindex(x::Box_Rec) = ", text) && occursin("_rb_target(x::Box_Rec) = ", text)
+    @test occursin("function RepliBuild.RustRuntime.variant(x::Slot)", text)
+    # Each drop is the build's function for that type, called as the C function it is.
+    for key in ("rb_fix::Named", "alloc::string::String", "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>")
+        sym = md["glue"][key]["drop"]
+        @test occursin("$(sym[2:end])(p::Base.Ptr{Base.Cvoid}) = ccall((:$sym, LIBRARY_PATH), Base.UInt, ", text)
+    end
+    @test !occursin("$(md["glue"]["rb_fix::Rec"]["drop"][2:end])(p::", text)          # plain data has nothing to call
+    @test occursin(":Named => \"rb_fix::Named\"", text) && occursin(":Token => \"rb_fix::inner::Token\"", text)
+    @test !occursin(":View =>", text) && !occursin(":Rec =>", text)
+    # A type's name does not carry the default allocator, and Rust's String is not named `String`.
+    @test occursin("mutable struct Vec_f64\n", text) && occursin("mutable struct Box_Rec\n", text)
+    @test !occursin("Vec_f64_Global", text) && !occursin(r"struct String\b", text)
+
+    # A fieldless enum is stored as the integer the compiler says: the standard library's
+    # `Ordering` is a signed byte, and an unsigned Julia enum of it would not load.
+    @test occursin("@enum Ordering::Base.Int8 begin\n    Ordering_Less = -1\n    Ordering_Equal = 0\n    Ordering_Greater = 1\nend", text)
+    @test occursin("@enum Level::Base.UInt8 begin", text)
+    @test occursin("Base.reinterpret(Base.UInt8, Base.Int8(Base.Integer(a1)))", body(text, "ordering_sign"))
+    # Every type and enum of the module evaluates: `@enum` checks its values when it is expanded.
+    types_text = text[findfirst("# ── Types", text).start:findfirst("# ── What Rust must drop", text).start-1]
+    sandbox = Module(:OwnedTypes)
+    Core.eval(sandbox, :(import RepliBuild; struct _RbRaw end; _rb_address(x) = x))
+    evaluated = 0
+    for ex in Meta.parseall(types_text).args
+        ex isa LineNumberNode && continue
+        Core.eval(sandbox, ex)
+        evaluated += 1
+    end
+    @test evaluated > 50 && Int(getfield(sandbox, :Ordering_Less)) == -1 && isdefined(sandbox, :Named)
+    @test GR._enum_value(255, "Base.Int8", 1) == -1 && GR._enum_value(-1, "Base.UInt8", 1) == 255 && GR._enum_value(3, "Base.Int8", 1) == 3
+
+    # `[T; N]` is read and written element by element, through a place bound before the
+    # elements are reached, so an array of arrays reads through its own.
+    @test occursin("(let _a = _ret_p; Base.ntuple(_i -> Base.unsafe_load(Base.Ptr{Base.UInt8}((_a + (_i - 1) * 1))), Base.Val(16)) end)",
+                   body(text, "bytes16"))
+    @test occursin("(let _a = _ret_p; Base.ntuple(_i -> (let _a = (_a + (_i - 1) * 8); Base.ntuple(_i -> ", body(text, "grid"))
+    sum16 = body(text, "bytes16_sum")
+    @test occursin("function bytes16_sum(a1::Base.Union{Base.Tuple,Base.AbstractVector})", sum16)
+    @test occursin("Base.length(_t) == 16 || Base.throw(Base.ArgumentError(", sum16)
+    # A slice of plain records is a vector of them.
+    @test occursin("function recs_total(a1::Base.DenseVector{Rec})", body(text, "recs_total"))
+
+    # Two functions with the same code keep their own types in this build.
+    @test occursin("function flip(a1::Side)", body(text, "flip")) && occursin("function flag(a1::Base.Bool)", body(text, "flag"))
+
+    # A library built before there were drop functions: nothing that may own is moved, and each says so.
+    old = deepcopy(md)
+    foreach(k -> delete!(old, k), ("glue", "glue_refused", "glue_helpers"))
+    (old_text, old_report) = GR.generate(old; module_name = "Owned", library_path = "/somewhere/librb_fix.so")
+    old_reasons = Dict(r["name"] => r["reason"] for r in old_report if r["tier"] == "unsupported")
+    for name in ("make_greeting", "string_len_owned", "squares", "vec_sum", "boxed", "unbox_d", "named", "slot_make", "view", "parse_int")
+        @test occursin("built without a drop function", get(old_reasons, name, "wrapped"))
+    end
+    @test !haskey(old_reasons, "rec_sum_ref") && !haskey(old_reasons, "flag") && !haskey(old_reasons, "check")
+    @test !occursin("mutable struct", old_text) && !occursin("_rb_take!", old_text)
+    @test !any(a -> a isa Expr && a.head in (:incomplete, :error), Meta.parseall(old_text).args)
 end

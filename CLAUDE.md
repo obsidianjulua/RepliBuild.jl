@@ -23,12 +23,13 @@ Ingest and llmcall are John's features with julia dont use them clancker.
 | 3 | `ccall` | Everything else; the default for C |
 
 A **Rust front end is in progress** (branch work since 2026-11-19): `build`,
-`wrap` and `use` work on a `[rust]` project for functions of plain data, through
-plain `ccall`s and generated thunks (`RustThunks`, the dialect's
-`jlcs.native_call`); ownership (`String`, `Vec`, `Box`), generics and trait
-objects are not built. It wraps plain Rust, never `extern "C"`; design and
-measurements are `docs/updates/RUST_FRONT_END.md`, the rules are under "Rust
-front end" below.
+`wrap` and `use` work on a `[rust]` project for every function that has a
+symbol, through plain `ccall`s and generated thunks (`RustThunks`, the
+dialect's `jlcs.native_call`), ownership included (`String`, `Vec`, `Box`,
+records that hold them, `Result`); generic and `#[inline]` functions and
+trait objects are not built. It wraps plain Rust, never `extern "C"`; design
+and measurements are `docs/updates/RUST_FRONT_END.md`, the rules are under
+"Rust front end" below.
 
 Positioning: a hands-on dev tool for wrapping libraries **from source**, not a
 JLL/BinaryBuilder replacement. DWARF from the real compile is the source of truth —
@@ -126,6 +127,12 @@ skill drives adding a package.
   thunks); its `test_deep.jl` checks them against Julia's own math through
   the generated module. John's Hub is the starter every user's own Hub
   begins from, so an in-progress package belongs there.
+- **`packages/rustsemver` is the Rust package for values Rust owns**
+  (2026-11-19): the `semver` crate from its pinned commit. A parsed
+  `Version` is an object that owns Rust memory, a failed parse is a thrown
+  `RustError`, and its `test_deep.jl` leaves 20,000 of them to Julia's
+  collector. It is the package to re-run when ownership or the per-type
+  drop functions change.
 - **Consumer compensation is a feature request.** A workaround hand-rolled in several
   Hub consumers is evidence of a missing generator feature. When a policy moves into
   the generator, grep the consumers for the workaround.
@@ -471,15 +478,17 @@ If you are asked to work on it:
   `[paths] build` (`extern crate <name>;`, a `dylib`, the wrapped crate a path
   dependency), has cargo and rustc compile AND link it (the profile stated
   whole), then writes `compilation_metadata.json` with `"language": "rust"`:
-  one row per function (`RustABI.join_function`) and the types they reach
-  (`RustDWARF`). `RustABI` and `RustDWARF` are text in, tables out, and run no
-  tool. `IRGen/RustThunks.jl` turns the rows into thunks (one
+  one row per function (`RustABI.join_function`), the types they reach
+  (`RustDWARF`), and per type that crosses by value the compiler's answer to
+  "must this be dropped" with the function that drops it (`RustGlue`, the
+  metadata's `glue`). `RustABI`, `RustDWARF` and `RustGlue` are text in,
+  tables out, and run no tool. `IRGen/RustThunks.jl` turns the rows into thunks (one
   `jlcs.native_call` each), JITs them (`load`) and calls one (`call_raw`).
   `Wrapper/Rust/GeneratorRust.jl` is `wrap`: the Julia module, from the
   metadata alone. `RustRuntime.jl` is what that module calls: `Library`,
   `invoke`, `RustPanic`.
   (`test_rust_abi.jl`, `test_rust_dwarf.jl`, `test_rust_config.jl`,
-  `test_rust_thunks.jl`, `test_rust_wrap.jl`, devtests
+  `test_rust_thunks.jl`, `test_rust_wrap.jl`, `test_rust_glue.jl`, devtests
   `test_rust_build_live.jl`, `test_rust_thunks_live.jl`,
   `test_rust_wrap_live.jl`.)
 - `Builder/PackageRegistry.jl` — `~/.replibuild/` registry. **A project builds
@@ -1970,15 +1979,21 @@ outward-facing, so ask first.
   a symbol: an instantiation of `core`'s generic carries it as a suffix. A
   Rust library exports the standard library (1,743 symbols for 17 functions)
   and its DWARF holds std's too.
-- **A symbol with no `define` line can still be a function**: above opt-level
-  1 LLVM merges functions with the same code and keeps one as an IR alias
-  (`RustABI.aliases`, row key `alias_of`). Without the alias table it leaves
-  the surface silently. The merged function usually has no DIE, so its row
-  carries its TARGET's types and `own_debug_info: false`: the call is right
-  and the Rust types may not be (`flip(Side)` merged into `flag(bool)`).
-  Nothing in the library says what they were; a generator must not present
-  such a row's types as the function's own. A one-byte value that is only 0
-  or 1 (a `bool`, a two-variant enum, `Result<(), E>`) is `i1` in the call.
+- **A function the optimizer merged into another stays a function of its
+  own** (`RustBuild.MERGED_FUNCTION_FLAGS`, two LLVM options through
+  rustc's stable `-C llvm-args`). Above opt-level 1 LLVM keeps one of two
+  functions with the same code; rustc's default leaves the other as an IR
+  ALIAS, with no `define` line and no DIE, so its Rust types are nowhere
+  (`flip(Side)` came out typed as `flag(bool)`, and `string_ref_len(&String)`
+  as taking a `Secret`). With the options the other is a function that jumps
+  to the kept one, with its own `define` line and debug info. They are
+  LLVM's options: an LLVM without them refuses to start
+  (`_unknown_llvm_argument`), and the build then runs without them. So the
+  alias path stays (`RustABI.aliases`, row key `alias_of`,
+  `own_debug_info: false`: the call is right and the types are the
+  TARGET's), and a generator must not present such a row's types as the
+  function's own. A one-byte value that is only 0 or 1 (a `bool`, a
+  two-variant enum, `Result<(), E>`) is `i1` in the call.
 - **An optimized build keeps incremental compilation on.** Above opt-level 0
   rustc gives a small `pub fn` no symbol unless incremental is on (4 of 17
   kept one at opt-level 3; 17 of 17 with it). `cargo_args` states the whole
@@ -1990,7 +2005,8 @@ outward-facing, so ask first.
   crate cannot be the end of a link (libm: "`#[panic_handler]` function
   required"), a pinned checkout must not be written into (the lock file is
   the root's, seeded from the crate's), and the Rust RepliBuild must supply
-  itself (the catching frame, later) needs a crate to live in. Consequences
+  itself (the catching frame, the drop functions) needs a crate to live in.
+  Consequences
   to keep: the flags reach EVERY crate through `CARGO_ENCODED_RUSTFLAGS`
   (`rustflags`; what follows `--` reaches the root alone), with
   `--cap-lints=warn`, because a crate that denies its own warnings stops
@@ -2039,11 +2055,70 @@ outward-facing, so ask first.
   functions, so `extern "C"` and unmangled, and never part of the surface
   (the surface is the WRAPPED crate's IR). Its panic hook records a panic
   only inside `__rb_catch` and passes any other on to the previous hook.
-- **What may own memory is not moved** (`GeneratorRust.owns`): a `Box`,
-  anything of `alloc`, a record with a raw pointer field. Until drop
-  functions exist, such a function is a stub that raises its reason and an
-  entry of the module's `UNSUPPORTED`; nothing is left out silently and
-  nothing is wrapped that would leak or double-free.
+- **Whether a type is dropped is the compiler's answer, never its shape's**
+  (`RustGlue`, the metadata's `glue`). A record of one integer is dropped
+  when its author wrote `impl Drop` (the fixture's `Guard`), and a record
+  with a raw pointer is plain data when they did not (`View`). The root
+  crate has one generated line per type that crosses by value
+  (`rb_glue.rs`): `__rb_drop_<n>(p: *mut T, _owns: *const [u8;
+  needs_drop::<T>() as usize])`. The build reads that function's DWARF for
+  which type `p` points at (a spelling that named another type is refused)
+  and for the array's length (1: dropped, 0: plain). `GeneratorRust.owns` is
+  only the fallback for a type with no answer (`unmovable`): such a type is
+  moved only when its shape shows nothing it could own, and a function that
+  would move one that may is a stub with its reason in `UNSUPPORTED`.
+  Nothing is left out silently.
+- **One row of `rb_glue.rs` is one line, and no two rows have the same
+  code.** A compile error names its line (cargo runs with
+  `--message-format=json`; `RustGlue.error_lines`), the row is dropped and
+  the rest built again (`_plan_glue!`). Each drop function returns its own
+  number for a null pointer: functions with identical code are merged and
+  the merged one loses the DIE this is read from (measured before the
+  constant: 3 of 14 had none). Keep a new per-type function either unique
+  or unread.
+- **A type is spelled by a path that resolves, found by a probe compile.**
+  DWARF names a type where it is DEFINED (`rb_fix::inner::Token`); source
+  can name it only where it is public (`rb_fix::Token`). Every candidate
+  (`RustGlue.candidates`: the path, then with less of its middle) is one
+  `use` line; rustc reports all the lines that do not resolve in one pass.
+  The trailing `alloc::alloc::Global` is cut (`source_name`): it cannot be
+  named in stable Rust. A type with no path has no line and says why
+  (`glue_refused`). Never write a type into Rust source from its DWARF name
+  directly.
+- **A `String`'s and a `Vec`'s layout is never spelled in Julia.** The root
+  crate reads and builds them with the standard library's own functions
+  (`__rb_string_view`, `__rb_string_new`, per `Vec` type `__rb_vec_view_<n>`
+  and `__rb_vec_new_<n>`). A `Vec`'s buffer is a pointer to bytes in DWARF;
+  its element type is the type's first template parameter (`params`,
+  `RustGlue.vec_element`).
+- **A value has one holder** (`GeneratorRust.decode`'s `take`). Taken (a
+  return): a `String` or a readable `Vec` is copied and Rust's dropped there;
+  anything else that is dropped becomes the Julia object that holds its
+  bytes, with `RustRuntime.drop!` as its finalizer. Not taken (a field, an
+  element): copied when it can be, and NOT READ when it owns something that
+  cannot be, since a second holder would drop it again. Written by value
+  (`encode`), an owning object is moved: `_rb_take!` empties it, and its
+  address or a second move is then an error. A blob copy of a type the
+  compiler did not call plain is never made for the same reason.
+- **A fieldless enum is stored as the integer its DWARF names**
+  (`_enum_base`, `underlying`): `core::cmp::Ordering` is a signed byte and
+  `Less` is -1, and `@enum` checks its values when the module loads, so an
+  unsigned enum of it made every module reaching an `Ord` impl fail to
+  LOAD. A wrapper that parses has not been shown to load: `test_rust_wrap.jl`
+  evaluates the types section, and a survey of real crates must load each
+  module (`.claude/rust-probe-2026-11-19/survey_wrap.jl` in the working
+  checkout, hand-run, network).
+- **`Option` and `Result` are read by the discriminant DWARF gives**, niche
+  values included (`_option`'s `:niche`, `_result`): a value that may not
+  fit `Int64` arrives as a decimal string, and `_discr_literal` writes it as
+  a literal of the discriminant's width. A returned `Result` is its `Ok`
+  value or a thrown `RustError` of its `Err`; anywhere else it is a value
+  like any enum.
+- **`rb_glue.rs` belongs to one compiler, crate and feature set**
+  (`rb_glue.json`, `_glue_identity`, the file's hash): a file that does not
+  match its record is replaced by an empty one before any compile, and a
+  build that fails with lines in the file is tried once more without them,
+  so a crate that changed under its lines still builds.
 - **A wrapper JITs nothing at load.** `RustRuntime.Library` opens the
   library; the thunk session is created at the first thunk call, and never
   while Julia is generating output. A wrapper of plain calls needs no libJLCS.
@@ -2178,7 +2253,9 @@ Start here for any ABI question: register state is observable.
   the network, so it is a Hub package's file, never a repository test.
   `test/fixtures/rust/lean_o{0,3}.*` are vendored from `lean.rs` by
   `test/tools/gen_rust_fixtures.jl` (IR lines as `.ir.txt`: `*.ll` is
-  ignored).
+  ignored). `owned_o3.metadata.json` is the ownership half of the fixture
+  crate's own metadata (`test/tools/gen_rust_owned_fixture.jl`, which needs
+  cargo): regenerate it when `METADATA_VERSION` or a row's meaning moves.
 
 - **A test that pins emitted text pins the part it is about** (the thunk and
   the return type, the type of one position), not a whole call. Six tests went
@@ -2462,18 +2539,24 @@ don't file them as defects. Never extrapolate a narrow entry into "X is unbuilt"
 read the generator output first. (User-facing C++ RAII — `Managed<T>` finalizers with
 DWARF-resolved destructors — **is** built.)
 
-- **Rust, beyond plain data** (2026-11-19; `docs/updates/RUST_FRONT_END.md`
-  §21): ownership (drop functions in the root crate, owning Julia types,
-  `String`/`Vec`/`Box` out and in, `Result` as a value or an exception);
-  functions with no symbol (`#[inline]`, generic), which need only their
-  PATH named in the root crate (measured) and a decision on where the list
-  comes from; trait objects, callbacks, statics; constructing an enum with
-  data from Julia. Also unbuilt: `discover` on a Cargo project, the doctor
-  reporting cargo and rustc (`build` still asks the C/C++ doctor first), an
-  `extern "C"` function taking a record the C way, AOT thunks for Rust, a
-  crate with several codegen units, a user guide page. What a wrapper shows
-  for a function the compiler merged into another (`own_debug_info` false)
-  is the other's types, with a note: John's call whether that stands.
+- **Rust, what is left** (2026-11-19; `docs/updates/RUST_FRONT_END.md`
+  §22): functions with no symbol (`#[inline]`, generic), which need only
+  their PATH named in the root crate (measured) and a decision on where the
+  list comes from; trait objects (a `Box<dyn Trait>` is held and dropped,
+  and cannot be passed as `&dyn Trait` yet), callbacks, statics. Of
+  ownership: building an owning record or an enum with data from Julia
+  (only `String` and `Vec` are built), `Box::new` from a Julia value, a
+  type of another crate the wrapped one does not re-export (the root crate
+  does not depend on it), a type a crate exports only under another name
+  (`pub use inner::Error as ParseError`: no shortening of the defined path
+  finds it; humantime), a slice of what is not plain data, a value aligned
+  beyond 16 bytes (tiny-skia's SIMD records). Also unbuilt: `discover` on a
+  Cargo project, the doctor reporting cargo and rustc (`build` still asks
+  the C/C++ doctor first), an `extern "C"` function taking a record the C
+  way, AOT thunks for Rust, a crate with several codegen units, a user
+  guide page. Not checked, and not checkable from Julia: that a value
+  borrowing from another does not outlive it, and that a value is dropped
+  on the thread that made it (a finalizer runs where the collector does).
   Measured on Linux x86-64 only; AArch64 and Windows are not run.
 - Toolchain records by value that still trap (narrowed 2026-11-13; `tuple`,
   `optional` and `complex` are laid out, above): one with a virtual base, a

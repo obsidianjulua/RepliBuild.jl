@@ -21,7 +21,7 @@
 #   :cpp      GeneratorCpp, the shared generator code, IRGen, Debug
 #   :dialect  src/mlir and IRGen: the JLCS dialect and the IR it is fed
 #   :graph    BuildGraph, CMakeGraph, GraphGenerators, GraphBuild, GraphMode
-#   :rust     the Rust front end: RustBuild, RustABI, RustDWARF
+#   :rust     the Rust front end: RustBuild, RustABI, RustDWARF, RustGlue
 #
 # `areas_of_path` maps a changed path to areas; a file is selected when it
 # shares an area with a changed path. A path no rule knows selects everything.
@@ -192,6 +192,7 @@ const TESTS = TestFile[
     T("test_rust_config.jl", :unit, [:rust, :build]),
     T("test_rust_thunks.jl", :unit, [:rust]),
     T("test_rust_wrap.jl", :unit, [:rust]),
+    T("test_rust_glue.jl", :unit, [:rust, :build]),
     T("test_cross_library_types.jl", :unit, [:graph, :c, :cpp]),
 
     # ── dev: compiles, links or JITs ─────────────────────────────────────────
@@ -305,6 +306,7 @@ const GRAPH_FILES = ("src/Builder/BuildGraph.jl", "src/Builder/CMakeGraph.jl", "
                      "src/Builder/GraphBuild.jl", "src/Builder/GraphMode.jl")
 const DWARF_FILES = ("src/Builder/Compiler.jl", "src/Builder/DWARFParser.jl")
 const RUST_FILES = ("src/Builder/RustBuild.jl", "src/Builder/RustABI.jl", "src/Builder/RustDWARF.jl",
+                    "src/Builder/RustGlue.jl",
                     "src/IRGen/RustThunks.jl", "src/RustRuntime.jl", "src/Wrapper/Rust/GeneratorRust.jl")
 
 """

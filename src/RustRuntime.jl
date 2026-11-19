@@ -8,6 +8,10 @@
 # library's own catching frame, so a Rust panic arrives in Julia as a
 # `RustPanic` and not as the end of the process.
 #
+# What owns memory on the Rust side is ended by Rust: a wrapper's owning
+# types call the library's own drop functions (`drop!`, also their
+# finalizer), and a `Result`'s `Err` is thrown as a `RustError`.
+#
 # One `Library` per wrapped library. Its thunks are JIT'd the first time one
 # is needed, never when the wrapper is loaded: a wrapper whose every call is
 # a plain `ccall` needs no JIT at all, and a precompiling process must not
@@ -20,7 +24,7 @@ using Libdl
 import ..RustThunks
 import .._read_json
 
-export RustPanic, Library, invoke, thunk, variant
+export RustPanic, RustError, Library, invoke, thunk, variant, drop!, isowned
 
 """
     variant(x) -> Symbol
@@ -31,6 +35,44 @@ method per enum that carries data. `:unknown` where the discriminant is not
 one this reads.
 """
 function variant end
+
+"""
+    drop!(x)
+
+End the Rust value `x` holds, now, by Rust's own drop code for its type,
+instead of when Julia collects `x`. Nothing happens for a value that was
+already moved into Rust or dropped. A generated wrapper adds one method per
+type that owns something; each is also that type's finalizer.
+"""
+function drop! end
+
+"""
+    isowned(x) -> Bool
+
+Whether `x` still holds its Rust value: `false` once it was passed to a Rust
+function by value (which moves it) or dropped.
+"""
+function isowned end
+
+"""
+    RustError(value)
+
+A Rust function returned `Err(value)`. A wrapped function that returns
+`Result<T, E>` gives the `T` of an `Ok` and throws this for an `Err`.
+"""
+struct RustError <: Exception
+    value::Any
+end
+Base.showerror(io::IO, e::RustError) =
+    print(io, "RustError: ", e.value isa AbstractString ? e.value : repr(e.value))
+
+"The `n` elements of type `E` at `data`, copied into a Julia vector: a `Vec` of plain data."
+vec_copy(::Type{E}, data::Ptr{Cvoid}, n::Int) where {E} =
+    n == 0 ? E[] : copy(unsafe_wrap(Array, Ptr{E}(data), n))
+
+"`f(pointer)` for each of the `n` elements of `stride` bytes at `data`, as a vector of `E`."
+vec_read(::Type{E}, f, data::Ptr{Cvoid}, n::Int, stride::Int) where {E} =
+    E[f(data + (i - 1) * stride) for i in 1:n]
 
 """
     RustPanic(message)

@@ -35,8 +35,11 @@
 #   -Wl,-Bsymbolic (ELF)   the library binds its own symbols to itself, as
 #                          every library RepliBuild links does
 #   panic = unwind         `abort` would end the process on any panic
+#   -C llvm-args (two)     a function the optimizer merged into another keeps
+#                          its own `define` line and debug info
+#                          (`MERGED_FUNCTION_FLAGS`)
 #
-# The first four reach every crate of the build, through
+# The flags (the first four and the last) reach every crate of the build, through
 # `CARGO_ENCODED_RUSTFLAGS`: the wrapped crate is a dependency, and what
 # follows `--` on a `cargo rustc` line reaches the root alone.
 #
@@ -75,7 +78,9 @@ import ..LibDW
 import ..Tools
 import ..RustDWARF
 import ..RustABI
+import ..RustGlue
 import .._parse_json
+import .._read_json
 
 """
     manifest_path(config) -> String
@@ -172,7 +177,7 @@ _located(config::RepliBuildConfig) =
                config.rust.features, config.rust.default_features, config.rust.target_dir)
 
 "The shape of a Rust project's `compilation_metadata.json`. Bump it with any change to what a row means."
-const METADATA_VERSION = "rust-1"
+const METADATA_VERSION = "rust-2"
 
 # =============================================================================
 # The toolchain
@@ -257,13 +262,13 @@ _missing_tool_message(name, path, code, err) =
 # cargo, with the rustc this module resolved when one was named explicitly.
 # No toolchain overlay and no library path: cargo starts rustc, which starts
 # the system linker, and neither wants Julia's libraries first.
-function _cargo(tc::Toolchain, args::Vector{String}, dir::AbstractString)::Cmd
+function _cargo(tc::Toolchain, args::Vector{String}, dir::AbstractString; keep_merged::Bool = true)::Cmd
     cmd = Cmd(`$(tc.cargo) $args`; dir = String(dir))
     env = Dict{String,String}(String(k) => String(v) for (k, v) in ENV)
     env["CARGO_TERM_COLOR"] = "never"
     isempty(get(ENV, "REPLIBUILD_TOOL_RUSTC", "")) || (env["RUSTC"] = tc.rustc)
     # One source of rustc flags, read before any configuration file (`rustflags`).
-    env["CARGO_ENCODED_RUSTFLAGS"] = join(rustflags(), '\x1f')
+    env["CARGO_ENCODED_RUSTFLAGS"] = join(rustflags(; keep_merged), '\x1f')
     delete!(env, "RUSTFLAGS")
     return setenv(cmd, env)
 end
@@ -416,6 +421,64 @@ pub extern "C" fn __rb_panic_message(buf: *mut u8, cap: usize) -> usize {
 }
 """
 
+# The second thing RepliBuild supplies: what ends a value Julia holds. A Rust
+# value that owns memory is freed by Rust's own drop code for its type, so
+# Julia holds the value's bytes and calls back here to end it. `__rb_drop` is
+# that call for any type; `rb_glue.rs` has one exported line per type that
+# names the type for it (`RustGlue`). A `String` and a `Vec` are also read and
+# built here, by the standard library's own functions: their layout is the
+# standard library's business, and is never spelled in Julia.
+const _OWNERSHIP = raw"""
+
+/// Run the drop code of the value at `p`. 0: done. The largest integer: that code panicked.
+#[allow(dead_code)]
+unsafe fn __rb_drop<T>(p: *mut T) -> usize {
+    match catch_unwind(AssertUnwindSafe(|| core::ptr::drop_in_place(p))) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Build a `String` at `out` from `len` bytes of text.
+/// 0: built. 1: the bytes are not UTF-8, and nothing was built.
+#[no_mangle]
+pub unsafe extern "C" fn __rb_string_new(data: *const u8, len: usize, out: *mut String) -> u8 {
+    let bytes: &[u8] = if len == 0 { &[] } else { core::slice::from_raw_parts(data, len) };
+    match core::str::from_utf8(bytes) {
+        Ok(text) => {
+            out.write(String::from(text));
+            0
+        }
+        Err(_) => 1,
+    }
+}
+
+/// Where the text of the `String` at `s` is, and its length in bytes.
+#[no_mangle]
+pub unsafe extern "C" fn __rb_string_view(s: *const String, data: *mut *const u8, len: *mut usize) {
+    *data = (*s).as_ptr();
+    *len = (*s).len();
+}
+
+/// Where the elements of the `Vec` at `v` are, and how many there are.
+#[allow(dead_code)]
+unsafe fn __rb_vec_view<T>(v: *const Vec<T>, data: *mut *const u8, len: *mut usize) {
+    *data = (*v).as_ptr() as *const u8;
+    *len = (*v).len();
+}
+
+/// Build a `Vec` at `out` whose `len` elements are the bytes at `data`, moved in.
+#[allow(dead_code)]
+unsafe fn __rb_vec_new<T>(data: *const u8, len: usize, out: *mut Vec<T>) {
+    let mut v = Vec::<T>::with_capacity(len);
+    if len > 0 {
+        core::ptr::copy_nonoverlapping(data, v.as_mut_ptr() as *mut u8, len * core::mem::size_of::<T>());
+    }
+    v.set_len(len);
+    out.write(v);
+}
+"""
+
 "The generated root crate's name: the library cargo builds is `lib<this>.<ext>`."
 root_name(crate::Crate) = crate.name * "_rb"
 
@@ -428,9 +491,12 @@ root_dir(rc::RustConfig) = dirname(rc.target_dir) * "/root"
 The generated root crate, file name to text: a `Cargo.toml` that builds a
 `dylib` and depends on the wrapped crate by path, with the features `[rust]`
 asks for, and a `lib.rs` whose `extern crate` line makes the crate part of
-the library, followed by the frame that catches a panic (`_CATCH_FRAME`).
-The empty `[workspace]` table keeps a workspace in a directory above from
-claiming it.
+the library, followed by the frame that catches a panic (`_CATCH_FRAME`),
+what drops, reads and builds an owned value (`_OWNERSHIP`), and the line
+that includes `rb_glue.rs`, the per-type file the build writes
+(`RustGlue`; not one of these files, since it is written from what a build
+found). The empty `[workspace]` table keeps a workspace in a directory above
+from claiming it.
 """
 function root_files(rc::RustConfig, crate::Crate)::Dict{String,String}
     dep = Dict{String,Any}("path" => dirname(crate.manifest))
@@ -447,7 +513,10 @@ function root_files(rc::RustConfig, crate::Crate)::Dict{String,String}
            sprint(io -> TOML.print(io, manifest; sorted = true))
     lib = "// Generated by RepliBuild. The library is this crate; `$(crate.name)` is its\n" *
           "// dependency, and a `dylib` carries its dependencies and exports their functions.\n" *
-          "extern crate $(crate.name);\n" * _CATCH_FRAME
+          "#![allow(improper_ctypes_definitions)]\n" *
+          "extern crate $(crate.name);\n" *
+          "extern crate alloc;\n" * _CATCH_FRAME * _OWNERSHIP *
+          "\ninclude!(\"$(RustGlue.FILE)\");\n"
     return Dict("Cargo.toml" => toml, "lib.rs" => lib)
 end
 
@@ -460,6 +529,8 @@ function _write_root(rc::RustConfig, crate::Crate)::String
         path = joinpath(dir, name)
         (isfile(path) && read(path, String) == text) || write(path, text)
     end
+    # `lib.rs` includes it; a build that has found nothing yet has an empty one.
+    isfile(joinpath(dir, RustGlue.FILE)) || _write_glue(rc, RustGlue.Plan())
     # The crate's own lock file pins its dependencies. A path dependency's
     # lock is not read by cargo, so the root starts from a copy of it, and is
     # given a new copy when it changes.
@@ -477,6 +548,144 @@ function _write_root(rc::RustConfig, crate::Crate)::String
     return dir
 end
 
+# -----------------------------------------------------------------------------
+# rb_glue.rs: one line per type (`RustGlue`), and what it was written from
+# -----------------------------------------------------------------------------
+
+_glue_path(rc::RustConfig) = joinpath(root_dir(rc), RustGlue.FILE)
+_plan_path(rc::RustConfig) = joinpath(root_dir(rc), "rb_glue.json")
+
+# What a plan belongs to: a path that resolves for one compiler, crate and
+# set of features need not for another.
+function _glue_identity(rc::RustConfig, crate::Crate, tc::Toolchain, generator::AbstractString)::String
+    ctx = SHA.SHA256_CTX()
+    for part in (METADATA_VERSION, generator, tc.identity, crate.name, join(rc.features, ","), string(rc.default_features))
+        Compiler._key_feed!(ctx, part)
+    end
+    return bytes2hex(SHA.digest!(ctx))
+end
+
+# Write the file for `plan`, and beside it what the file was written from.
+function _write_glue(rc::RustConfig, plan::RustGlue.Plan; identity::AbstractString = "")
+    (text, _) = RustGlue.glue_text(plan.rows)
+    path = _glue_path(rc)
+    mkpath(dirname(path))
+    (isfile(path) && read(path, String) == text) || write(path, text)
+    open(_plan_path(rc), "w") do io
+        JSON.print(io, Dict{String,Any}(
+            "identity" => String(identity),
+            "file_sha" => bytes2hex(SHA.sha256(text)),
+            "wanted" => plan.wanted,
+            "rows" => [Dict{String,Any}("n" => r.n, "key" => r.key, "spelling" => r.spelling, "vec" => r.vec)
+                       for r in plan.rows],
+            "refused" => plan.refused), 2)
+    end
+    return path
+end
+
+# The plan the file on disk was written from. When the file and the record
+# beside it do not belong together, or belong to another compiler or crate,
+# both are replaced by empty ones: stale lines must not reach a compile.
+function _read_plan(rc::RustConfig, identity::AbstractString)::RustGlue.Plan
+    path = _glue_path(rc)
+    side = _plan_path(rc)
+    if isfile(path) && isfile(side)
+        plan = try
+            d = _read_json(side)
+            (d["identity"] == identity && d["file_sha"] == _file_sha(path)) ?
+                RustGlue.Plan(String[String(k) for k in d["wanted"]],
+                              RustGlue.Row[RustGlue.Row(Int(r["n"]), String(r["key"]), String(r["spelling"]), r["vec"] === true)
+                                           for r in d["rows"]],
+                              Dict{String,String}(String(k) => String(v) for (k, v) in d["refused"])) : nothing
+        catch
+            nothing
+        end
+        plan === nothing || return plan
+    end
+    _write_glue(rc, RustGlue.Plan(); identity)
+    return RustGlue.Plan()
+end
+
+"""
+    _plan_glue!(rc, crate, need, types, identity, build) -> (plan, messages)
+
+Write `rb_glue.rs` for the types `need` and build the library with it.
+`build()` runs cargo on the root crate and returns `(messages, stderr, exit
+code)`. Three steps, each a compile of the root crate alone (the wrapped
+crate is already built):
+
+1. the probe: every candidate path of every type, one `use` line each. The
+   compiler names the lines that do not resolve from outside the crate;
+2. the lines, each type spelled with the first candidate that resolved;
+3. again without any line the compiler refused, until it builds.
+
+A type that ends with no line is in the plan's `refused`, with the reason.
+Returns the plan the library was built with and that build's messages.
+"""
+function _plan_glue!(rc::RustConfig, crate::Crate, need::Vector{String}, types::AbstractDict,
+                     identity::AbstractString, build)
+    refused = Dict{String,String}()
+    names = Dict{String,String}()
+    for key in need
+        why = RustGlue.unnameable(key)
+        why === nothing ? (names[key] = RustGlue.source_name(key)) : (refused[key] = why)
+    end
+    all_paths = sort!(unique!(reduce(vcat, [RustGlue.paths(names[k]) for k in sort!(collect(keys(names)))]; init = String[])))
+    chosen = Dict{String,String}()
+    unresolved = Dict{String,String}()
+    fail(what, messages, diagnostics) = begin
+        _write_glue(rc, RustGlue.Plan(); identity)
+        error("cargo could not build the root crate of `$(crate.name)` $what:\n" * _failure_text(messages, diagnostics))
+    end
+    if !isempty(all_paths)
+        (text, lines) = RustGlue.probe_text(Dict(p => RustGlue.candidates(p, crate.name) for p in all_paths))
+        write(_glue_path(rc), text)
+        (messages, diagnostics, code) = build()
+        (bad, _) = code == 0 ? (Dict{Int,String}(), String[]) : RustGlue.error_lines(messages)
+        (code != 0 && isempty(bad)) && fail("with the lines that ask which paths are public", messages, diagnostics)
+        for n in sort!(collect(keys(lines)))
+            (path, candidate) = lines[n]
+            if haskey(bad, n)
+                get!(unresolved, path, bad[n])       # the first is the path itself: its error is the one to show
+            else
+                get!(chosen, path, candidate)
+            end
+        end
+    end
+    rows = RustGlue.Row[]
+    for (i, key) in enumerate(need)
+        haskey(names, key) || continue
+        spelling = RustGlue.spell(key, chosen)
+        if spelling === nothing
+            p = first(p for p in RustGlue.paths(names[key]) if !haskey(chosen, p))
+            refused[key] = "no path names `$p` from outside the crate ($(get(unresolved, p, "it did not resolve")))"
+            continue
+        end
+        push!(rows, RustGlue.Row(i, key, spelling, RustGlue.vec_element(types, key) !== nothing))
+    end
+    for round in 1:8
+        plan = RustGlue.Plan(need, rows, refused)
+        _write_glue(rc, plan; identity)
+        (messages, diagnostics, code) = build()
+        code == 0 && return (plan, messages)
+        (bad, _) = RustGlue.error_lines(messages)
+        (_, line_of) = RustGlue.glue_text(rows)
+        dropped = RustGlue.Row[r for r in rows if haskey(bad, line_of[r.n])]
+        (isempty(dropped) || round == 8) && fail("with its per-type lines", messages, diagnostics)
+        for r in dropped
+            refused[r.key] = "the line that drops it does not compile: $(bad[line_of[r.n]])"
+        end
+        rows = RustGlue.Row[r for r in rows if !haskey(bad, line_of[r.n])]
+    end
+    error("unreachable")
+end
+
+# What a failed cargo run said: the compiler's errors, then cargo's own lines.
+function _failure_text(messages::AbstractString, diagnostics::AbstractString)::String
+    rendered = RustGlue.rendered_errors(messages)
+    return String(strip(isempty(rendered) ? String(diagnostics) : rendered * "\n" * strip(diagnostics)))
+end
+
 """
     rustflags(; base = ENV) -> Vector{String}
 
@@ -486,14 +695,37 @@ to cargo as `CARGO_ENCODED_RUSTFLAGS`, which cargo reads before anything in a
 configuration file, so what is built does not depend on the machine's cargo
 configuration.
 """
-function rustflags(; base = ENV)::Vector{String}
+function rustflags(; base = ENV, keep_merged::Bool = true)::Vector{String}
     user = if !isempty(get(base, "CARGO_ENCODED_RUSTFLAGS", ""))
         String[String(x) for x in split(base["CARGO_ENCODED_RUSTFLAGS"], '\x1f'; keepempty = false)]
     else
         String[String(x) for x in split(get(base, "RUSTFLAGS", ""))]
     end
-    return vcat(user, ["--emit=llvm-ir,link", "-Csymbol-mangling-version=v0", "--cap-lints=warn"])
+    return vcat(user, ["--emit=llvm-ir,link", "-Csymbol-mangling-version=v0", "--cap-lints=warn"],
+                keep_merged ? MERGED_FUNCTION_FLAGS : String[])
 end
+
+"""
+What keeps a function the optimizer merged into another. Above opt-level 1
+LLVM finds functions with the same code (`flip(Side) -> Side` and
+`flag(bool) -> bool` are one function once compiled) and keeps one. rustc
+asks it to leave the other as an ALIAS: a second name with no `define` line
+and no debug info, so nothing in the build says what its Rust types were.
+With these two arguments the other stays a function of its own that jumps to
+the kept one, with its own `define` line and its own debug info (measured
+2026-11-19, rustc 1.97.1: the fixture crate's three aliases became three
+functions, each with its own types).
+
+They are LLVM's own options, passed through rustc's stable `-C llvm-args`.
+An LLVM that does not know them refuses to start, which `build_rust_project`
+answers by building without them; a merged function is then described
+through its alias (`RustABI.aliases`, `own_debug_info` false).
+"""
+const MERGED_FUNCTION_FLAGS = ["-Cllvm-args=-mergefunc-use-aliases=false", "-Cllvm-args=-mergefunc-preserve-debug-info"]
+
+# What LLVM says of an option it does not have.
+_unknown_llvm_argument(text::AbstractString) =
+    occursin("mergefunc", text) && occursin(r"[Uu]nknown command line argument", text)
 
 """
     cargo_args(rc, crate; windows = Sys.iswindows()) -> Vector{String}
@@ -522,7 +754,7 @@ function cargo_args(rc::RustConfig, crate::Crate; windows::Bool = Sys.iswindows(
                "debug-assertions=$(opt == 0)",
                "overflow-checks=$(opt == 0)"]
     args = ["rustc", "--manifest-path", root_dir(rc) * "/Cargo.toml", "--lib",
-            "--target-dir", rc.target_dir, "--message-format=json-render-diagnostics"]
+            "--target-dir", rc.target_dir, "--message-format=json"]
     for p in profile
         append!(args, ["--config", "profile.dev." * p])
     end
@@ -635,11 +867,29 @@ function build_rust_project(config::RepliBuildConfig; generator::AbstractString 
     mkpath(out_dir)
 
     _write_root(rc, crate)
+    identity = _glue_identity(rc, crate, tc, generator)
+    plan = _read_plan(rc, identity)
     # From the crate's own directory, like the toolchain question above: with
     # rustup, a `rust-toolchain.toml` there chooses the compiler.
-    (messages, diagnostics, code) = _capture(_cargo(tc, cargo_args(rc, crate), dirname(crate.manifest)))
+    keep_merged = Ref(true)
+    build() = _capture(_cargo(tc, cargo_args(rc, crate), dirname(crate.manifest); keep_merged = keep_merged[]))
+    (messages, diagnostics, code) = build()
     code == BuildBridge.SPAWN_FAILED && error(_missing_tool_message("cargo", tc.cargo, code, diagnostics))
-    code == 0 || error("cargo could not build the crate `$(crate.name)` (exit $code):\n$(strip(diagnostics))")
+    if code != 0 && _unknown_llvm_argument(diagnostics * messages)
+        # This rustc's LLVM does not have the options that keep a merged
+        # function (`MERGED_FUNCTION_FLAGS`): build without them.
+        println("  note: this rustc's LLVM refuses the options that keep merged functions apart; building without them")
+        keep_merged[] = false
+        (messages, diagnostics, code) = build()
+    end
+    if code != 0 && !isempty(plan.rows)
+        # The per-type lines were written for the crate as it was. It changed
+        # under them: build without, and write them again from what is found.
+        plan = RustGlue.Plan()
+        _write_glue(rc, plan; identity)
+        (messages, diagnostics, code) = build()
+    end
+    code == 0 || error("cargo could not build the crate `$(crate.name)` (exit $code):\n" * _failure_text(messages, diagnostics))
     artifact = find_artifacts(messages, crate)
     isfile(artifact.library) || error("cargo named $(artifact.library) as the library and it does not exist")
     ir = artifact.ir
@@ -668,7 +918,19 @@ function build_rust_project(config::RepliBuildConfig; generator::AbstractString 
     rm(library; force = true)
     cp(artifact.library, library)
 
-    metadata = extract_metadata(config, crate, tc, library, [ir])
+    metadata = extract_metadata(config, crate, tc, library, [ir]; plan)
+    need = RustGlue.wanted(metadata["functions"], metadata["types"])
+    if need != plan.wanted
+        # What this build's functions move is not what `rb_glue.rs` was
+        # written for (on a first build, nothing): write it, build the root
+        # crate again, and read the library that has it.
+        (plan, messages) = _plan_glue!(rc, crate, need, metadata["types"], identity, build)
+        artifact = find_artifacts(messages, crate)
+        rm(library; force = true)
+        cp(artifact.library, library)
+        metadata = extract_metadata(config, crate, tc, library, [artifact.ir]; plan)
+        key = _metadata_key(artifact.library, [artifact.ir], tc, crate, generator)
+    end
     open(_metadata_path(config), "w") do io
         JSON.print(io, metadata, 2)
     end
@@ -744,6 +1006,10 @@ Everything `compilation_metadata.json` holds for a Rust library.
   function's too, which is right for the call and may name other Rust types
   than the merged function was written with.
 - `types`: every type those functions reach (`RustDWARF.describe_functions`).
+- `glue`: per type the root crate has a line for (`RustGlue.verify`): the
+  function that drops a value of it, and whether dropping one does anything.
+  `glue_refused`: the types that were asked about and have none, with why.
+  `glue_helpers`: the root crate's `String` functions the library exports.
 - `skipped`: exported definitions that were left out, each with its reason.
 
 An empty surface is an error, as it is for a C library
@@ -752,7 +1018,8 @@ names this cannot read all look like that, and a wrapper of nothing is not a
 result.
 """
 function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
-                          library::AbstractString, ir_files::Vector{String})::Dict{String,Any}
+                          library::AbstractString, ir_files::Vector{String};
+                          plan::RustGlue.Plan = RustGlue.Plan())::Dict{String,Any}
     exported = Compiler._runtime_symbol_names(String(library))
     exported === nothing && error("the dynamic symbol table of $library could not be read")
     defs = RustABI.definitions(ir_files)
@@ -768,7 +1035,7 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
     end
     # An alias has its target's code, and often no DIE of its own.
     target = Dict(sym => RustABI.alias_target(sym, defs, aliases) for sym in symbols)
-    wanted = union(Set(symbols), Set(values(target)))
+    wanted = union(Set(symbols), Set(values(target)), Set(RustGlue.drop_symbol(r.n) for r in plan.rows))
     (dwarf_functions, types) = _with_dump_lines(library) do lines
         units = RustDWARF.read_units(lines, wanted)
         RustDWARF.describe_functions(units, wanted)
@@ -800,6 +1067,7 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
         push!(functions, row)
     end
     sort!(functions; by = r -> (r["path"], r["symbol"]))
+    (glue, glue_refused) = RustGlue.verify(plan, dwarf_functions, types, exported)
     root = RustABI.v0_root(symbols[1])
     rc = config.rust
     return Dict{String,Any}(
@@ -812,6 +1080,9 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
         "library_sha" => _file_sha(library),
         "functions" => functions,
         "types" => types,
+        "glue" => glue,
+        "glue_refused" => glue_refused,
+        "glue_helpers" => String[h for h in RustGlue.STRING_HELPERS if h in exported],
         "skipped" => skipped,
         "foreign_definitions" => foreign,
         "toolchain" => Dict{String,Any}("rustc" => tc.release, "host" => tc.host, "llvm" => tc.llvm,
@@ -835,6 +1106,12 @@ function report(io::IO, metadata::AbstractDict)
     refused = [f for f in functions if f["refusal"] !== nothing]
     println(io, "  rust: $(length(functions)) functions, $(length(functions) - length(refused)) callable, " *
                 "$(length(metadata["types"])) types")
+    glue = get(metadata, "glue", Dict{String,Any}())
+    if !isempty(glue) || !isempty(get(metadata, "glue_refused", Dict{String,Any}()))
+        owned = count(g -> g["owns"] === true, values(glue))
+        println(io, "  ownership: $owned types Rust must drop, $(length(glue) - owned) that are plain data")
+        _report_group(io, "no drop function", Tuple{String,String}[(String(k), String(v)) for (k, v) in metadata["glue_refused"]])
+    end
     _report_group(io, "refused", Tuple{String,String}[(String(f["path"]), String(f["refusal"])) for f in refused])
     _report_group(io, "skipped", Tuple{String,String}[(String(get(s, "path", s["symbol"])), String(s["reason"]))
                                                       for s in metadata["skipped"]])

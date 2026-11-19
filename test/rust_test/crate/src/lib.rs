@@ -28,6 +28,13 @@ pub fn pair(a: i32, b: f64) -> (i32, f64) { (a * 2, b * 2.0) }
 pub struct B3 { pub a: u8, pub b: u8, pub c: u8 }
 pub fn b3_rot(x: B3) -> B3 { B3 { a: x.b, b: x.c, c: x.a } }
 
+// --- a fixed-size array is its elements, one after another; a slice of records ----
+pub fn bytes16(seed: u8) -> [u8; 16] { core::array::from_fn(|i| seed.wrapping_add(i as u8)) }
+pub fn bytes16_sum(b: [u8; 16]) -> u32 { b.iter().map(|&x| x as u32).sum() }
+pub fn grid(k: f32) -> [[f32; 2]; 3] { [[k, k + 1.0], [k + 2.0, k + 3.0], [k + 4.0, k + 5.0]] }
+pub fn opt_bytes(some: bool) -> Option<[u8; 6]> { if some { Some([1, 2, 3, 4, 5, 6]) } else { None } }
+pub fn recs_total(rs: &[Rec]) -> f64 { rs.iter().map(|r| r.b + r.d as f64).sum() }
+
 // --- a zero-sized value is not passed at all ------------------------------------
 pub struct Z;
 pub fn z(_z: Z, a: i32) -> Z { let _ = a; Z }
@@ -42,6 +49,9 @@ pub enum Level { Low, Mid, High }
 pub fn level_next(l: Level) -> Level {
     match l { Level::Low => Level::Mid, Level::Mid => Level::High, Level::High => Level::Low }
 }
+// The standard library's own enum is a signed byte: `Less` is -1.
+pub fn compare(a: i32, b: i32) -> std::cmp::Ordering { a.cmp(&b) }
+pub fn ordering_sign(o: std::cmp::Ordering) -> i32 { o as i32 }
 pub enum Shape { Circle(f64), Rect { w: f64, h: f64 }, Empty }
 pub fn rect(w: f64, h: f64) -> Shape { Shape::Rect { w, h } }
 pub fn unit_circle() -> Shape { Shape::Circle(1.0) }
@@ -69,6 +79,57 @@ pub fn make_greeting(name: &str) -> String { format!("hello {name}") }
 pub fn string_len_owned(s: String) -> usize { s.len() }
 pub fn boxed(d: u32) -> Box<Rec> { Box::new(rec_make(1, 2.0, 3, d)) }
 pub fn unbox_d(b: Box<Rec>) -> u32 { b.d }
+
+// --- owned values the caller holds: each needs Rust's own drop code -----------------
+pub fn squares(n: u32) -> Vec<f64> { (0..n).map(|i| (i * i) as f64).collect() }
+pub fn vec_sum(v: Vec<f64>) -> f64 { v.iter().sum() }
+pub fn vec_push(v: &mut Vec<f64>, x: f64) { v.push(x) }
+pub fn recs(n: u32) -> Vec<Rec> { (0..n).map(|i| rec_make(i as u8, i as f64, 3, i)).collect() }
+pub fn words(s: &str) -> Vec<String> { s.split_whitespace().map(String::from).collect() }
+pub fn join_words(ws: Vec<String>) -> String { ws.join(" ") }
+pub fn shout(s: &mut String) { s.make_ascii_uppercase(); s.push('!'); }
+pub fn string_ref_len(s: &String) -> usize { s.len() }
+pub fn parse_int(s: &str) -> Result<i32, String> {
+    s.trim().parse::<i32>().map_err(|e| format!("not a number: {e}"))
+}
+pub fn find_word(s: &str, k: usize) -> Option<String> { s.split_whitespace().nth(k).map(String::from) }
+pub fn name_and_len(s: &str) -> (String, usize) { (s.to_uppercase(), s.len()) }
+pub fn opt_box(d: u32) -> Option<Box<Rec>> { if d == 0 { None } else { Some(boxed(d)) } }
+pub fn box_d(b: &Rec) -> u32 { b.d }
+pub fn slot_take(s: Slot) -> u32 { match s { Slot::Empty => 0, Slot::Full(r) => r.d } }
+pub struct Named { pub name: String, pub id: u32 }
+pub fn named(name: &str, id: u32) -> Named { Named { name: name.to_string(), id } }
+pub fn named_len(n: &Named) -> usize { n.name.len() }
+pub fn named_into_name(n: Named) -> String { n.name }
+
+// A type defined in a private module and exported under another path.
+mod inner {
+    pub struct Token { pub id: u32, pub text: String }
+}
+pub use inner::Token;
+pub fn token(id: u32, text: &str) -> Token { Token { id, text: text.to_string() } }
+pub fn token_id(t: &Token) -> u32 { t.id }
+
+// A type that holds no memory and still must be dropped, exactly once.
+pub static DROPS: AtomicU64 = AtomicU64::new(0);
+pub struct Guard { pub id: u32 }
+impl Drop for Guard { fn drop(&mut self) { DROPS.fetch_add(1, Ordering::SeqCst); } }
+pub fn guard(id: u32) -> Guard { Guard { id } }
+pub fn guard_id(g: &Guard) -> u32 { g.id }
+pub fn guard_release(g: Guard) -> u32 { g.id }
+pub fn drops() -> u64 { DROPS.load(Ordering::SeqCst) }
+
+// A raw pointer in a record owns nothing by itself: the compiler says so.
+pub struct View { pub p: *const f64, pub n: usize }
+pub fn view(xs: &[f64]) -> View { View { p: xs.as_ptr(), n: xs.len() } }
+pub fn view_len(v: View) -> usize { v.n }
+
+// A type no path outside the crate reaches: nothing can name it to drop it.
+mod hidden {
+    pub struct Secret { pub v: Vec<u8> }
+}
+pub fn secret() -> hidden::Secret { hidden::Secret { v: vec![1, 2, 3] } }
+pub fn secret_len(s: &hidden::Secret) -> usize { s.v.len() }
 
 // --- methods: `self` is an ordinary first parameter --------------------------------
 pub struct Acc { total: f64, count: u32 }

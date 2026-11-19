@@ -42,8 +42,9 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             (_, report) = RepliBuild.GeneratorRust.generate(md; module_name = "RbFix", library_path = lib)
             @test length(report) == length(md["functions"])
             unsupported = sort!([r["name"] for r in report if r["tier"] == "unsupported"])
-            @test unsupported == ["boxed", "cpoint_norm", "dyn_area", "located", "make_area", "make_greeting",
-                                  "slot_make", "string_len_owned", "unbox_d"]
+            # What is left: two calls the build refused, a trait object, and
+            # the one type no path outside the crate names.
+            @test unsupported == ["cpoint_norm", "dyn_area", "located", "secret"]
             # Unoptimized, every Rust function goes through the catching frame;
             # optimized, the ones that cannot panic do not.
             tiers = Dict(r["name"] => r["tier"] for r in report)
@@ -56,10 +57,16 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             @test r.ok
             @test haskey(v, "PROBE_DONE")
             expected = ["scalars", "integer_arguments_are_converted_or_refused", "strings_and_slices",
-                        "tuples_come_back_as_tuples", "option_is_a_value_or_nothing", "records_by_value_and_by_reference",
+                        "tuples_come_back_as_tuples", "fixed_size_arrays", "a_slice_of_records",
+                        "option_is_a_value_or_nothing", "records_by_value_and_by_reference",
                         "two_scalar_records", "fieldless_enums", "enums_with_data", "one_bit_values",
                         "methods_take_self_first", "optional_reference", "a_panic_is_an_exception",
-                        "unsupported_functions_say_why", "how_each_function_calls"]
+                        "unsupported_functions_say_why", "how_each_function_calls",
+                        "strings_are_copied_out_and_built_in", "a_string_rust_changes_in_place", "a_string_must_be_utf8",
+                        "vectors_of_plain_data", "a_vector_rust_changes_in_place", "vectors_of_strings",
+                        "result_is_a_value_or_an_exception", "option_and_tuple_of_owned_values",
+                        "a_box_is_held_and_moved", "an_enum_that_owns", "a_record_that_owns", "dropped_exactly_once",
+                        "a_raw_pointer_is_not_ownership", "what_the_module_says_it_owns"]
             for name in expected
                 @test (name, startswith(get(v, name, "no PROBE line"), "PASS") ? "PASS" : get(v, name, "no PROBE line")) ==
                       (name, "PASS")
@@ -79,6 +86,8 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             RepliBuild.register($(repr(toml)))
             M = RepliBuild.use("rb_fix")
             println("PROBE use: ", (M.add(2, 3), M.maybe(41), M.hello()) == (Int32(5), Int32(42), "Hello, World!") ? "PASS" : "FAIL")
+            println("PROBE owned: ", (M.make_greeting("hub"), M.squares(3), RepliBuild.RustRuntime.isowned(M.boxed(1))) ==
+                                     ("hello hub", [0.0, 1.0, 4.0], true) ? "PASS" : "FAIL")
             println("PROBE vendored: ", startswith(M.LIBRARY_PATH, $(repr(joinpath(home, "builds")))) ? "PASS" : "FAIL \$(M.LIBRARY_PATH)")
             e = try; M.checked_div(1, 0); nothing; catch err; err; end
             println("PROBE panic: ", e isa RepliBuild.RustRuntime.RustPanic ? "PASS" : "FAIL \$e")
@@ -90,7 +99,7 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             r = run_use()
             v = probe_verdicts(r.output)
             @test r.ok && haskey(v, "PROBE_DONE")
-            for name in ("use", "vendored", "panic")
+            for name in ("use", "owned", "vendored", "panic")
                 @test (name, get(v, name, "no PROBE line")) == (name, "PASS")
             end
             # One vendored build (beside it, `.debug` holds the thunk module's text for a debugger).

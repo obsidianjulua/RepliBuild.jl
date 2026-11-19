@@ -1556,25 +1556,177 @@ inside the catching frame when it is not `nounwind`. On the fixture crate
 unoptimized, every Rust function is guarded; optimized, 16 are plain calls,
 15 thunks and 3 guarded.
 
-Not wrapped, as stubs that say why: a function that moves a value which may
-own memory (a `Box`, anything of `alloc`, a record holding a raw pointer),
-and trait objects. On the fixture: 9 of 43. On libm: none of 114, and
-`RepliBuild.use("rustlibm")` works.
+Not wrapped at this step, as stubs that say why: a function that moves a
+value which may own memory (a `Box`, anything of `alloc`, a record holding a
+raw pointer), and trait objects. On the fixture: 9 of 43. On libm: none of
+114, and `RepliBuild.use("rustlibm")` works. §21 is what moved those.
 
-## 21. The walk from here
+## 21. Ownership (built 2026-11-19)
 
-8. **Ownership**: drop functions in the root crate per owned type, owning
-   Julia types with finalizers, `String` and `Vec` out and in, moves,
-   `Result<T, E>` as a value or an exception.
-9. **What has no symbol.** Naming a function BY PATH in the root crate is
-   enough: `dep::small as *const ()`, `dep::largest::<f64> as *const ()`.
+| §15 step | Where | What it does |
+|---|---|---|
+| 8a. Which types | `RustGlue.wanted` | every record, enum, union and `Box` a callable function takes or returns by value, what such a value is made of where Julia may take it apart (a tuple's fields, an `Option`'s or `Result`'s payloads, a `Vec`'s elements, a `Box`'s target), and the targets of references |
+| 8b. One line per type | `rb_glue.rs` in the root crate, written by `RustBuild._plan_glue!` | `__rb_drop_<n>(p, _owns)`: Rust's drop code for the type, on the value at `p`. A `Vec` gets two more functions, to read its elements and to build one |
+| 8c. Reading it back | `RustGlue.verify`, into the metadata's `glue` | the function's own debug info says which type its spelling named, and whether the compiler drops that type at all |
+| 8d. The module | `GeneratorRust` (`_emit_owned`, `decode`'s `take`), `RustRuntime.drop!` | an owning Julia type per type that is dropped; `String` and `Vec` as Julia values; moves; `Result` as a value or a thrown `RustError` |
+
+**The compiler is asked, per type, and its answer is read from the build.**
+Whether a type must be dropped is not in its layout. On the fixture: `Guard`
+is one `u32` and has `impl Drop`, and a `ccall`-style wrapper would copy it
+freely; `View` holds a raw pointer and has no drop code, and the generator's
+shape rule (`owns`) called it owning. The line for a type has the type in
+its signature twice:
+
+    pub unsafe extern "C" fn __rb_drop_7(p: *mut dep::Token,
+        _owns: *const [u8; core::mem::needs_drop::<dep::Token>() as usize]) -> usize
+
+and the build reads the function's DWARF: what `p` points at, by the
+compiler's own name, and the length of the array `_owns` points at, 1 or 0.
+A spelling that named another type is refused. The function returns its own
+number when asked with a null pointer, which keeps every one of these
+functions different: two with the same code would be merged and one would
+lose its debug info, which is the thing being read.
+
+**The spelling is found by trying.** DWARF names a type by where it is
+defined (`rb_fix::inner::Token`); Rust source can only name it by a path
+that is public (`rb_fix::Token`, re-exported from a private module, which is
+how most crates are laid out). Nothing in the library says which paths are
+public, so every candidate (the path, then the path with some of its middle
+left out) is one `use` line of a probe compile, and rustc reports every line
+that does not resolve in one pass, each with its line number (measured:
+privacy and resolution errors together, `E0603` and `E0432`). The first
+candidate that resolves is used, and the read-back confirms it named the
+type that was meant. `alloc::alloc::Global`, the default allocator DWARF
+writes as a type's last argument, cannot be named in stable Rust and is cut.
+A type with no path that resolves (public in a private module nothing
+re-exports; a closure; a type of a crate the root crate does not depend on)
+has no line, and a function that moves it is a stub with that reason.
+
+On the fixture crate (rustc 1.97.1, opt-level 0 and 3): 24 types answered,
+13 that Rust must drop and 11 that are plain data; `Token` found under
+`rb_fix::Token`; `hidden::Secret` refused with rustc's own words ("module
+`hidden` is private"). A first build is two more compiles of the root crate
+alone (the probe, then the lines), and one more for each round in which
+rustc refuses a line; the wrapped crate is not compiled again. The fixture's
+whole first build takes about 5 s with them. A later build finds
+`rb_glue.rs` and its record (`rb_glue.json`) and compiles once.
+
+**What a value is in Julia.**
+
+- A `String` returned is a Julia `String`, and a `Vec` whose elements can be
+  read (plain data, strings, vectors of those) a Julia `Vector`: copied, and
+  Rust's value dropped there and then. By value in, a Julia string or vector
+  is built into a Rust one by Rust (`__rb_string_new`, `__rb_vec_new_<n>`),
+  which the callee then owns. A `String`'s and a `Vec`'s layout is never
+  spelled in Julia: the standard library's own functions read and build them.
+- Any other value that is dropped (a `Box`, a record or enum that holds
+  something, `Guard`) is a Julia object holding the value's bytes, with a
+  finalizer that calls the type's drop function. Passing it by value MOVES
+  it: the object is empty afterwards, a second move is an error, and its
+  finalizer does nothing. By reference it is passed as a pointer to its bytes.
+  A `Box<T>` is also passed where `&T` is taken.
+- `&mut String` and `&mut Vec<T>` take the owning object (`RustString("…")`,
+  `Vec_f64([…])`), since the change must stay somewhere; `&String` takes
+  that or a Julia value, made into an object for the call.
+- `Option<T>` is the value or `nothing`, and `Result<T, E>` returned is the
+  `T`, or a thrown `RustRuntime.RustError` holding the `E`. `None`, `Ok` and
+  `Err` are told apart by the discriminant DWARF gives, niche values
+  included (`Option<String>`: one value of the capacity field).
+- A value that stays where it is (a field read as a property, an element)
+  is copied when it can be and not read at all when it owns something that
+  cannot be: two holders of one value would each drop it.
+
+**A function the optimizer merged into another keeps its own types.** Above
+opt-level 1 LLVM keeps one of two functions with the same code, and rustc
+asks it to leave the other as an alias: no `define` line, no debug info.
+§19's answer was to describe the alias through its target and mark its types
+as borrowed, which typed `flip(Side)` as `flag(bool)`; with typed owning
+objects that became a wrong signature (`string_ref_len(&String)` merged with
+`secret_len(&Secret)` and took a `Secret`). Two LLVM options, passed through
+rustc's stable `-C llvm-args`, keep the other as a function of its own that
+jumps to the kept one, with its own `define` line and debug info
+(`RustBuild.MERGED_FUNCTION_FLAGS`; measured: the fixture's three aliases
+became three functions with their own types). They are LLVM's options, so an
+LLVM without them refuses to start; the build then runs without them and the
+alias path of §19 describes what is merged.
+
+On the fixture: all but four functions wrapped at both opt-levels. The four
+left: the two calls the join refuses, a `&dyn Trait` parameter, and the
+function that returns `Secret`.
+
+**Ten real crates, built, wrapped and loaded** (2026-11-19, opt-level 3,
+the pinned tags of the earlier survey; `.claude/rust-probe-2026-11-19/
+survey_wrap.jl` in the working checkout). Every module loads; no build
+failed; no function was left without types of its own.
+
+| Crate | Functions | Wrapped | Types Rust drops | Plain | No drop function |
+|---|---|---|---|---|---|
+| strsim | 13 | 13 | 0 | 6 | 2 |
+| humantime | 32 | 27 | 0 | 9 | 7 |
+| unicode-width | 16 | 16 | 0 | 0 | 1 |
+| miniz_oxide | 51 | 48 | 5 | 12 | 8 |
+| uuid | 119 | 119 | 2 | 27 | 2 |
+| kurbo | 194 | 194 | 12 | 54 | 15 |
+| semver | 43 | 40 | 10 | 5 | 2 |
+| lz4_flex | 28 | 23 | 6 | 8 | 5 |
+| ropey | 77 | 72 | 7 | 12 | 6 |
+| tiny-skia | 253 | 190 | 11 | 22 | 27 |
+| | 826 | 742 | | | |
+
+Called, not only loaded: semver's `Version::parse` gives an owning `Version`
+whose `major`, `minor`, `patch` read back, `VersionReq::matches` answers
+both ways, and a string that is no version is a `RustError`.
+
+What the survey found, beside the counts:
+
+- Loading is a test of its own. `core::cmp::Ordering` is a signed byte
+  whose `Less` is -1; emitted as an unsigned Julia enum it made every module
+  that reaches an `Ord` impl fail to load (semver, uuid). An enum is now
+  stored as the integer its DWARF names. The earlier survey built and never
+  loaded, and so could not see it.
+- `[T; N]` by value (uuid's `[u8; 16]`) and a slice of plain records
+  (kurbo's `&[CubicBez]`) were the two shapes of plain data still missing;
+  both are in: a tuple of N out, a tuple or vector of exactly N in, and a
+  Julia vector of the records.
+- The read-back earns its keep: in tiny-skia one candidate path resolved to
+  ANOTHER type of the same name, and was refused ("names another type").
+- **A type exported only under another name is not found**: humantime's
+  `duration::Error` is `humantime::DurationError` (`pub use … as …`), which
+  no shortening of its path gives. Its five functions are stubs. rustc
+  suggests the public path for the standard library's private modules
+  (`suggested_replacement` in its JSON) and not for a crate's own
+  re-exports. What will find these is naming the FUNCTION and letting the
+  compiler infer its types, which step 9 needs anyway.
+- The rest of what has no drop function is rightly so: types private to
+  their crate that appear in exported instantiations (strsim's `RowId`),
+  and types of a crate the wrapped one depends on and does not re-export
+  (kurbo's use of `arrayvec`).
+- Still not wrapped, in order of count: a value aligned beyond 16 bytes
+  (tiny-skia's SIMD records, 57 functions), which a Julia buffer cannot
+  hold; slices of what is not plain; trait objects.
+
+Not built, of ownership: building an owning record or enum from Julia (only
+`String` and `Vec` are), `Box::new` from a Julia value, a type of another
+crate the wrapped crate does not re-export (the root crate would have to
+depend on it), a type exported only under another name, and reading a
+`HashMap`. Not checked, because Julia has no
+way to: a value that borrows from another must not outlive it, and a
+finalizer may run on another thread than the one that made the value.
+
+## 22. The walk from here
+
+9. **What has no symbol, and what has no name.** Naming a function BY PATH
+   in the root crate is enough: `dep::small as *const ()`, `dep::largest::<f64> as *const ()`.
    rustc then compiles it into the root crate (internal linkage), its
    `define` line and its DIE appear in the root's IR and DWARF, and its
    address is in an exported table. Measured 2026-11-19 for an `#[inline]`
    function, a generic function and a method of a generic type. So Part I
    §6.5's `sig` is not needed: a `[[rust.instantiate]]` entry is a path. What
    remains to decide is where the list of paths comes from (the TOML, or
-   rustdoc's JSON, which is nightly-only today).
+   rustdoc's JSON, which is nightly-only today). The same naming reaches a
+   type no path spells (§21: one exported under another name): a generic
+   helper given the function infers its return type, and the helper's own
+   instantiation says in DWARF which type that was.
 10. **Trait objects**, callbacks, statics.
 11. **Shipping**: AOT thunks, `discover` on a Cargo project, the doctor,
     a user guide page, Windows and AArch64.
