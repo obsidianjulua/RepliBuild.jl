@@ -1526,7 +1526,8 @@ and 12 units in the last place from its own `sinf` and `cosf` at 1.5 and
 3.25. The thunk returns what the crate computes.
 
 Not part of the repository's tests (it clones from the network): the recipe
-and its check are a Hub package's files.
+and its check are the Hub package `packages/rustlibm` (`replibuild.toml`,
+`test_deep.jl`), build only and not in the Hub's index until `wrap` exists.
 
 ## 20. The walk from here
 

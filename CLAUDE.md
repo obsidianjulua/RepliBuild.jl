@@ -118,6 +118,12 @@ skill drives adding a package.
   force re-extraction. That keeps the clone and the per-file IR cache.
 - **To date a fix into an artifact, grep the artifact for the fix's signature**, never
   the mtime.
+- **`packages/rustlibm` is the Rust reference package, build only**
+  (2026-11-19): the `libm` crate from its pinned commit, `[rust] dependency`.
+  It is not in `index.toml` and has no wrapper (`wrap` for Rust is unbuilt);
+  its `test_deep.jl` builds it and drives all 114 functions through
+  `RustThunks` by hand. John's Hub is the starter every user's own Hub begins
+  from, so a build-only package belongs there.
 - **Consumer compensation is a feature request.** A workaround hand-rolled in several
   Hub consumers is evidence of a missing generator feature. When a policy moves into
   the generator, grep the consumers for the workaround.
