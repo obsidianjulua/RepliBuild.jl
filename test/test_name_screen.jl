@@ -631,7 +631,7 @@ end
     for n in ("error", "length", "print", "show", "plain", "isfile", "open", "string", "isempty", "basename",
               "String_", "Ptr_", "Ref_", "Cint_", "eval_",
               "include_", "Base_", "Libdl_", "RepliBuild_", "ccall_", "LIBRARY_PATH_", "METADATA_",
-              "nothing_", "unsafe_convert_", "unsafe_string_", "Dict_", "Dict__ptr", "counter", "take_Bool")
+              "nothing_", "unsafe_convert_", "unsafe_string_", "Dict_", "Dict_ptr", "counter", "take_Bool")
         @test (n, :function in get(bound, n, Symbol[])) == (n, true)
     end
     @test bound["c_Integer"][1] === :struct && bound["c_Bool"][1] === :struct && bound["Task"][1] === :struct

@@ -95,7 +95,7 @@ probe("c_records_enumerators_globals") do p
     # An integer parameter takes an integer and an enum, as before.
     C.plain(apple) == 4 || push!(p, "plain(apple) = $(C.plain(apple))")
     (C.Dict_() == 7 && C.counter() == 9) || push!(p, "globals: $(C.Dict_()), $(C.counter())")
-    unsafe_load(C.Dict__ptr()) == 7 || push!(p, "Dict__ptr")
+    unsafe_load(C.Dict_ptr()) == 7 || push!(p, "Dict_ptr")
 end
 
 probe("cpp_ordinary_functions") do p

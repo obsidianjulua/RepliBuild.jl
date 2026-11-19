@@ -2701,8 +2701,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         for var_name in sort!(collect(keys(global_vars)); by = string)
             var_info = global_vars[var_name]
             julia_type = get(var_info, "julia_type", "Any")
-            # Sanitize name
-            safe_name = _screened_function_name(make_c_identifier(var_name), var_name)
+            # Sanitize name. The value accessor and the pointer accessor are two
+            # bindings, each screened on its own and both named from the
+            # library's spelling: a value accessor the screen moves (`conf`
+            # beside `struct conf`, as `conf_`) leaves `conf_ptr` its name.
+            base_name = make_c_identifier(var_name)
+            safe_name = _screened_function_name(base_name, var_name)
+            ptr_name = _screened_function_name(base_name * "_ptr", var_name)
 
             # A global whose type didn't resolve cannot get a value getter:
             # `cglobal(..., Any)` + unsafe_load reads the memory as a boxed
@@ -2725,11 +2730,11 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 end
 
                 \"""
-                    $(safe_name)_ptr()
+                    $(ptr_name)()
 
                 Get pointer to global variable `$var_name`.
                 \"""
-                function $(safe_name)_ptr()::Ptr{$julia_type}
+                function $(ptr_name)()::Ptr{$julia_type}
                     return cglobal((:$var_name, LIBRARY_PATH), $julia_type)
                 end
 
@@ -2738,18 +2743,18 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             else
                 push!(func_chunks, """
                 \"""
-                    $(safe_name)_ptr()
+                    $(ptr_name)()
 
                 Get pointer to global variable `$var_name` (type unresolved — raw pointer only).
                 \"""
-                function $(safe_name)_ptr()::Ptr{Cvoid}
+                function $(ptr_name)()::Ptr{Cvoid}
                     return cglobal((:$var_name, LIBRARY_PATH))
                 end
 
                 """)
             end
 
-            push!(exports, "$(safe_name)_ptr")
+            push!(exports, ptr_name)
         end
 
         push!(func_chunks, "\n")

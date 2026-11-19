@@ -51,6 +51,7 @@ another. `wrap` prints each one, with the reason, on a line starting `names:`.
 | A function or method `nothing`, `LIBRARY_PATH` | `nothing_`, `LIBRARY_PATH_` | The wrapper's own code uses the name |
 | A struct `Integer`, `Bool` | `c_Integer`, `c_Bool`, with methods `c_Integer_get` | The wrapper's own code uses the name |
 | A value `Symbol` of `enum Kind` | `Kind_Symbol` | The wrapper's own code uses the name |
+| A global `conf` beside `struct conf`, or a function `pool(void)` beside `struct pool` | `conf_()` (its address is still `conf_ptr()`), `pool_()` | `conf()` and `pool()` make the zeroed struct |
 
 Other names that Julia also has are kept: a function `length`, `open` or
 `string`, or a struct `Task`, is `M.length`, `M.open`, `M.string`, `M.Task`.
@@ -207,7 +208,10 @@ who owns it: memory the library owns stays the library's.
 ## Global variables
 
 A global variable has an accessor function that returns its value, and a
-`<name>_ptr` accessor that returns its address.
+`<name>_ptr` accessor that returns its address. A global named like a struct
+(`extern const struct conf *conf;`) has its value accessor renamed, `conf_()`,
+since `conf()` makes a zeroed `conf`; the address accessor is still
+`conf_ptr()`.
 
 In a C++ wrapper a global inside a namespace or a class is named with its
 scope, as a function is: `cfg::depth` is `cfg_depth()`, and a public static
