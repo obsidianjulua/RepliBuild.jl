@@ -255,3 +255,21 @@ end
     @test !_tn_has(M, :conf__ptr) && !_tn_has(M, :counter_) && !_tn_has(M, :cell_)
     @test length(methods(M.conf_)) == 1 && hasmethod(M.conf_, Tuple{})
 end
+
+@testset "a name Julia also has: put back by the verdict, then moved for the clash" begin
+    # `length` is a function of Base, so the probe moves the record and the
+    # global both; the text does not use `length`, so the next generation puts
+    # both back, and there the two `length()` collide. A third moves the global.
+    meta = Dict{String,Any}(
+        "functions" => Any[_tn_fn("plain", (_tn_param("x", "Cint", "int"),), "Cint", "int")],
+        "globals" => Dict{String,Any}("length" => Dict{String,Any}("julia_type" => "Ptr{length}",
+                                                                     "c_type" => "struct length *")),
+        "struct_definitions" => Dict{String,Any}("length" => _tn_two_ints("lo", "hi")))
+    (code, sc, runs) = _tn_wrap(:c, meta)
+    @test runs == 3
+    @test _TN._assert_wrapper_loadable(code, "TypeNameSynth") === nothing
+    @test [(m.kind, m.from, m.to, m.why) for m in sc.moves] == [(:function, "length", "length_", :type_constructor)]
+    M = _tn_load(code)
+    @test _tn_zero(M, :length, (:lo, :hi)) && M.length !== Base.length
+    @test hasmethod(M.length_, Tuple{}) && _tn_has(M, :length_ptr) && !_tn_has(M, :length__ptr)
+end
