@@ -2070,19 +2070,27 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                 byte_pos = bit_offset >> 3
                                 bit_within_byte = bit_offset & 7
                                 mask = (1 << bit_size) - 1
+                                # A signed field reads sign-extended as its declared
+                                # type and its setter takes that type's range
+                                # (`_bitfield_signed_type`); an unsigned one is as it was.
+                                signed_t = _bitfield_signed_type(member, dwarf_structs)
+                                signed_store = signed_t === nothing ? "" :
+                                    _bitfield_signed_store("set_$(safe_member)", bit_size, signed_t)
 
                                 # Getter with bit extraction
                                 if bit_size <= 8 && bit_within_byte + bit_size <= 8
                                     # Single byte access
+                                    getter_raw = "(s._data[$(byte_pos + 1)] >> $bit_within_byte) & $(mask)"
                                     push!(struct_chunks, """
                                     \"\"\"Get bitfield `$member_name` ($bit_size bits) from `$julia_struct_name`.\"\"\"
-                                    function get_$(safe_member)(s::$julia_struct_name)::UInt32
-                                        return UInt32((s._data[$(byte_pos + 1)] >> $bit_within_byte) & $(mask))
+                                    function get_$(safe_member)(s::$julia_struct_name)::$(something(signed_t, "UInt32"))
+                                        return $(signed_t === nothing ? "UInt32($getter_raw)" :
+                                                 _bitfield_sign_extend(getter_raw, bit_size, signed_t))
                                     end
 
                                     \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name` (returns new instance).\"\"\"
                                     function set_$(safe_member)(s::$julia_struct_name, v::Integer)::$julia_struct_name
-                                        data = collect(s._data)
+                                    $(signed_store)    data = collect(s._data)
                                         cleared = data[$(byte_pos + 1)] & ~UInt8($(mask) << $bit_within_byte)
                                         data[$(byte_pos + 1)] = cleared | UInt8((UInt32(v) & $(mask)) << $bit_within_byte)
                                         return $julia_struct_name(NTuple{$byte_size, UInt8}(data))
@@ -2109,18 +2117,19 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                                     amask = "(($acc_type(1) << $bit_size) - $acc_type(1))"
                                     push!(struct_chunks, """
                                     \"\"\"Get bitfield `$member_name` ($bit_size bits) from `$julia_struct_name`.\"\"\"
-                                    function get_$(safe_member)(s::$julia_struct_name)::$ret_type
+                                    function get_$(safe_member)(s::$julia_struct_name)::$(something(signed_t, ret_type))
                                         data = s._data
                                         acc = zero($acc_type)
                                         @inbounds for i in 0:$(n_bytes_span - 1)
                                             acc |= $acc_type(data[$(byte_pos + 1) + i]) << (8 * i)
                                         end
-                                        return $ret_type((acc >> $bit_within_byte) & $amask)
+                                        return $(signed_t === nothing ? "$ret_type((acc >> $bit_within_byte) & $amask)" :
+                                                 _bitfield_sign_extend("(acc >> $bit_within_byte) & $amask", bit_size, signed_t))
                                     end
 
                                     \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name` (returns new instance).\"\"\"
                                     function set_$(safe_member)(s::$julia_struct_name, v::Integer)::$julia_struct_name
-                                        data = collect(s._data)
+                                    $(signed_store)    data = collect(s._data)
                                         acc = zero($acc_type)
                                         @inbounds for i in 0:$(n_bytes_span - 1)
                                             acc |= $acc_type(data[$(byte_pos + 1) + i]) << (8 * i)
@@ -2902,6 +2911,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # A pointer to a type Julia cannot hold (`long double*`, `__int128*`) is
         # the address of a caller's buffer, as on the C++ side (`_pointee_safe_type`).
         julia_type = _pointee_safe_type(julia_type)
+        # A `char` by value is the host's `char` (`_char_param_ctype`).
+        julia_type = _char_param_ctype(julia_type, c_type_name)
         # Replace blocklisted internal types (e.g. _IO_FILE) with Cvoid
         let bm = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
             if bm !== nothing && String(bm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
@@ -2949,6 +2960,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
     end
     _callback_type = _callback_param_type((jt, ct) -> _ccall_param_type(_as_declared(jt), ct),
                                           dwarf_structs)
+    # The enums this module emits as open enums: a parameter of one takes an
+    # integer too, converted to the enum, as C converts one implicitly.
+    open_enum_names = _open_enum_type_names(enum_chunks)
 
     # =========================================================================
     # PER-FUNCTION BY-VALUE RECORD VERDICT — one answer for both emission paths
@@ -3396,6 +3410,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 p["name"] == "varargs..." && continue
                 p["julia_type"] = _ccall_param_type(String(something(get(p, "julia_type", nothing), "Ptr{Cvoid}")),
                                                     String(something(get(p, "c_type", nothing), "")))
+                # An open enum takes an integer too, as in the plain path.
+                p["julia_type"] in open_enum_names && (p["open_enum"] = true)
             end
             va_return = copy(return_type)
             va_return["julia_type"] = _resolve_forward_ptr(get(va_return, "julia_type", "Cvoid"),
@@ -3456,6 +3472,9 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         param_types = String[]  # C types for ccall
         julia_param_types = String[]  # Julia types for function signature (may differ)
         needs_conversion = Bool[]
+        # Per parameter: the expression a pointer to plain `char` is bound to
+        # (`_cstring_param_arg`: a string with `Cstring` semantics), or nothing.
+        cstring_args = Union{Nothing,String}[]
 
         # A PARAMETER NAMED AFTER A TYPE IN THE CCALL TUPLE SHADOWS THAT TYPE.
         # `struct bufq *bufq` is ordinary C — the parameter and its struct share
@@ -3495,6 +3514,7 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             push!(param_names, safe_name)
             actual_c_type = _ccall_param_type(param["julia_type"], get(param, "c_type", ""))
             push!(param_types, actual_c_type)
+            push!(cstring_args, _cstring_param_arg(safe_name, String(get(param, "c_type", "")), actual_c_type))
 
             # Map C integer types to natural Julia types with range checking
             if actual_c_type in _C_INTEGER_PARAM_CTYPES
@@ -3506,6 +3526,12 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 # Same ergonomics as the integer path: accept any Real
                 # (1/60 is Float64, literals are often Int) and convert.
                 push!(julia_param_types, "Real")
+                push!(needs_conversion, true)
+            elseif actual_c_type in open_enum_names
+                # An open enum by value takes any integer too, converted by
+                # the enum's own constructor (any value of its width), as C
+                # converts an integer to an enum implicitly.
+                push!(julia_param_types, "Union{$actual_c_type, Integer}")
                 push!(needs_conversion, true)
             elseif startswith(actual_c_type, "Ptr{")
                 # Relax pointer types to Any to allow Managed wrappers via Base.unsafe_convert
@@ -3610,7 +3636,8 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
         # The ccall's parameter types and argument expressions, each
         # over-aligned record inside its carrier (`_rb_byval16`).
         ccall_param_types = [get(carriers, i, t) for (i, t) in enumerate(param_types)]
-        ccall_arg_exprs = [haskey(carriers, i) ? "_rb_byval16($n, $(carriers[i]))" : n
+        ccall_arg_exprs = [haskey(carriers, i) ? "_rb_byval16($n, $(carriers[i]))" :
+                           something(cstring_args[i], n)
                            for (i, n) in enumerate(param_names)]
 
         # A record whose name several types share in this library (two `.c`
@@ -3724,7 +3751,13 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
                 push!(ccall_param_names, converted_name)
 
                 # Generate range-checked conversion
-                conversion_code *= "    $converted_name = $c_type($name)\n"
+                conversion_code *= "    $converted_name = $(_integer_arg_conversion(c_type, name))\n"
+            elseif cstring_args[i] !== nothing
+                # A string with `Cstring` semantics, bound to a name: the
+                # llvmcall paths below derive their own names from these.
+                converted_name = "$(name)_c"
+                push!(ccall_param_names, converted_name)
+                conversion_code *= "    $converted_name = $(cstring_args[i])\n"
             else
                 # The name, or the record inside its carrier (`carriers`).
                 push!(ccall_param_names, ccall_arg_exprs[i])

@@ -170,8 +170,12 @@ const _FZ_FUNCTIONS = Any[
         @test occursin("ccall((:_ZN4RectD0Ev, LIBRARY_PATH), Cvoid, (Ptr{Cvoid},), o.handle)", rect)
         @test !occursin("Rect_destroy_Rect", rect)
         # Every factory of a Rect constructs one, whatever its name says.
-        for (fac, sig) in (("make_rect", "w::Cdouble, h::Cdouble"), ("new_leaf", "w::Cdouble"),
-                           ("create_rect", "n::Cint"))
+        # `make_rect` and `make_rect_nx` take one signature, so each is called
+        # by name (test_factory_ctor_collisions.jl); before, the second was
+        # dropped because its parameter text was the first's.
+        for (fac, sig) in (("make_rect", "::Base.Val{:make_rect}, w::Cdouble, h::Cdouble"),
+                           ("make_rect_nx", "::Base.Val{:make_rect_nx}, w::Cdouble, h::Cdouble"),
+                           ("new_leaf", "w::Cdouble"), ("create_rect", "n::Cint"))
             @test (fac, occursin("function Rect($sig)", rect) && occursin("= $fac(", rect)) == (fac, true)
         end
 

@@ -73,6 +73,7 @@ filter(l -> occursin("Safety Trap", l), readlines("julia/Mathlib.jl"))
 |:--|:------|
 | `int`, `long`, `size_t`, … | Pass any `Integer`. It is converted, and checked for range. |
 | `int32_t`, `uint8_t`, … | `Int32`, `UInt8`, … |
+| `char` by value | Pass any `Integer` from -128 to 255. A `char` result is a `Cchar`. |
 | `double`, `float` | Pass any `Real` in a C wrapper. In a C++ wrapper pass a `Float64` or `Float32`: write `2.0`, not `2`. |
 | `bool` | `Bool` |
 | `const char*` argument | A `String` |
@@ -124,7 +125,8 @@ it a getter and a setter per field. `wrap` warns when it does this, and
 
 **Bitfields** have a getter and a setter per field: `get_f(s)`, and
 `set_f(s, v)`, which returns a new struct, in a C wrapper; `set_f!(s, v)`,
-which changes it, in a C++ wrapper.
+which changes it, in a C++ wrapper. A signed field (`int level : 7`) reads as
+a signed number, and its setter takes the values the field can hold.
 
 ## Enums
 
@@ -207,6 +209,13 @@ who owns it: memory the library owns stays the library's.
 A global variable has an accessor function that returns its value, and a
 `<name>_ptr` accessor that returns its address.
 
+In a C++ wrapper a global inside a namespace or a class is named with its
+scope, as a function is: `cfg::depth` is `cfg_depth()`, and a public static
+member `geo::Vec3::live_count` is `geo_Vec3_live_count()`. A private or
+protected static member has no accessor, and neither does a `constexpr`
+member, which has no storage to read. A global whose type is a C++ library
+type (`std::string`) has the `_ptr` accessor only.
+
 ## Sizes and offsets
 
 ```julia
@@ -240,6 +249,11 @@ A function is named after its namespace, class and name, joined with `_`:
 
 **A method takes the object first**, as a pointer. To choose your own names,
 use [`[wrap.rename]`](toml.md#Names).
+
+**An operator is named with a word**: `Vec3::operator<` is
+`Vec3_operatorless(a, b)`, `operator[]` is `Vec3_operatorindex(v, i)` and
+`operator()` is `Vec3_operatorcall(v, x)`. `names(M)` lists the ones your
+wrapper has.
 
 ## Objects
 
@@ -324,6 +338,13 @@ wrapper may turn that class into a Julia type you construct directly:
 `M.Rect(2.0, 3.0)` calls the factory, the class's methods get short forms
 (`M.area(r)`), and the object is deleted by the garbage collector.
 `methods(M.Rect)` shows whether your wrapper has this.
+
+When two factories of one class take the same argument types, name the one you
+want: with `make_animal(int)` and `make_animal_doubled(int)`,
+`M.Animal(Val(:make_animal), Cint(4))` and
+`M.Animal(Val(:make_animal_doubled), Cint(4))` call each, and a bare
+`M.Animal(Cint(4))` is a `MethodError` that lists both. The type's docstring
+names them.
 
 ## What a pointer argument accepts
 
@@ -470,6 +491,13 @@ end
 
 Pass a pointer to a derived object wherever a base-class method wants its
 object. That works as is for ordinary single inheritance.
+
+A virtual method runs the override of the class the pointer really points at:
+`Animal_legs(p)` on a `Dog` runs `Dog::legs`. That includes a pure virtual
+method: `Animal_name(p)` works although `Animal` itself has no body for
+`name()`. An abstract class cannot be constructed: `Animal_Animal(p, 4)`
+raises an error, as C++ refuses `Animal a(4);`. Construct a class that defines
+the method, or take the object from the library.
 
 With multiple or virtual inheritance a base class may not start at the
 beginning of the object. For those the wrapper defines

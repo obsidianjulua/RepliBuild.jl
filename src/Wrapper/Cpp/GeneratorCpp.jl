@@ -137,7 +137,7 @@ undeclared spelling if it ever reached a ccall tuple).
 Must agree with `FunctionGen._has_receiver` on every input.
 """
 const _INTEGER_CTYPES = ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",
-                         "Clonglong", "Culonglong", "Csize_t", "Cssize_t")
+                         "Clonglong", "Culonglong", "Csize_t", "Cssize_t", "Cchar")
 const _NO_POSITIONS = Set{Int}()
 
 """
@@ -163,7 +163,7 @@ is not a pointer to it.
 """
 function _tier2_invoke_args(names, ctypes, needs_conversion, enum_base,
                             pointer_types = fill(nothing, length(names)))
-    [needs_conversion[i] ? "$(ctypes[i])($(names[i]))" :
+    [needs_conversion[i] ? _integer_arg_conversion(ctypes[i], names[i]) :
      haskey(enum_base, ctypes[i]) ? "$(enum_base[ctypes[i]])($(names[i]))" :
      pointer_types[i] !== nothing ? "RepliBuild.JITManager.pointer_arg($(pointer_types[i]), $(names[i]))" :
      names[i]
@@ -223,7 +223,7 @@ function _pointer_arg_type(ctype::AbstractString, c_type::AbstractString; resolv
     pointee = endswith(t, "&&") ? FG._strip_top_cv(chop(t; tail = 2)) :
               (is_pointer || endswith(t, "&")) ? FG._strip_top_cv(chop(t)) : ""
     inner in ("UInt8", "Int8", "Cchar", "Cuchar") &&
-        return (is_pointer && pointee == "char") ? "Cstring" : "Ptr{$inner}"
+        return _points_to_plain_char(c) ? "Cstring" : "Ptr{$inner}"
     if inner == "Cvoid"
         pointee == "void" && return "Ptr{Cvoid}"
         mapped = JLCSIRGenerator.TypeUtils.map_cpp_type(pointee)
@@ -502,7 +502,7 @@ function _rvalue_shadowed(functions)::Set{String}
     return out
 end
 
-import ..Compiler: _demangle, _param_list_paren, _matching_paren, _split_depth0_commas
+import ..Compiler: _demangle, _param_list_paren, _matching_paren, _split_depth0_commas, _is_vtable_only
 
 """
     _structor_variant(func) -> Union{Nothing,Tuple{Symbol,Char}}
@@ -614,7 +614,8 @@ maps a symbol to why its wrapper is a refusal.
 For a class with no virtual base, `C1` and `C2` (and `D1` and `D2`) are one
 function, and clang often emits only the base-object one (an abstract class's
 constructor, an inline destructor); either is bound, `C1`/`D1` when the
-library has both. For a class WITH a virtual base they are two: the
+library has both. (An abstract class's constructor is refused afterwards, for
+another reason: `_abstract_constructor_refusals!`.) For a class WITH a virtual base they are two: the
 base-object variant takes a VTT after `this` and leaves the virtual base
 alone, so a wrapper on it built half an object from a null VTT and crashed
 (`VBottom_VBottom(p)`), and `<X>_destroy_<X>` was `(this, vtt)`. Until
@@ -669,6 +670,80 @@ function _structor_bindings(functions, dwarf_structs)
         end
     end
     return (skipped, refused)
+end
+
+"""
+    _abstract_constructor_refusals!(refused, functions, skipped, record_abi) -> Vector{String}
+
+Refuse every constructor of an abstract class, adding to `refused` (symbol →
+reason) what `_structor_bindings` left bindable; returns the classes, sorted.
+A class is abstract here when the build recorded pure virtual member
+functions an object of it would still have (`record_abi`'s `pure_virtuals`,
+`Compiler._mark_abstract_records!`).
+
+C++ builds no object of such a class except as the base of one that defines
+those functions, and clang emits only its base-object constructor (`C2`).
+Bound like any constructor, `Animal_Animal(p, 4)` left at `p` an object whose
+vtable holds `__cxa_pure_virtual` in the pure slots: the first call of one,
+through `Animal_name(p)` or from inside the library (`Animal::describe()`
+calls `name()`), ends the process. Metadata without the key refuses nothing.
+"""
+function _abstract_constructor_refusals!(refused::AbstractDict, functions, skipped, record_abi)
+    FG = JLCSIRGenerator.FunctionGen
+    classes = Set{String}()
+    for f in functions
+        v = _structor_variant(f)
+        (v === nothing || v[1] !== :ctor) && continue
+        m = String(get(f, "mangled", ""))
+        (m in skipped || haskey(refused, m)) && continue
+        cls = String(get(f, "class", ""))
+        suffixes = FG._scope_suffixes(cls)
+        k = findfirst(c -> haskey(record_abi, c), suffixes)
+        k === nothing && continue
+        left = get(record_abi[suffixes[k]], "pure_virtuals", nothing)
+        (left isa AbstractVector && !isempty(left)) || continue
+        refused[m] = "`$cls` is an abstract class: " * join(("`$x`" for x in first(left, 3)), ", ") *
+            (length(left) > 3 ? " and $(length(left) - 3) more" : "") *
+            (length(left) == 1 ? " is" : " are") * " pure virtual in it, so C++ builds no object of `$cls` except " *
+            "as the base of a class that defines " * (length(left) == 1 ? "it" : "them") * ". This constructor, run " *
+            "on storage of its own, would leave an object whose vtable ends the process when a pure virtual " *
+            "is called. Construct a derived class, or call a function of the library that returns one."
+        push!(classes, cls)
+    end
+    return sort!(collect(classes))
+end
+
+"The sentences a pure virtual member function's docstring carries after \"Wrapper for\"."
+const _PURE_VIRTUAL_DOC = "\n\n**Pure virtual.** The class declares this function and defines no body for it: " *
+    "the call goes through the vtable of the object `this` points at, to the override of that object's own class."
+
+"""
+    _report_vtable_methods(plan)
+
+The wrap report's lines for the pure virtual member functions (the
+metadata's `vtable_methods`, `Compiler._vtable_only_plan`): how many are
+bound through the vtable, of which classes, and the ones passed over, by
+reason. Nothing for metadata without the key or with nothing to report.
+"""
+function _report_vtable_methods(plan)
+    plan isa AbstractDict || return
+    show(xs) = join(first(xs, 8), ", ") * (length(xs) > 8 ? ", …" : "")
+    bound = [r for r in get(plan, "bound", Any[]) if r isa AbstractDict]
+    if !isempty(bound)
+        classes = sort!(unique(String[String(r["class"]) for r in bound]))
+        println("  wrap: $(length(bound)) pure virtual member function(s) of $(length(classes)) class(es) have no ",
+                "symbol and are called through the object's vtable: ", show(classes))
+    end
+    by_reason = Dict{String,Vector{String}}()
+    for r in get(plan, "skipped", Any[])
+        r isa AbstractDict || continue
+        push!(get!(() -> String[], by_reason, String(get(r, "reason", "?"))), String(get(r, "class", "?")))
+    end
+    for reason in sort!(collect(keys(by_reason)))
+        println("  wrap: $(length(by_reason[reason])) pure virtual member function(s) passed over, $reason: ",
+                show(sort!(unique(by_reason[reason]))))
+    end
+    return
 end
 
 """
@@ -1008,6 +1083,128 @@ function _managed_safe_wrapper(julia_name::AbstractString, param_sig::AbstractSt
         return $managed_name(ptr)
     end
     """, safe_func_name)
+end
+
+# The argument a factory class's one inner constructor takes before the handle,
+# when its type is defined apart from its constructors (`_idiomatic_early_type`).
+# `Base.`-qualified: the module's namespace is the library's, and a C++ class
+# named `Val` would otherwise be the one called.
+const _IDIOMATIC_ADOPT = "Base.Val(:_rb_adopt)"
+
+"""
+    _factory_ctor_plan(factories, julia_name) -> Vector{NamedTuple}
+
+The constructors a factory class (the idiomatic wrapper) gets, one per
+factory function, in the factories' order: `factory` (the function's Julia
+name, `julia_name(name, mangled)`, the main loop's derivation), `sig_parts`
+(`name::Type` per parameter), `call_args`, and `tagged`.
+
+A constructor takes the factory's parameters, so two factories whose
+parameters have one Julia dispatch signature gave the class one method
+twice: `make_animal(int legs)` and `make_animal_doubled(int half)` both made
+`Animal(::Cint)`. Included as a file the later definition replaced the
+earlier with no message (`Animal(Cint(4))` made 8 legs), and in a
+precompiled package Julia refused the overwrite, so the package did not load
+(2026-11-18). The dedup keyed on the parameter TEXT, names included.
+
+Signatures are compared as `_method_sig_keys` compares them, by the type each
+C alias names on this host (`_concrete_sig_type`: `Cint` and `Int32` are one
+type, `Clong` and `Clonglong` one on LP64). A signature one factory has stays
+its plain constructor, so a class with no collision keeps its text. A
+signature several factories share is none of theirs: each is `tagged`, and
+its constructor takes `::Base.Val{:<factory>}` first, so the caller names the
+factory and the bare call is a `MethodError` listing them. A factory listed
+twice (one function, two DWARF entries) is one entry, the first.
+"""
+function _factory_ctor_plan(factories, julia_name::Function)
+    entries = NamedTuple{(:factory, :sig_parts, :call_args, :key),
+                         Tuple{String,Vector{String},Vector{String},String}}[]
+    seen = Set{Tuple{String,String}}()
+    for fac_func in factories
+        fac_jl = julia_name(String(fac_func["name"]), String(get(fac_func, "mangled", "")))
+        sig_parts  = String[]
+        call_args  = String[]
+        types      = String[]
+        used_names = Set{String}()
+        for (i, p) in enumerate(get(fac_func, "parameters", Any[]))
+            p_nm = make_cpp_identifier(get(p, "name", "arg$(i)"))
+            while p_nm in used_names; p_nm = "$(p_nm)_$(i)"; end
+            push!(used_names, p_nm)
+            p_jt = String(get(p, "julia_type", "Any"))
+            push!(sig_parts, "$p_nm::$p_jt")
+            push!(call_args, p_nm)
+            push!(types, _concrete_sig_type(p_jt))
+        end
+        key = join(types, ",")
+        (fac_jl, key) in seen && continue
+        push!(seen, (fac_jl, key))
+        push!(entries, (factory = fac_jl, sig_parts = sig_parts, call_args = call_args, key = key))
+    end
+    sharers = Dict{String,Int}()
+    for e in entries
+        sharers[e.key] = get(sharers, e.key, 0) + 1
+    end
+    return [(factory = e.factory, sig_parts = e.sig_parts, call_args = e.call_args,
+             tagged = sharers[e.key] > 1) for e in entries]
+end
+
+"""
+    _factory_ctor_doc(cls_nm, plan) -> String
+
+The lines a factory class's docstring adds when factories share a signature
+(`_factory_ctor_plan`): how to call each of them. Empty when none is tagged,
+so a class with no collision keeps its docstring.
+"""
+function _factory_ctor_doc(cls_nm::AbstractString, plan)::String
+    tagged = sort!([e for e in plan if e.tagged]; by = e -> e.factory)
+    isempty(tagged) && return ""
+    lines = String["",
+                   "",
+                   "Factories that take the same argument types are called by name, never",
+                   "positionally (`$cls_nm(args...)` with those types is a `MethodError`):",
+                   ""]
+    for e in tagged
+        args = join(["Val(:$(e.factory))"; e.call_args], ", ")
+        push!(lines, "- `$cls_nm($args)` calls `$(e.factory)`")
+    end
+    return join(lines, "\n")
+end
+
+"""
+    _idiomatic_early_type(cls_nm, deleter_doc; factory_doc = "") -> String
+
+The type of a factory class (the idiomatic wrapper) that a record's field
+names, without its constructors. `struct Cage { Animal *pet; }` emits
+`pet::Ptr{Animal}`, which Julia resolves when `Cage` is defined, while the
+factory class's type came after every record: the module failed to load
+(`UndefVarError: Animal`). The type's one field is `handle::Ptr{Cvoid}`, so it
+names nothing and can precede every record. Its constructors cannot: their
+argument types are evaluated where they are defined, and a factory may take a
+record by value or by pointer, the holder included, or another factory class.
+So they are outer constructors in the idiomatic section, after every type, and
+reach `new` through the one inner constructor here, which only stores the
+handle; they attach the finalizer as the inner ones do. A class no field names
+keeps its inner constructors, so its text does not change. `factory_doc` is
+what `_factory_ctor_doc` adds to the docstring.
+"""
+function _idiomatic_early_type(cls_nm::AbstractString, deleter_doc::AbstractString;
+                               factory_doc::AbstractString = "")::String
+    return """
+    \"\"\"
+        $cls_nm
+
+    Idiomatic Julia wrapper for C++ class `$cls_nm`.
+    Memory is automatically managed: when Julia's GC collects this object,
+    its finalizer $deleter_doc.$factory_doc
+    \"\"\"
+    mutable struct $cls_nm
+        handle::Ptr{Cvoid}
+        # Stores the handle and nothing else: the constructors, in the
+        # idiomatic section, call the factory and attach the finalizer.
+        $cls_nm(::Base.Val{:_rb_adopt}, handle::Ptr{Cvoid}) = new(handle)
+    end
+
+    """
 end
 
 function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::String,
@@ -1422,6 +1619,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     end
     _report_inline_constructors(get(metadata, "inline_constructors", nothing))
     _report_inline_constructors(get(metadata, "inline_methods", nothing); what = "member function")
+    _report_vtable_methods(get(metadata, "vtable_methods", nothing))
     let bound = [r for r in get(get(metadata, "default_arguments", Dict{String,Any}()), "bound", Any[])
                  if r isa AbstractDict && get(r, "emitted", false) == true]
         isempty(bound) || println("  wrap: $(length(bound)) call(s) with default arguments left out, of ",
@@ -1888,7 +2086,20 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         push!(struct_chunks, "\n")
     end
 
+    # A factory class's Julia type (the idiomatic section) is defined after
+    # every record, but a record's field can name it: `struct Cage { Animal
+    # *pet; }` gives `pet::Ptr{Animal}`, which Julia resolves when `Cage` is
+    # defined. The types of the classes a field names go in this slot, ahead of
+    # every record; their constructors stay in the idiomatic section
+    # (`_idiomatic_early_type`). Filled there, from `idiomatic_named_early`,
+    # which the field emitter fills with what it wrote. Empty otherwise, so a
+    # wrapper no field of which names a factory class is unchanged.
+    idiomatic_early_slot = 0
+    idiomatic_named_early = Set{String}()
+
     if !isempty(struct_types)
+        push!(struct_chunks, "")
+        idiomatic_early_slot = length(struct_chunks)
         push!(struct_chunks, """
         # =============================================================================
         # Struct Definitions (from DWARF debug info)
@@ -2152,6 +2363,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 end
             end
         end
+        # A factory class is defined wherever a field names it (the slot above),
+        # so a record sorted ahead of its DWARF entry (a pointer cycle broken in
+        # the record's favour) keeps `Ptr{Class}` too, instead of `Ptr{Cvoid}`.
+        union!(defined_struct_names, keys(idiomatic_classes))
         blob_struct_names = Set{String}()  # Track which structs became byte-blobs
         # Field-emitted structs with bytes over a float or double (see the
         # dispatch decision), and what `_type_has_sse` resolves names with.
@@ -2449,19 +2664,27 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                 byte_pos = bit_offset >> 3
                                 bit_within_byte = bit_offset & 7
                                 mask = (1 << bit_size) - 1
+                                # A signed field reads sign-extended as its declared
+                                # type and its setter takes that type's range
+                                # (`_bitfield_signed_type`); an unsigned one is as it was.
+                                signed_t = _bitfield_signed_type(member, dwarf_structs)
+                                signed_store = signed_t === nothing ? "" :
+                                    _bitfield_signed_store("set_$(safe_member)!", bit_size, signed_t)
 
                                 # Getter with bit extraction
                                 if bit_size <= 8 && bit_within_byte + bit_size <= 8
                                     # Single byte access
+                                    getter_raw = "(s._data[$(byte_pos + 1)] >> $bit_within_byte) & $(mask)"
                                     push!(struct_chunks, """
                                     \"\"\"Get bitfield `$member_name` ($bit_size bits) from `$julia_struct_name`.\"\"\"
-                                    function get_$(safe_member)(s::$julia_struct_name)::UInt32
-                                        return UInt32((s._data[$(byte_pos + 1)] >> $bit_within_byte) & $(mask))
+                                    function get_$(safe_member)(s::$julia_struct_name)::$(something(signed_t, "UInt32"))
+                                        return $(signed_t === nothing ? "UInt32($getter_raw)" :
+                                                 _bitfield_sign_extend(getter_raw, bit_size, signed_t))
                                     end
 
                                     \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name`.\"\"\"
                                     function set_$(safe_member)!(s::$julia_struct_name, v::Integer)
-                                        data = collect(s._data)
+                                    $(signed_store)    data = collect(s._data)
                                         cleared = data[$(byte_pos + 1)] & ~UInt8($(mask) << $bit_within_byte)
                                         data[$(byte_pos + 1)] = cleared | UInt8((UInt32(v) & $(mask)) << $bit_within_byte)
                                         s._data = NTuple{$byte_size, UInt8}(data)
@@ -2486,14 +2709,15 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                                     for k in 0:nbytes-1], "\n")
                                     push!(struct_chunks, """
                                     \"\"\"Get bitfield `$member_name` ($bit_size bits) from `$julia_struct_name`.\"\"\"
-                                    function get_$(safe_member)(s::$julia_struct_name)::$ret_t
+                                    function get_$(safe_member)(s::$julia_struct_name)::$(something(signed_t, ret_t))
                                         raw = $(gather("s._data"))
-                                        return $ret_t((raw >> $bit_within_byte) & $mask_lit)
+                                        return $(signed_t === nothing ? "$ret_t((raw >> $bit_within_byte) & $mask_lit)" :
+                                                 _bitfield_sign_extend("(raw >> $bit_within_byte) & $mask_lit", bit_size, signed_t))
                                     end
 
                                     \"\"\"Set bitfield `$member_name` ($bit_size bits) in `$julia_struct_name`.\"\"\"
                                     function set_$(safe_member)!(s::$julia_struct_name, v::Integer)
-                                        data = collect(s._data)
+                                    $(signed_store)    data = collect(s._data)
                                         raw = $(gather("data"))
                                         m = $mask_lit << $bit_within_byte
                                         raw = (raw & ~m) | (((v % $raw_t) & $mask_lit) << $bit_within_byte)
@@ -2984,6 +3208,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         sanitized_name = make_cpp_identifier(sanitized_name)
 
                         sanitized_type = _member_field_type(member)
+                        # A factory class this field names must be defined
+                        # before this record (`idiomatic_early_slot`).
+                        for tm in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", sanitized_type)
+                            haskey(idiomatic_classes, tm.match) && push!(idiomatic_named_early, tm.match)
+                        end
 
                         push!(struct_chunks, "    $sanitized_name::$sanitized_type\n")
                         
@@ -3087,12 +3316,31 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         """)
         
+        # The types a value accessor may load: what Julia binds itself, and the
+        # records and enums this module emits other than a mutable one, which
+        # `unsafe_load` would read as an object reference (abi_fuzz X5).
+        holdable = _typed_return_names(join(struct_chunks))
+        union!(holdable, _imported_value_type_names(dwarf_structs, _sanitize_cpp_type_name))
+        union!(holdable, _pending_enum_type_names(enum_chunks))
+        union!(holdable, _defined_type_names(join(c for c in enum_chunks if c isa String)))
+        union!(holdable, setdiff(_BUILTIN_JULIA_SPELLINGS, ("Any", "Nothing", "Ref")), ("NTuple",))
+
         # Sorted: `globals` is a metadata Dict, iterated in hash order.
         for var_name in sort!(collect(keys(global_vars)); by = string)
             var_info = global_vars[var_name]
             julia_type = get(var_info, "julia_type", "Any")
-            # Sanitize name
-            safe_name = _screened_function_name(make_cpp_identifier(var_name), var_name)
+            # The key is the symbol the loader binds (`_ZN3cfg5depthE`); the
+            # accessor is named for the qualified name, scope first, the way a
+            # method is (`cfg_depth`, `geo_Vec3_live_count`). Metadata older
+            # than `symbol` and `scope` keys a global by its name.
+            symbol = _global_symbol(var_name, var_info)
+            scope = String(something(get(var_info, "scope", ""), ""))
+            bare = String(get(var_info, "name", var_name))
+            qualified = isempty(scope) ? bare : scope * "::" * bare
+            safe_name = isempty(scope) ?
+                _screened_function_name(make_cpp_identifier(bare), var_name) :
+                _screened_function_name(make_cpp_identifier(replace(qualified, "::" => "_")), symbol)
+            sym_expr = Base.isidentifier(symbol) ? ":$symbol" : "Symbol($(repr(symbol)))"
 
             # ...and the TYPE too. Only the name was sanitized here, so a global
             # whose type is a C++ template kept its raw spelling and was emitted
@@ -3109,33 +3357,53 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             if !_is_julia_type_spelling(julia_type)
                 julia_type = _sanitize_cpp_type_name(julia_type)
             end
-            
+
+            # A type the wrapper cannot hold by value (`std::string`, a type
+            # this module does not emit, `Any`) gets the raw pointer only: a
+            # value accessor typed with it threw on the call, or read the
+            # bytes as a Julia object.
+            if !all(m -> m.match in holdable, eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", julia_type))
+                push!(func_chunks, """
+                \"""
+                    $(safe_name)_ptr()
+
+                Get pointer to global variable `$qualified` (no Julia value type: raw pointer only).
+                \"""
+                function $(safe_name)_ptr()::Ptr{Cvoid}
+                    return cglobal(($sym_expr, LIBRARY_PATH))
+                end
+
+                """)
+                push!(exports, "$(safe_name)_ptr")
+                continue
+            end
+
             # 1. Accessor for the value (read-only)
             # Only for simple types or pointers, struct values might be tricky
             # We use unsafe_load on the pointer
-            
+
             push!(func_chunks, """
             \"""
                 $safe_name()
 
-            Get value of global variable `$var_name`.
+            Get value of global variable `$qualified`.
             \"""
             function $safe_name()::$julia_type
-                ptr = cglobal((:$var_name, LIBRARY_PATH), $julia_type)
+                ptr = cglobal(($sym_expr, LIBRARY_PATH), $julia_type)
                 return unsafe_load(ptr)
             end
 
             \"""
                 $(safe_name)_ptr()
 
-            Get pointer to global variable `$var_name`.
+            Get pointer to global variable `$qualified`.
             \"""
             function $(safe_name)_ptr()::Ptr{$julia_type}
-                return cglobal((:$var_name, LIBRARY_PATH), $julia_type)
+                return cglobal(($sym_expr, LIBRARY_PATH), $julia_type)
             end
 
             """)
-            
+
             push!(exports, safe_name)
             push!(exports, "$(safe_name)_ptr")
         end
@@ -3363,42 +3631,53 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
         """)
 
+        early_types = String[]
         for cls_nm in sort(collect(keys(idiomatic_classes)))
             cls_info    = idiomatic_classes[cls_nm]
             deleter_sym = cls_info["deleter"]
             deleter_doc = escape_string(cls_info["deleter_doc"], '$')
             factories   = cls_info["factories"]
+            # A record's field names this class: its type goes ahead of every
+            # record and its constructors become outer ones here
+            # (`_idiomatic_early_type`). They cannot go with it: a constructor's
+            # argument types are evaluated where it is defined, and a factory
+            # may take a record, even the one holding the pointer.
+            early = cls_nm in idiomatic_named_early
 
-            # Build one inner constructor block per factory function.
+            # One constructor per factory function. A dispatch signature that
+            # several factories share is no factory's positional constructor:
+            # each of them is called by name (`_factory_ctor_plan`).
             ctor_blocks = String[]
-            seen_ctor_sigs = Set{String}()
-
-            for fac_func in factories
-                fac_jl     = _sanitize_julia_fn(String(fac_func["name"]),
-                                                String(get(fac_func, "mangled", "")))
-                fac_params = get(fac_func, "parameters", Any[])
-
-                sig_parts  = String[]
-                call_args  = String[]
-                used_names = Set{String}()
-
-                for (i, p) in enumerate(fac_params)
-                    p_nm = make_cpp_identifier(get(p, "name", "arg$(i)"))
-                    while p_nm in used_names; p_nm = "$(p_nm)_$(i)"; end
-                    push!(used_names, p_nm)
-                    p_jt = get(p, "julia_type", "Any")
-                    push!(sig_parts, "$p_nm::$p_jt")
-                    push!(call_args, p_nm)
+            plan = _factory_ctor_plan(factories, _sanitize_julia_fn)
+            let shared = sort!(unique!([e.factory for e in plan if e.tagged]))
+                if !isempty(shared)
+                    println("  wrap: class $cls_nm has factories sharing a constructor signature, ",
+                            "each called by name as $cls_nm(Val(:<factory>), …): ", join(shared, ", "))
                 end
+            end
+            factory_doc = _factory_ctor_doc(cls_nm, plan)
 
-                param_sig = join(sig_parts, ", ")
-                call_sig  = join(call_args, ", ")
+            for e in plan
+                fac_jl   = e.factory
+                # The early type's own constructor takes this tag (`_IDIOMATIC_ADOPT`).
+                e.tagged && fac_jl == "_rb_adopt" &&
+                    Base.error("factory `_rb_adopt` of $cls_nm: the name is the factory class's own constructor tag")
+                call_sig = join(e.call_args, ", ")
+                # A shared signature takes the factory's name first, as a `Val`.
+                param_sig = e.tagged ?
+                    join(["::Base.Val{:$(fac_jl)}"; e.sig_parts], ", ") :
+                    join(e.sig_parts, ", ")
 
-                # Deduplicate identical constructor signatures (duplicate DWARF entries)
-                param_sig in seen_ctor_sigs && continue
-                push!(seen_ctor_sigs, param_sig)
-
-                push!(ctor_blocks, """
+                push!(ctor_blocks, early ? """
+                function $cls_nm($param_sig)
+                    handle = $fac_jl($call_sig)
+                    Ptr{Cvoid}(handle) == C_NULL && Base.error("$cls_nm: constructor returned NULL (allocation failed)")
+                    obj = $cls_nm($_IDIOMATIC_ADOPT, Ptr{Cvoid}(handle))
+                    finalizer(obj) do o
+                        ccall((:$deleter_sym, LIBRARY_PATH), Cvoid, (Ptr{Cvoid},), o.handle)
+                    end
+                    return obj
+                end""" : """
                     function $cls_nm($param_sig)
                         handle = $fac_jl($call_sig)
                         Ptr{Cvoid}(handle) == C_NULL && Base.error("$cls_nm: constructor returned NULL (allocation failed)")
@@ -3410,9 +3689,26 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     end""")
             end
 
-            isempty(ctor_blocks) && continue  # no usable constructors found
+            # No usable constructors: no type, unless a field names it.
+            isempty(ctor_blocks) && !early && continue
 
             ctors_str = join(ctor_blocks, "\n")
+
+            if early
+                push!(early_types, _idiomatic_early_type(cls_nm, deleter_doc; factory_doc = factory_doc))
+                push!(struct_chunks, """
+                # Constructors of $cls_nm. Its type is defined ahead of the records,
+                # since a record's field names it (Idiomatic Class Types).
+                $ctors_str
+
+                # Allow passing a $cls_nm directly to raw FFI functions expecting a pointer.
+                Base.unsafe_convert(::Type{Ptr{Cvoid}}, obj::$cls_nm) = obj.handle
+                Base.unsafe_convert(::Type{Ptr{$cls_nm}}, obj::$cls_nm) = Ptr{$cls_nm}(obj.handle)
+
+                """)
+                push!(exports, cls_nm)
+                continue
+            end
 
             push!(struct_chunks, """
             \"\"\"
@@ -3420,7 +3716,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
 
             Idiomatic Julia wrapper for C++ class `$cls_nm`.
             Memory is automatically managed: when Julia's GC collects this object,
-            its finalizer $deleter_doc.
+            its finalizer $deleter_doc.$factory_doc
             \"\"\"
             mutable struct $cls_nm
                 handle::Ptr{Cvoid}
@@ -3434,6 +3730,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             """)
 
             push!(exports, cls_nm)
+        end
+        if !isempty(early_types)
+            idiomatic_early_slot > 0 ||
+                Base.error("a record names a factory class, but the struct section has no slot for its type")
+            struct_chunks[idiomatic_early_slot] = """
+            # =============================================================================
+            # Idiomatic Class Types (ahead of the records whose fields name them)
+            # =============================================================================
+
+            """ * join(early_types)
         end
     end
 
@@ -3453,6 +3759,14 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # Method proxies for $cls_nm
             """)
 
+            # One proxy per dispatch signature. Keyed by the text, parameter
+            # names included, two overloads one Julia signature stands for
+            # (`f(long a)`, `f(long long b)` on LP64; `f(Foo*)`, `f(Bar*)`,
+            # both `::Any` here) were one method defined twice. Proxies of one
+            # signature calling one raw wrapper are one proxy (the raw wrapper
+            # dispatches); calling different ones (a `[wrap.rename]` of one
+            # overload) is no proxy at all, named, never a pick.
+            proxies = Tuple{String,String,String,String}[]   # (key, raw_jl, text, proxy_nm)
             seen_proxy_sigs = Set{String}()
 
             for meth in methods
@@ -3488,10 +3802,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 other_sig    = join(sig_parts, ", ")
                 call_sig_str = join(call_args, ", ")
 
-                # Deduplicate (same method may appear twice due to DWARF duplicate entries)
-                proxy_key = "$(proxy_nm)($(cls_nm), $(other_sig))"
-                proxy_key in seen_proxy_sigs && continue
-                push!(seen_proxy_sigs, proxy_key)
+                # Deduplicate (same method may appear twice due to DWARF duplicate
+                # entries), by dispatch signature (`_concrete_sig_type`).
+                proxy_key = "$(proxy_nm)($(cls_nm)," *
+                    join((_concrete_sig_type(String(last(split(s, "::"; limit = 2)))) for s in sig_parts), ",") * ")"
 
                 full_sig = isempty(other_sig) ? "obj::$cls_nm" : "obj::$cls_nm, $other_sig"
 
@@ -3501,10 +3815,24 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 # deleting destructor, on the object the call was about to use
                 # (`area(Rect(2, 3))`: a segfault in the thunk, 2026-11-10).
                 # The proxy keeps the owner alive across the call.
-                push!(struct_chunks, """
+                push!(proxies, (proxy_key, raw_jl, """
                 $proxy_nm($full_sig) = GC.@preserve obj $raw_jl($call_sig_str)
-                """)
+                """, proxy_nm))
+            end
 
+            targets = Dict{String,Set{String}}()
+            for (k, raw, _, _) in proxies
+                push!(get!(targets, k, Set{String}()), raw)
+            end
+            split_keys = sort!([k for (k, t) in targets if length(t) > 1])
+            isempty(split_keys) ||
+                println("  wrap: no method proxy of $cls_nm for $(length(split_keys)) signature(s) its overloads ",
+                        "share under different Julia names (call those directly): ",
+                        join(("$k → " * join(sort!(collect(targets[k])), ", ") for k in split_keys), "; "))
+            for (k, _, text, proxy_nm) in proxies
+                (k in seen_proxy_sigs || length(targets[k]) > 1) && continue
+                push!(seen_proxy_sigs, k)
+                push!(struct_chunks, text)
                 push!(exports, proxy_nm)
             end
 
@@ -3560,6 +3888,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # address of a caller's buffer (`_pointee_safe_type`; Boost.Charconv's
         # `long double` from_chars, 33 signatures in that wrapper, 2026-11-01).
         julia_type = _pointee_safe_type(julia_type)
+        # A `char` by value is the host's `char` (`_char_param_ctype`).
+        julia_type = _char_param_ctype(julia_type, c_type_name)
         # Replace blocklisted internal types (e.g. _IO_FILE) with Cvoid
         let bm = match(r"^(Ref|Ptr)\{(.*)\}$", julia_type)
             if bm !== nothing && String(bm.captures[2]) in _INTERNAL_TYPE_BLOCKLIST
@@ -3659,6 +3989,15 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                     "whose complete-object variant the library lacks, or metadata to rebuild): ",
                                     join(first(classes, 8), ", "), length(classes) > 8 ? ", …" : "")
     end
+    # ...and no constructor of an abstract class is bound at all
+    # (`_abstract_constructor_refusals!`).
+    let classes = _abstract_constructor_refusals!(structor_refused, functions, structor_skipped, record_abi)
+        isempty(classes) || println("  wrap: the constructor wrapper(s) of $(length(classes)) abstract class(es) are ",
+                                    "refusals (C++ builds no object of a class with a pure virtual left): ",
+                                    join(first(classes, 8), ", "), length(classes) > 8 ? ", …" : "")
+    end
+    # The pure virtual member functions refused at emission, for the report.
+    vtable_refusals = String[]
     strict_int_positions = _integer_width_overloads(
         Any[_declared_structor(f) for f in functions
             if !(String(get(f, "mangled", "")) in rvalue_shadowed) &&
@@ -3711,6 +4050,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # symbol, which is `p->Class::f()`: a `noexcept` virtual was routed
         # there, and `Base_g(derived)` ran `Base::g`.
         use_mlir_dispatch = use_mlir_dispatch || mangled in virtual_symbols
+        # A pure virtual member function has no symbol at all
+        # (`Compiler._is_vtable_only`): its thunk is a `jlcs.vcall` and there
+        # is nothing a `ccall` could name.
+        vtable_only = _is_vtable_only(func)
+        use_mlir_dispatch = use_mlir_dispatch || vtable_only
 
         # BUG FIX: Make copies to allow modification (injecting 'this', refining types) without affecting metadata
         params = copy(func["parameters"])
@@ -3836,7 +4180,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # =========================================================
         # VARARGS INTERCEPTION
         # =========================================================
-        if is_vararg
+        # Never for a pure virtual: the interception is a `@ccall` by name,
+        # and the build makes no variadic row for one. BRANCH 1 refuses it.
+        if is_vararg && !vtable_only
             # Sanitize function name for Julia (same logic as below)
             va_julia_name = func_name
             if is_method && !isempty(class_name)
@@ -3876,6 +4222,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         needs_conversion = Bool[]
         string_plans = Any[]          # per parameter: nothing, a plan Tuple, or a reason String
         pointer_types = Union{Nothing,String}[]   # per parameter: what `pointer_arg` is told (`_pointer_arg_type`)
+        cstring_args = Union{Nothing,String}[]    # per parameter: the `ccall` path's string conversion (`_cstring_param_arg`)
 
         for (i, param) in enumerate(params)
             # Sanitize parameter name (e.g., avoid 'end', 'function' keywords)
@@ -3912,6 +4259,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                                                   owners = _sig_owners, is_enum = _sig_is_enum) :
                            _relaxed_param_kind(sig_c_type, _sig_type_bound))
             push!(needs_conversion, actual_c_type in _INTEGER_CTYPES)
+            push!(cstring_args, _cstring_param_arg(safe_name, String(get(param, "c_type", "")), actual_c_type))
             # What the Tier 2 body converts a pointer argument to. A `std::string`
             # the wrapper builds is passed by the address `string_arg` gives.
             push!(pointer_types, splan isa Tuple ? nothing :
@@ -3988,7 +4336,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             \"\"\"
                 $julia_name($param_sig) -> $doc_ret
 
-            Wrapper for `$demangled`$(_deleting_destructor_doc(mangled, julia_name, class_name in d0_only_classes))
+            Wrapper for `$demangled`$(_deleting_destructor_doc(mangled, julia_name, class_name in d0_only_classes))$(vtable_only ? _PURE_VIRTUAL_DOC : "")
 
             # Arguments
             $(join(arg_docs, "\n"))
@@ -4071,6 +4419,26 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 """)
                 push!(exports, julia_name)
                 continue
+            end
+            # A pure virtual member function is bound only where the thunk
+            # generator will write its vtable call: with no thunk there is no
+            # symbol to fall back on, so the generator is asked
+            # (`vtable_only_refusal`) and its reason is the refusal.
+            if vtable_only
+                why = JLCSIRGenerator.vtable_only_refusal(func, dwarf_structs, record_abi; class_raii)
+                if why !== nothing
+                    push!(vtable_refusals, String(demangled))
+                    push!(func_chunks, """
+                    $doc_comment
+                    function $julia_name($param_sig)
+                        Base.error($(repr("ABI Safety Trap: cannot call '$julia_name' ($demangled). " *
+                                          uppercasefirst(why) * ". Call the override through its own class's " *
+                                          "wrapper, or keep the function out with [wrap] exclude_symbols.")))
+                    end
+                    """)
+                    push!(exports, julia_name)
+                    continue
+                end
             end
             # An empty record returned by value. The thunk is void on both
             # ABIs (SysV's callee is void; Win64's returns iN and the thunk
@@ -4348,6 +4716,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # =========================================================
         # BRANCH 2: CCALL (Fast Path) - Existing Logic
         # =========================================================
+        # Every path of BRANCH 1 ends the iteration, and a pure virtual
+        # always takes it. Held here because a `ccall` of its name would bind
+        # nothing, or another library's function of that name.
+        vtable_only && Base.error("internal error: the pure virtual `$demangled` reached the ccall path")
 
         # Build conversion logic for parameters
         conversion_code = ""
@@ -4359,7 +4731,12 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 push!(ccall_param_names, converted_name)
 
                 # Generate range-checked conversion
-                conversion_code *= "    $converted_name = $c_type($name)\n"
+                conversion_code *= "    $converted_name = $(_integer_arg_conversion(c_type, name))\n"
+            elseif cstring_args[i] !== nothing
+                # A string with `Cstring` semantics (`_cstring_param_arg`).
+                converted_name = "$(name)_c"
+                push!(ccall_param_names, converted_name)
+                conversion_code *= "    $converted_name = $(cstring_args[i])\n"
             else
                 push!(ccall_param_names, name)
             end
@@ -4803,6 +5180,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             push!(func_chunks, convenience_func)
         end
     end
+    isempty(vtable_refusals) ||
+        println("  wrap: $(length(vtable_refusals)) pure virtual member function(s) are refusals (a record by value: ",
+                "a call through the vtable carries scalars and pointers only): ",
+                join(first(sort!(vtable_refusals), 6), ", "), length(vtable_refusals) > 6 ? ", …" : "")
 
     # =================================================================
     # STL CONTAINER FACTORY FUNCTIONS
@@ -5135,6 +5516,10 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     # same ::Any signature) must not survive into the module — method
     # overwriting is a hard error under package precompilation. Keep the
     # last definition per dispatch signature (include()-identical semantics).
+    # Before it, `operator()`/`[]`/`,` get their old shared name back beside
+    # their own, deduplicated as it always was (`_operator_legacy_aliases`).
+    (func_chunks, _legacy_operator_names) = _operator_legacy_aliases(func_chunks)
+    append!(all_exports, _legacy_operator_names)
     func_chunks = _dedup_method_chunks(func_chunks)
 
     # Each section is joined ONCE and reused for both the export filter and the

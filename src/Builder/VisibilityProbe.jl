@@ -46,7 +46,7 @@
 module VisibilityProbe
 
 using ..ConfigurationManager
-using ..Compiler: _clang_for_c_bucket, generate_macro_shims
+using ..Compiler: _clang_for_c_bucket, generate_macro_shims, _is_vtable_only
 using ..DependencyResolver
 import .._read_json
 
@@ -258,6 +258,9 @@ function visibility_probe(toml_path::AbstractString; metadata::Union{Nothing,Str
                 if fs isa Vector
                     for f in fs
                         f isa Dict || continue
+                        # A pure virtual's row names no symbol: the flag has
+                        # nothing of it to remove.
+                        _is_vtable_only(f) && continue
                         sym = get(f, "mangled", "")
                         isempty(sym) && (sym = get(f, "name", ""))
                         isempty(sym) || push!(wrapped, sym)

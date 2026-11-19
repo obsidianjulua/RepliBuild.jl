@@ -3308,6 +3308,249 @@ function _inline_method_plan(struct_defs::AbstractDict, record_abi::AbstractDict
 end
 
 # =============================================================================
+# PURE VIRTUAL MEMBER FUNCTIONS
+# -----------------------------------------------------------------------------
+# `virtual const char *name() const = 0;` has no definition, so no symbol, and
+# the wrap surface is built from the symbol table: an interface's own methods
+# had no wrapper, and `Animal_name(p)` did not exist for the `Animal*` a
+# factory returned (2026-11-17). What reaches such a member is the object's
+# vtable, and the declaration DIE says where: its linkage name, its signature
+# and its slot (`DW_AT_vtable_elem_location`). So the build gives each one a
+# function row marked `vtable_only` (`_vtable_only_plan`,
+# `_vtable_only_function_rows`), the thunk generator a thunk that is only a
+# `jlcs.vcall` at that slot, with no callee to declare, and GeneratorCpp a
+# Tier 2 wrapper. Such a row's `mangled` names no symbol: every reader that
+# takes a row's name for one asks `_is_vtable_only` first.
+# =============================================================================
+
+"""
+    _is_vtable_only(func) -> Bool
+
+Whether a `functions` row of the metadata is a pure virtual member function:
+declared, never defined, reached only through its object's vtable at
+`vtable_slot`. Its `mangled` is the declaration's linkage name, which is no
+symbol of the library: nothing may `dlsym` it, declare it as a callee, or
+name it in a `ccall`.
+"""
+_is_vtable_only(func) = func isa AbstractDict && get(func, "vtable_only", false) == true
+
+# A demangled member function without its class: what an overrider has to
+# match (name, parameter list, cv- and ref-qualifiers). A virtual function is
+# never a template, so its demangling opens with the class and carries no
+# return type. `nothing` when the class cannot be cut off.
+function _member_signature(demangled::AbstractString)
+    dm = String(demangled)
+    cls = extract_class_name(dm)
+    (isempty(cls) || !startswith(dm, cls * "::")) && return nothing
+    return String(dm[ncodeunits(cls)+3:end])
+end
+
+"""
+    _mark_abstract_records!(record_abi, struct_defs; demangle = _demangle) -> record_abi
+
+On each library record an object of which would still have a pure virtual
+member function, `pure_virtuals`: those functions, demangled and sorted. They
+are the record's own pure declarations (a pure virtual destructor among
+them) and the ones it inherits and does not declare again.
+
+C++ refuses to construct such a class. A wrapper could: its base-object
+constructor is a symbol like any other, and run on storage of its own it
+leaves an object whose vtable holds `__cxa_pure_virtual` in those slots, which
+ends the process when anything calls one. GeneratorCpp reads this key and
+refuses the constructor.
+
+Only what the DWARF settles is claimed, so a class that is not abstract is
+never called one. An inherited pure virtual counts when the path to its
+declarer has no virtual base on it (through one, another branch of the
+hierarchy can supply the overrider) and when every virtual member the class
+declares has a readable signature; a base with no entry here, a toolchain
+record, or a name with several definitions or scopes says nothing. A destructor is
+never inherited as pure: every class has its own.
+"""
+function _mark_abstract_records!(record_abi::AbstractDict, struct_defs::AbstractDict; demangle = _demangle)
+    spelled = Dict{String,Any}()             # symbol => (demangled, signature), or nothing
+    spell(sym) = get!(spelled, sym) do
+        dm = demangle(sym)
+        dm === nothing && return nothing
+        sig = _member_signature(dm)
+        sig === nothing ? nothing : (String(dm), sig)
+    end
+    memo = Dict{String,Any}()                # record => [(signature, demangled)], or nothing: cannot say
+    function unimplemented(name::String, stack::Vector{String})
+        haskey(memo, name) && return memo[name]
+        name in stack && return nothing
+        def = get(struct_defs, name, nothing)
+        if !(def isa AbstractDict) || get(def, "conflict", false) == true || get(def, "toolchain", false) == true
+            return memo[name] = nothing
+        end
+        # Records are keyed by bare name: one defined in several scopes
+        # (`a::Node`, `b::Node`) has the member rows of all of them under
+        # this key, and which class a pure virtual is left in cannot be said.
+        scopes = get(def, "scopes", nothing)
+        (scopes isa AbstractVector && length(unique(scopes)) > 1) && return memo[name] = nothing
+        entry = get(record_abi, name, nothing)
+        rows = entry isa AbstractDict ? get(entry, "methods", Any[]) : Any[]
+        declared = Set{String}()             # the signatures this record declares itself
+        unreadable = false
+        left = Dict{String,String}()         # signature => demangled declaration
+        for m in rows
+            m isa AbstractDict || continue
+            # Only a virtual member can be pure or override one.
+            get(m, "virtual", false) == true || continue
+            s = spell(String(get(m, "symbol", "")))
+            if s === nothing
+                unreadable = true
+                continue
+            end
+            push!(declared, s[2])
+            get(m, "pure", false) == true && (left[s[2]] = s[1])
+        end
+        push!(stack, name)
+        for base in get(def, "base_classes", Any[])
+            base isa AbstractDict || continue
+            get(base, "virtual", false) == true && continue
+            key = replace(String(get(base, "type", "")), r"^(?:class|struct)\s+" => "")
+            inherited = unimplemented(key, stack)
+            inherited === nothing && continue
+            for (sig, dm) in inherited
+                (startswith(sig, "~") || sig in declared || unreadable) && continue
+                get!(left, sig, dm)
+            end
+        end
+        pop!(stack)
+        return memo[name] = sort!([(sig, dm) for (sig, dm) in left])
+    end
+    for name in sort!(collect(String, keys(struct_defs)))
+        startswith(name, "__enum__") && continue
+        left = unimplemented(name, String[])
+        (left === nothing || isempty(left)) && continue
+        entry = Dict{String,Any}(get(record_abi, name, Dict{String,Any}()))
+        entry["pure_virtuals"] = sort!(String[dm for (_, dm) in left])
+        record_abi[name] = entry
+    end
+    return record_abi
+end
+
+"""
+    _vtable_only_plan(struct_defs, record_abi, symbols, dwarf_functions;
+                      demangle = _demangle) -> Dict
+
+Declared minus defined, for pure virtual member functions: every pure
+virtual a library record declares (`record_abi[name]["methods"]` rows with
+`pure`) that no symbol in `symbols` defines, as `bound` rows (`class`,
+`symbol`, `demangled`, `slot`) that `_vtable_only_function_rows` turns into
+function rows, and `skipped` rows (`class`, `symbol`, `reason`) the wrap
+report names. A pure virtual the library also defines (`void A::f() {}` after
+`= 0`) has a symbol and a row already, and is neither.
+
+Skipped, each with its reason: a destructor (a wrapper calls a class's
+destructors by symbol, the exact class's, and never through the vtable); a
+private or protected member, which C++ would not let a caller name; a member
+of a class with internal linkage (an unnamed namespace, a local class); a
+variadic one, whose `...` a vtable call cannot forward; one whose declaration
+records no slot or no object parameter, or that `dwarf_functions` (the
+parser's function table) has no signature for; a symbol that does not
+demangle. Toolchain records and standard-library scopes are passed over
+silently. Sorted by class, then symbol.
+"""
+function _vtable_only_plan(struct_defs::AbstractDict, record_abi::AbstractDict, symbols,
+                           dwarf_functions::AbstractDict; demangle = _demangle)
+    defined = Set{String}(String(get(s, "mangled", "")) for s in symbols if s isa AbstractDict)
+    bound = Dict{String,Any}[]
+    skipped = Dict{String,Any}[]
+    seen = Set{String}()
+    skip(cls, sym, why) = push!(skipped, Dict{String,Any}("class" => cls, "symbol" => sym, "reason" => why))
+    for name in sort!(collect(String, keys(struct_defs)))
+        startswith(name, "__enum__") && continue
+        def = struct_defs[name]
+        def isa AbstractDict || continue
+        get(def, "toolchain", false) == true && continue
+        _is_stdlib_scope(get(def, "scope", "")) && continue
+        entry = get(record_abi, name, nothing)
+        entry isa AbstractDict || continue
+        for m in get(entry, "methods", Any[])
+            m isa AbstractDict || continue
+            get(m, "pure", false) == true || continue
+            sym = String(get(m, "symbol", ""))
+            (isempty(sym) || sym in defined || sym in seen) && continue
+            push!(seen, sym)
+            dm = demangle(sym)
+            if dm === nothing
+                skip(name, sym, "the symbol does not demangle on this host")
+                continue
+            end
+            sig = _member_signature(dm)
+            info = get(dwarf_functions, sym, nothing)
+            params = info isa AbstractDict ? get(info, "parameters", Any[]) : Any[]
+            slot = get(m, "vtable_slot", nothing)
+            if sig !== nothing && startswith(sig, "~")
+                skip(name, sym, "a destructor: a class's destructors are called by symbol, never through the vtable")
+            elseif get(m, "accessibility", "public") != "public"
+                skip(name, sym, "$(m["accessibility"]): not a member a caller of the class can name")
+            elseif sig === nothing
+                skip(name, sym, "its class cannot be read from its name: $dm")
+            elseif occursin('(', _outside_template_args(extract_class_name(String(dm))))
+                # `(anonymous namespace)::Step`, `run()::Local`: a class of one
+                # translation unit, like its member functions, which are
+                # local symbols and have no row either. (A `(` inside template
+                # arguments is a function type: `Slot<void (int)>`.)
+                skip(name, sym, "its class has internal linkage (an unnamed namespace or a local class)")
+            elseif !(info isa AbstractDict)
+                skip(name, sym, "the debug information has no signature for it")
+            elseif get(info, "is_vararg", false) == true
+                skip(name, sym, "variadic: a call through the vtable cannot forward `...`")
+            elseif !(slot isa Integer)
+                skip(name, sym, "its declaration records no vtable slot")
+            elseif isempty(params) || String(get(params[1], "name", "")) != "this"
+                skip(name, sym, "its declaration records no object parameter")
+            else
+                push!(bound, Dict{String,Any}("class" => name, "symbol" => sym, "demangled" => String(dm),
+                                              "slot" => Int(slot)))
+            end
+        end
+    end
+    return Dict{String,Any}("bound" => bound, "skipped" => skipped)
+end
+
+"""
+    _vtable_only_function_rows(plan, dwarf_functions) -> Vector{Dict{String,Any}}
+
+One `functions` row per `bound` row of `_vtable_only_plan`: name, class and
+`demangled` from the declaration's linkage name (`mangled`, which is no
+symbol), the return type and the parameters the declaration DIE gives (`this`
+first, the others named `arg<n>`: a declaration's parameters carry no names),
+`has_object_pointer` (a virtual member is never static), and `vtable_only`
+with its `vtable_slot`.
+"""
+function _vtable_only_function_rows(plan::AbstractDict, dwarf_functions::AbstractDict)
+    rows = Dict{String,Any}[]
+    for r in get(plan, "bound", Any[])
+        sym = String(r["symbol"])
+        dm = String(r["demangled"])
+        info = dwarf_functions[sym]
+        ret = Dict{String,Any}("c_type" => get(info, "c_type", "void"),
+                               "julia_type" => get(info, "julia_type", "Cvoid"),
+                               "size" => get(info, "size", 0))
+        haskey(info, "vector_size") && (ret["vector_size"] = info["vector_size"])
+        push!(rows, Dict{String,Any}(
+            "name" => extract_function_name(dm),
+            "mangled" => sym,
+            "demangled" => dm,
+            "return_type" => ret,
+            "return_type_source" => "dwarf",
+            "parameters" => Any[Dict{String,Any}(p) for p in get(info, "parameters", Any[])],
+            "parameters_source" => "dwarf",
+            "is_method" => true,
+            "class" => extract_class_name(dm),
+            "is_vararg" => false,
+            "has_object_pointer" => true,
+            "vtable_only" => true,
+            "vtable_slot" => Int(r["slot"])))
+    end
+    return rows
+end
+
+# =============================================================================
 # DEFAULT ARGUMENTS
 # -----------------------------------------------------------------------------
 # A C++ default argument exists only in the header: the mangled name spells
@@ -4361,7 +4604,10 @@ function verify_wrap_surface(config::RepliBuildConfig, binary_path::String,
     # surface there, and an empty table is the empty surface again.
     stl_table = get(metadata, "stl_methods", nothing)
     stl_bound = stl_table isa Dict && any(v -> v isa Vector && !isempty(v), values(stl_table))
-    if isempty(functions) && !stl_bound
+    # A pure virtual's row (`_is_vtable_only`) names no symbol of the library.
+    # It does not make a surface (a library whose whole API is hidden must not
+    # pass on its interfaces' declarations alone), and R2 has no name to find.
+    if all(_is_vtable_only, functions) && !stl_bound
         cause = promoted_count > 0 ? """
         $(promoted_count) of those symbols are `__rb_*` promoted internals, so the
         API was RENAMED away: `-fvisibility=hidden` made every unannotated function
@@ -4412,6 +4658,7 @@ function verify_wrap_surface(config::RepliBuildConfig, binary_path::String,
     offenders = String[]
     for f in functions
         f isa Dict || continue
+        _is_vtable_only(f) && continue
         sym = get(f, "mangled", "")
         isempty(sym) && (sym = get(f, "name", ""))
         isempty(sym) && continue
@@ -6241,7 +6488,7 @@ const _DWARF_TYPE_MAP = Dict{String,String}(
 
     # Character types
     "char" => "Cchar",
-    "signed char" => "Cchar",
+    "signed char" => "Int8",
     "unsigned char" => "Cuchar",
     "wchar_t" => "Cwchar_t",
     "char8_t" => "UInt8",
@@ -6358,10 +6605,16 @@ function dwarf_type_to_julia(c_type::AbstractString)::String
         base_type = replace(base_type, r"\bvolatile\b" => "")
         base_type = strip(base_type)
 
-        # Special case: char* / signed char* / i8* → Cstring (null-terminated C strings)
-        if base_type == "char" || base_type == "signed char" || base_type == "i8"
+        # Special case: char* / i8* → Cstring (null-terminated C strings). Only
+        # plain `char` is text: `signed char*` is bytes, `Ptr{Int8}` on every
+        # host (`Cchar` is `UInt8` on AArch64), as `int8_t*` and `unsigned
+        # char*` already are; a `Cstring` return copied {-1, -2, 0} into a
+        # `String`. Metadata written before says `Cstring`, which the wrap
+        # corrects from the return's `c_type` (`Wrapper._signed_char_returns!`).
+        if base_type == "char" || base_type == "i8"
             return "Cstring"
         end
+        base_type == "signed char" && return "Ptr{Int8}"
 
         # void* → Ptr{Cvoid}
         if base_type == "void" || isempty(base_type)
@@ -8414,6 +8667,12 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
     current_fn_is_deleted = false
     current_fn_accessibility = nothing
     current_fn_is_virtual = false
+    # ...and for a virtual member: whether it is pure (`DW_AT_virtuality: 2`)
+    # and its slot in the declaring class's vtable
+    # (`DW_AT_vtable_elem_location`), which is all that reaches a pure
+    # virtual: it has no definition, so no symbol (`_vtable_only_plan`).
+    current_fn_is_pure = false
+    current_fn_vtable_slot = nothing
     declaration_facts = Dict{String,Dict{String,Any}}()
     # The DIE's own `DW_AT_linkage_name`, before `DW_AT_specification` replaces
     # it with the declaration's. Clang gives each emitted constructor and
@@ -8444,6 +8703,13 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
 
     # NEW: Track global variables
     current_variable_offset = nothing
+    # A static data member's in-class declaration as DWARF 4 writes it: a
+    # `DW_TAG_member` with `DW_AT_external` (DWARF 5 writes a
+    # `DW_TAG_variable`, which the variable handler reads). Filed under its
+    # offset only once `DW_AT_external` shows it is not a field, for the
+    # definition DIE that names it through `DW_AT_specification`.
+    current_static_member = nothing
+    static_member_decls = Dict{String,Dict{String,Any}}()
 
     last_seen_level = nothing  # Track last level for attribute lines
 
@@ -8514,7 +8780,9 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                     "artificial" => current_fn_is_artificial,
                     "deleted" => current_fn_is_deleted,
                     "accessibility" => current_fn_accessibility,
-                    "virtual" => current_fn_is_virtual)
+                    "virtual" => current_fn_is_virtual,
+                    "pure" => current_fn_is_pure,
+                    "vtable_slot" => current_fn_vtable_slot)
             end
         end
 
@@ -8528,6 +8796,8 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         current_fn_is_deleted = false
         current_fn_accessibility = nothing
         current_fn_is_virtual = false
+        current_fn_is_pure = false
+        current_fn_vtable_slot = nothing
         current_function_name = nothing
         current_function_linkage = nothing
         current_function_own_linkage = nothing
@@ -8695,6 +8965,8 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                 current_fn_is_deleted = false
                 current_fn_accessibility = nothing
                 current_fn_is_virtual = false
+                current_fn_is_pure = false
+                current_fn_vtable_slot = nothing
 
                 # RESET VARIABLE CONTEXT to prevent leakage
                 current_variable_offset = nothing
@@ -8702,23 +8974,35 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         end
         
         # NEW: Detect global variable (DW_TAG_variable)
-        if contains(line, "DW_TAG_variable")
+        # Its parent DIE (`die_at_depth` one level up) is where it was declared:
+        # a namespace or a record gives its scope (`_scope_of`), a record makes
+        # it a static data member, the unit is the global scope.
+        contains(line, "DW_TAG_") && (current_static_member = nothing)
+        if contains(line, "DW_TAG_variable") || contains(line, "DW_TAG_member")
             offset_match = match(r"<\d+><([^>]+)>", line)
             if !isnothing(offset_match)
-                current_variable_offset = "0x" * offset_match.captures[1]
-                
-                type_refs[current_variable_offset] = Dict{String,Any}(
+                var_offset = "0x" * offset_match.captures[1]
+                var_parent = isnothing(current_level) ? nothing : get(die_at_depth, current_level - 1, nothing)
+                var_info = Dict{String,Any}(
                     "kind" => "variable",
                     "name" => nothing,
                     "type" => nothing,
                     "external" => false,
-                    "declaration" => false
+                    "declaration" => false,
+                    "parent" => var_parent === nothing ? nothing : var_parent[1],
+                    "parent_tag" => var_parent === nothing ? nothing : var_parent[2]
                 )
-                offset_to_kind[current_variable_offset] = :variable
+                if contains(line, "DW_TAG_member")
+                    current_static_member = (var_offset, var_info)
+                else
+                    current_variable_offset = var_offset
+                    type_refs[current_variable_offset] = var_info
+                    offset_to_kind[current_variable_offset] = :variable
 
-                # Ensure we don't leak param context
-                current_param_offset = nothing
-                current_param_level = nothing
+                    # Ensure we don't leak param context
+                    current_param_offset = nothing
+                    current_param_level = nothing
+                end
             end
         end
         
@@ -8784,11 +9068,34 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         end
         
         # Process Global Variable Attributes
+        var_info = nothing
         if !isnothing(current_variable_offset) && haskey(type_refs, current_variable_offset) &&
            haskey(offset_to_kind, current_variable_offset) && offset_to_kind[current_variable_offset] == :variable
-           
-           var_info = type_refs[current_variable_offset]
-           
+            var_info = type_refs[current_variable_offset]
+        elseif current_static_member !== nothing
+            var_info = current_static_member[2]
+            contains(line, "DW_AT_external") &&
+                (static_member_decls[current_static_member[1]] = var_info)
+        end
+        if var_info !== nothing
+           # The symbol the loader binds (a namespace member's, a static data
+           # member's, an ABI-tagged name's), the declaration a definition
+           # completes, a member's access as written, and a value with no
+           # storage (`constexpr`, an in-class initialised `static const`).
+           if contains(line, "DW_AT_linkage_name")
+               lm = match(r":\s*([^:\s]+)\s*$", line)
+               lm === nothing || (var_info["linkage"] = String(lm.captures[1]))
+           elseif contains(line, "DW_AT_specification")
+               sm = match(r"<(0x[^>]+)>", line)
+               sm === nothing || (var_info["specification"] = String(sm.captures[1]))
+           elseif contains(line, "DW_AT_accessibility")
+               am = match(r"DW_AT_accessibility\s*:\s*(\d+)", line)
+               am === nothing || (var_info["accessibility"] =
+                   get(("public", "protected", "private"), parse(Int, am.captures[1]), nothing))
+           elseif contains(line, "DW_AT_const_value")
+               var_info["const_value"] = true
+           end
+
            if contains(line, "DW_AT_name")
                name_match = match(r":\s*([^:]+)\s*$", line)
                if !isnothing(name_match)
@@ -8939,6 +9246,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
             if !isnothing(virt_match)
                 is_virtual = parse(Int, virt_match.captures[1]) > 0
                 current_fn_is_virtual = is_virtual
+                current_fn_is_pure = parse(Int, virt_match.captures[1]) == 2
                 
                 # Store this temporarily in type_refs for the current function offset
                 if !isnothing(current_function_offset)
@@ -8950,6 +9258,14 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                     end
                 end
             end
+        end
+
+        # The member's slot in its class's vtable, an index from the address
+        # point: `DW_AT_vtable_elem_location: 2 byte block: 10 2 (DW_OP_constu: 2)`
+        # (clang and GCC write `DW_OP_constu`; a `DW_OP_lit<n>` says the same).
+        if in_function_context && contains(line, "DW_AT_vtable_elem_location")
+            slot_match = match(r"\(DW_OP_(?:constu: |lit)(\d+)\)\s*$", line)
+            slot_match === nothing || (current_fn_vtable_slot = parse(Int, slot_match.captures[1]))
         end
 
         # Extract function return type reference
@@ -9606,14 +9922,14 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
             push!(toolchain_seeds, String(get(p, "c_type", "")))
         end
     end
-    for offset in die_order
-        info = type_refs[offset]
-        if isa(info, Dict) && get(info, "kind", nothing) == "variable" &&
-           get(info, "external", false) == true && !get(info, "declaration", false) &&
-           !_is_system_decl_file(get(info, "decl_file_path", "")) &&
-           (exported === nothing || String(get(info, "name", "")) in exported)
-            type_ref = get(info, "type", nothing)
-            isnothing(type_ref) || push!(toolchain_seeds, resolve_type(type_ref, type_refs))
+    # Every exported variable the library defines, under the symbol the loader
+    # binds (`_library_variables`), which is what `exported` lists.
+    library_variables = _library_variables(die_order, type_refs, static_member_decls)
+    for v in library_variables
+        get(v, "constant", false) && continue
+        if !_is_system_decl_file(v["decl_file_path"]) &&
+           (exported === nothing || v["symbol"] in exported)
+            push!(toolchain_seeds, resolve_type(v["type"], type_refs))
         end
     end
     # The 1-byte empty records, the rule the empty-base marking above uses: a
@@ -9690,30 +10006,33 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
         end
     end
     
-    # Process extracted variables into a clean dictionary. A C++17 inline
-    # variable is defined in every compile unit that uses it, and C and C++
-    # spell a type differently, so the entry is chosen like a record's.
+    # Process extracted variables into a clean dictionary, keyed by the symbol
+    # the loader binds: `cfg::depth` is `_ZN3cfg5depthE`, and two `x`s in two
+    # namespaces are two globals. A C++17 inline variable is defined in every
+    # compile unit that uses it, and C and C++ spell a type differently, so the
+    # entry is chosen like a record's. A static member with a value and no
+    # storage (`constexpr`) has no symbol: it is keyed by its qualified name,
+    # marked `constant`, and only counted (`extract_compilation_metadata`
+    # sets it apart as `global_constants`),
+    # and only for a record of the library's own.
     global_vars = Dict{String,Any}()
     global_candidates = Dict{String,Vector{Dict{String,Any}}}()
-    for offset in die_order
-        info = type_refs[offset]
-        if isa(info, Dict) && get(info, "kind", nothing) == "variable" &&
-           get(info, "external", false) == true && !get(info, "declaration", false)
-
-           name = get(info, "name", "unknown")
-           type_ref = get(info, "type", nothing)
-
-           if name != "unknown" && !isnothing(type_ref)
-               c_type = resolve_type(type_ref, type_refs)
-               julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
-
-               push!(get!(() -> Dict{String,Any}[], global_candidates, name), Dict{String,Any}(
-                   "name" => name,
-                   "c_type" => c_type,
-                   "julia_type" => julia_type
-               ))
-           end
-        end
+    for v in library_variables
+        constant = get(v, "constant", false)
+        constant && !haskey(struct_defs, String(something(get(v, "record", nothing), ""))) && continue
+        c_type = resolve_type(v["type"], type_refs)
+        julia_type = cpp_to_julia_type(c_type, struct_names, enum_names)
+        entry = Dict{String,Any}(
+            "name" => v["name"],
+            "c_type" => c_type,
+            "julia_type" => julia_type,
+            "symbol" => v["symbol"],
+            "scope" => v["scope"]
+        )
+        v["accessibility"] == "public" || (entry["accessibility"] = v["accessibility"])
+        constant && (entry["constant"] = true)
+        key = constant ? (isempty(v["scope"]) ? v["name"] : v["scope"] * "::" * v["name"]) : v["symbol"]
+        push!(get!(() -> Dict{String,Any}[], global_candidates, key), entry)
     end
     for (name, defs) in global_candidates
         global_vars[name] = _canonical_definition(defs)
@@ -9821,7 +10140,8 @@ with the declaration DIE's facts: `artificial` (an implicit member clang
 declared for it), `deleted`, and `accessibility` (`DW_AT_accessibility` as
 written, else the record's default: private in a `class`, public in a
 `struct`). With `key = "methods"` the same rows are written for every member
-function the record declares (`methods`, with `virtual` added; constructors
+function the record declares (`methods`, with `virtual` added, `pure` for a
+pure virtual and `vtable_slot` where the DIE gives one; constructors
 and destructors among them, which `_inline_method_plan` passes over). The parameters are not recorded: a declaration's formal parameters
 carry no names, so the parser keeps none, and the symbol spells them anyway
 (`_constructor_spelling`). Toolchain records put back by promotion and enum
@@ -9849,6 +10169,12 @@ function _record_declared_constructors!(record_abi::AbstractDict, struct_defs::A
             # A member function's row also says whether it is virtual: a
             # virtual one is emitted with its class's vtable, never forced.
             key == "methods" && (rows[end]["virtual"] = get(facts, "virtual", false) == true)
+            # ...whether it is pure, and its vtable slot where the DIE gives one.
+            if key == "methods"
+                rows[end]["pure"] = get(facts, "pure", false) == true
+                slot = get(facts, "vtable_slot", nothing)
+                slot isa Integer && (rows[end]["vtable_slot"] = Int(slot))
+            end
         end
         isempty(rows) && continue
         entry = Dict{String,Any}(get(record_abi, name, Dict{String,Any}()))
@@ -10231,6 +10557,90 @@ function _scope_of(parent, type_refs::AbstractDict)
         p = get(die, "scope_parent", missing)
     end
     return join(parts, "::")
+end
+
+const _RECORD_TAGS = ("DW_TAG_structure_type", "DW_TAG_class_type", "DW_TAG_union_type")
+
+# The scope a variable DIE was declared in, from its parent DIE: `""` at the
+# unit's level, the `_scope_of` chain under a namespace or a record, and
+# `nothing` anywhere else (a function's local) or where the chain is unknown.
+function _variable_scope(die::AbstractDict, type_refs::AbstractDict)
+    tag = get(die, "parent_tag", nothing)
+    (tag === nothing || tag == "DW_TAG_compile_unit" || tag == "DW_TAG_partial_unit") && return ""
+    (tag == "DW_TAG_namespace" || tag in _RECORD_TAGS) || return nothing
+    return _scope_of(get(die, "parent", missing), type_refs)
+end
+
+"""
+    _library_variables(die_order, type_refs, static_member_decls) -> Vector{Dict}
+
+Every external variable the dump defines, as the loader binds it: `symbol`
+(the DIE's `DW_AT_linkage_name`, else its declaration's, else its DWARF
+name, which is a C variable's symbol), `name`, `type` (a DIE offset),
+`scope` (`_variable_scope`: `""`, `"cfg"`, `"geo::Vec3"`), `accessibility`
+and `decl_file_path`. A definition that names its declaration through
+`DW_AT_specification` takes the name, type, scope and access from it: a
+static data member is declared in its class (a `DW_TAG_variable` there in
+DWARF 5, a `DW_TAG_member` with `DW_AT_external` in DWARF 4,
+`static_member_decls`) and defined at namespace or unit level with no name
+of its own. An undeclared access is the record's default: private in a
+`class`, public in a `struct` or `union`.
+
+Also every static member declared with a value and never defined
+(`constexpr`, an in-class initialised `static const`), marked `constant`
+with its `record`'s name and no `symbol`: there is nothing to bind, only
+something to count. Left out: a variable in a function, one whose scope
+chain is unknown, and the standard library's own (`_is_stdlib_internal` on
+the symbol, the screen exported functions pass).
+"""
+function _library_variables(die_order, type_refs::AbstractDict,
+                            static_member_decls::AbstractDict)::Vector{Dict{String,Any}}
+    out = Dict{String,Any}[]
+    defined = Set{String}()          # declarations some definition completes
+    declared = String[]              # declaration DIEs, in dump order
+    access_of(die) = something(get(die, "accessibility", nothing),
+                               get(die, "parent_tag", nothing) == "DW_TAG_class_type" ? "private" : "public")
+    for offset in die_order
+        info = type_refs[offset]
+        (isa(info, Dict) && get(info, "kind", nothing) == "variable") || continue
+        if get(info, "declaration", false) == true
+            push!(declared, offset)
+            continue
+        end
+        spec = get(info, "specification", nothing)
+        decl = spec === nothing ? nothing : get(static_member_decls, spec, get(type_refs, spec, nothing))
+        (decl isa AbstractDict && get(decl, "kind", nothing) == "variable") || (decl = nothing)
+        spec === nothing || push!(defined, spec)
+        at = decl === nothing ? info : decl
+        (get(info, "external", false) == true || get(at, "external", false) == true) || continue
+        name = something(get(info, "name", nothing), get(at, "name", nothing), Some(nothing))
+        type = something(get(info, "type", nothing), get(at, "type", nothing), Some(nothing))
+        (name === nothing || type === nothing) && continue
+        symbol = String(something(get(info, "linkage", nothing), get(at, "linkage", nothing), name))
+        _is_stdlib_internal(symbol, "") && continue
+        scope = _variable_scope(at, type_refs)
+        scope === nothing && continue
+        push!(out, Dict{String,Any}("symbol" => symbol, "name" => String(name), "type" => type,
+                                    "scope" => scope, "accessibility" => access_of(at),
+                                    "decl_file_path" => String(get(info, "decl_file_path", ""))))
+    end
+    # A member another unit defines out of line is no constant here either.
+    qualified = Set{String}(isempty(v["scope"]) ? v["name"] : v["scope"] * "::" * v["name"] for v in out)
+    declarations = Any[(o, type_refs[o]) for o in declared]
+    append!(declarations, sort!(collect(static_member_decls); by = first))
+    for (offset, die) in declarations
+        (offset in defined || get(die, "const_value", false) != true ||
+         get(die, "external", false) != true || !(get(die, "parent_tag", nothing) in _RECORD_TAGS)) && continue
+        name = get(die, "name", nothing)
+        record = get(get(type_refs, get(die, "parent", ""), Dict()), "name", nothing)
+        scope = _variable_scope(die, type_refs)
+        (name === nothing || get(die, "type", nothing) === nothing || record === nothing || scope === nothing) && continue
+        (isempty(scope) ? String(name) : scope * "::" * String(name)) in qualified && continue
+        push!(out, Dict{String,Any}("symbol" => nothing, "name" => String(name), "type" => die["type"],
+                                    "scope" => scope, "accessibility" => access_of(die),
+                                    "decl_file_path" => "", "constant" => true, "record" => String(record)))
+    end
+    return out
 end
 
 """
@@ -10783,6 +11193,17 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # is where those already were, so that only narrows.
     candidates = config.wrap.language == :c ? Set{String}() :
                  _scan_noexcept_functions(source_files, get_include_dirs(config))
+    # The pure virtual member functions: no symbol defines one, so each gets
+    # its row here, from its declaration (`_vtable_only_plan`). In front of
+    # the symbols' rows, so where one Julia signature stands for a pure
+    # virtual and a defined function, the defined one is still the one kept.
+    # And the records such a function leaves abstract (`pure_virtuals`).
+    vplan = Dict{String,Any}("bound" => Any[], "skipped" => Any[])
+    if config.wrap.language == :cpp
+        _mark_abstract_records!(record_abi, struct_defs)
+        vplan = _vtable_only_plan(struct_defs, record_abi, symbols, dwarf_return_types)
+        prepend!(functions, _vtable_only_function_rows(vplan, dwarf_return_types))
+    end
     _apply_default_argument_identity!(functions, bound_defaults)
     _mark_noexcept!(functions, candidates, nounwind)
     _mark_byval_params!(functions, byval)
@@ -10877,6 +11298,11 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         end
     end
 
+    # A constant (a static member with a value and no storage) has nothing to
+    # bind: it is named for the wrap report, never given an accessor.
+    global_constants = sort!([k for (k, g) in global_vars if get(g, "constant", false) == true])
+    foreach(k -> delete!(global_vars, k), global_constants)
+
     metadata = Dict{String,Any}(
         "timestamp" => string(now()),
         "project" => config.project.name,
@@ -10892,6 +11318,7 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         "symbols" => symbols,
         "functions" => functions,
         "globals" => global_vars,  # NEW: Global variables
+        "global_constants" => global_constants,
         "function_count" => length(functions),
 
         # Type mappings
@@ -10909,6 +11336,9 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
         # ...and the calls that leave default arguments out
         # (`_default_argument_plan`): `bound` rows name each function's symbol.
         "default_arguments" => dargs,
+        # The pure virtual member functions: `bound` rows have a `vtable_only`
+        # function row each, `skipped` rows a reason (`_vtable_only_plan`).
+        "vtable_methods" => vplan,
         # Function-pointer c_types list their parameters (`function_ptr(R; P1, P2)*`).
         # Older metadata spells every one `function_ptr(R)*`, so the generators
         # build a callback's `@cfunction` example from it only when this is set.
@@ -11112,9 +11542,70 @@ function _find_toplevel_paren(s::String)::Int
     return 0
 end
 
+# ── Operator names in demangled text (2026-11-18) ────────────────────────────
+# Every overloadable operator as the GNU demangler spells it after `operator`,
+# longest first so `<<=` is never read as `<` and `->*` never as `-`.
+const _OPERATOR_SYMBOL_TOKENS = sort!(String[
+    "+", "-", "*", "/", "%", "^", "&", "|", "~", "!", "=", "<", ">", ",",
+    "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=", "<<", ">>", "<<=", ">>=",
+    "==", "!=", "<=", ">=", "<=>", "&&", "||", "++", "--", "->", "->*", "()", "[]",
+]; by = length, rev = true)
+# The operators spelled as words, after a space: `operator new[]`.
+const _OPERATOR_WORD_TOKENS = ["new[]", "delete[]", "new", "delete", "co_await"]
+
+_is_ident_char(c::Char) = isletter(c) || isdigit(c) || c == '_' || c == '$'
+
+"""
+    _operator_token_at(s, i) -> Union{Nothing,Tuple{String,Int}}
+
+When the keyword `operator` starts at byte `i` of the demangled spelling `s`,
+as a whole word, the operator it names and the byte index of that token's last
+character; otherwise `nothing`. The token is one of `_OPERATOR_SYMBOL_TOKENS`,
+one of `_OPERATOR_WORD_TOKENS`, `"\\"\\""` for a literal operator (its suffix,
+`_km` in `operator"" _km`, follows and is not part of the token), or `""` with
+the keyword's own last byte: a conversion operator (`operator bool`, whose type
+follows), or `operator` with nothing after it, which is how the build spells
+every `operator()` (cut at its paren, `_param_list_paren`).
+
+A scan that tracks `<>` depth reads the `<` of `operator<` as a template
+bracket that never closes, so every such scan asks this first and steps over
+the token. GNU writes a space between an operator ending in `<` and its own
+template arguments (`operator< <int>`), which is what makes the longest match
+sound.
+"""
+function _operator_token_at(s::AbstractString, i::Int)::Union{Nothing,Tuple{String,Int}}
+    ncodeunits(s) - i + 1 >= 8 || return nothing
+    all(k -> codeunit(s, i + k - 1) == codeunit("operator", k), 1:8) || return nothing
+    i > firstindex(s) && _is_ident_char(s[prevind(s, i)]) && return nothing
+    kw_end = i + 7
+    j = nextind(s, kw_end)
+    j > lastindex(s) && return ("", kw_end)
+    _is_ident_char(s[j]) && return nothing
+    rest = SubString(s, j)
+    for t in _OPERATOR_SYMBOL_TOKENS
+        startswith(rest, t) && return (t, j + ncodeunits(t) - 1)
+    end
+    startswith(rest, "\"\"") && return ("\"\"", j + 1)
+    if s[j] == ' '
+        k = j
+        while k <= lastindex(s) && s[k] == ' '
+            k = nextind(s, k)
+        end
+        after = SubString(s, k)
+        for w in _OPERATOR_WORD_TOKENS
+            startswith(after, w) || continue
+            e = k + ncodeunits(w)
+            (e > lastindex(s) || !_is_ident_char(s[e])) && return (w, e - 1)
+        end
+    end
+    return ("", kw_end)
+end
+
 # First '(' at or after byte index `from` that is outside `<>` and `{}`. Angle
-# depth is unclamped, exactly as in `_find_toplevel_paren`, so `operator<` hides
-# every later '(' here too. Braces are what `{lambda(int)#1}` needs.
+# depth is unclamped, exactly as in `_find_toplevel_paren`. An operator's own
+# token is stepped over (`_operator_token_at`), so `operator<` no longer hides
+# every later '('; `operator()`'s paren is not, and is the one returned.
+# Braces are what `{lambda(int)#1}` needs.
 function _next_toplevel_paren(s::String, from::Int)::Int
     angle = 0
     brace = 0
@@ -11122,6 +11613,10 @@ function _next_toplevel_paren(s::String, from::Int)::Int
     n = lastindex(s)
     while i <= n
         c = s[i]
+        if c == 'o' && (t = _operator_token_at(s, i)) !== nothing && t[1] != "()"
+            i = nextind(s, t[2])
+            continue
+        end
         if c == '<'
             angle += 1
         elseif c == '>'
@@ -11187,9 +11682,13 @@ there is the group after it. The name still cuts at `operator(`, which is the
 spelling every `operator()` already has (name `"operator"`).
 
 Every other shape gets the first candidate back unchanged: a group followed by
-anything else, no later `(`, unbalanced parens, and `operator<`'s open `<`
-(0, as before). The first candidate is `_find_toplevel_paren`'s answer, except
-that a `(` inside `{…}` does not count. Only a name with a `{…}` scope before
+anything else, no later `(`, unbalanced parens. The first candidate is
+`_find_toplevel_paren`'s answer, except that a `(` inside `{…}` does not count,
+and an operator's token is stepped over (`_operator_token_at`): until
+2026-11-18 the open `<` of `operator<`, `<<`, `<=`, `<<=` and the `>` of
+`->`, `->*` hid the parameter list, so the name came out as
+`operator<(geo::Vec3 const&) const` and the Julia name was made from the
+parameters. Only a name with a `{…}` scope before
 any paren can tell the two apart (a namespace-scope lambda,
 `f::{lambda()#1}::operator()() const`). Hub names depend on that answer.
 """
@@ -11245,19 +11744,32 @@ last space outside `<>`/`()`/`{}`, which is enough even when it is itself qualif
 (`std::enable_if<std::is_integral<unsigned int>::value, bool>::type`), or is a
 `decltype (…)`. `{}` is for `{unnamed type#1}`.
 
-A **conversion operator** is the only C++ name that legitimately contains a
-top-level space (`operator bool`, `operator void (*)(…)`, `operator new`), and
-cutting at its space would eat the name. Those bail out unchanged, so the result
-is the historical behaviour rather than a new wrong answer — pugixml has 7.
+An **operator** is the only C++ name that legitimately contains a top-level
+space (`operator bool`, `operator void (*)(…)`, `operator new`, `operator< <int>`),
+and cutting at its space would eat the name. So when the name is an operator
+(`_own_operator_keyword`), only a space before its keyword can end a return
+type: `bool geo::V::operator< <int>` → `geo::V::operator< <int>`. Until
+2026-11-18 any prefix containing `operator` came back whole, and an operator
+template's class was `bool geo::V`, which no receiver gate recognises. A
+prefix holding `operator` in no operator position (`my_operator`, or inside
+template arguments only) still comes back whole, as it always has.
 """
 function _strip_return_type(prefix::AbstractString)::String
-    occursin("operator", prefix) && return String(prefix)
+    n = lastindex(prefix)
+    if occursin("operator", prefix)
+        k = _own_operator_keyword(prefix)
+        k == 0 && return String(prefix)
+        n = prevind(prefix, k)
+    end
     depth = 0
     cut = 0
     i = firstindex(prefix)
-    n = lastindex(prefix)
     while i <= n
         c = prefix[i]
+        if c == 'o' && (t = _operator_token_at(prefix, i)) !== nothing
+            i = nextind(prefix, t[2])
+            continue
+        end
         if c == '<' || c == '(' || c == '{'
             depth += 1
         elseif c == '>' || c == ')' || c == '}'
@@ -11269,6 +11781,38 @@ function _strip_return_type(prefix::AbstractString)::String
     end
     cut == 0 && return String(prefix)
     return String(strip(prefix[nextind(prefix, cut):end]))
+end
+
+"""
+    _own_operator_keyword(prefix) -> Int
+
+The byte index of the last `operator` keyword outside `<>`/`()`/`{}` in a
+demangled function-name prefix, 0 if there is none. In a prefix (the name cut
+before its own parameter list) that is the function's own name: no scope
+before it can be an operator except an enclosing function's, which
+`_qualified_name_parts` strips separately. Operator tokens are stepped over
+(`_operator_token_at`), so `<` in `operator<` does not open a bracket.
+"""
+function _own_operator_keyword(prefix::AbstractString)::Int
+    depth = 0
+    found = 0
+    i = firstindex(prefix)
+    n = lastindex(prefix)
+    while i <= n
+        c = prefix[i]
+        if c == 'o' && (t = _operator_token_at(prefix, i)) !== nothing
+            depth == 0 && (found = i)
+            i = nextind(prefix, t[2])
+            continue
+        end
+        if c == '<' || c == '(' || c == '{'
+            depth += 1
+        elseif c == '>' || c == ')' || c == '}'
+            depth = max(0, depth - 1)
+        end
+        i = nextind(prefix, i)
+    end
+    return found
 end
 
 """
@@ -11322,6 +11866,11 @@ function _qualified_name_parts(demangled::AbstractString)::Vector{String}
     n = lastindex(prefix)
     while i <= n
         c = prefix[i]
+        # An operator's token is not a bracket (`A::operator<(int) const::{lambda()#1}`).
+        if c == 'o' && (t = _operator_token_at(prefix, i)) !== nothing
+            i = nextind(prefix, t[2])
+            continue
+        end
         if c == '<' || c == '(' || c == '{'
             depth += 1
         elseif c == '>' || c == ')' || c == '}'
@@ -11579,7 +12128,7 @@ const _CPP_TO_JULIA_TYPE_MAP = Dict{String,String}(
     "signed" => "Cint",
     "signed int" => "Cint",
     "unsigned" => "Cuint",
-    "signed char" => "Cchar",
+    "signed char" => "Int8",
     "short int" => "Cshort",
     "signed short" => "Cshort",
     "signed short int" => "Cshort",

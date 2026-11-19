@@ -509,10 +509,31 @@ function _pointer_arg(::Type{P}, x::_MemoryArray) where {P}
     return PointerArg(Ptr{Cvoid}(Base.unsafe_convert(Ptr{E}, cx)), cx)
 end
 
+"""
+    cstring_arg(x)
+
+What a `ccall` site passes for a parameter bound to a pointer to plain `char`
+(`Wrapper._points_to_plain_char`), whose ccall type is a byte pointer. An
+`AbstractString` gets Julia's `Cstring` semantics, as `pointer_arg(Cstring, x)`
+gives it on Tier 2: a `SubString` (or any string that is not a `String`) is
+copied, which NUL-terminates it, and an embedded NUL is an `ArgumentError`. The
+`String` returned is what `ccall` converts to the byte pointer, and roots.
+A `Cstring` passes as its pointer. Anything else (a `Ptr`, `C_NULL`, a `Ref`,
+a byte vector, a `Symbol`) is returned as it came, for `ccall` to convert as
+it always did.
+"""
+cstring_arg(x) = x
+function cstring_arg(x::AbstractString)
+    cx = Base.cconvert(Cstring, x)
+    GC.@preserve cx Base.unsafe_convert(Cstring, cx)   # refuses an embedded NUL
+    return cx
+end
+cstring_arg(x::Cstring) = pointer(x)
+
 function _pointer_arg(::Type{P}, x::AbstractString) where {P}
     if P === Cstring
-        cx = Base.cconvert(Cstring, x)
-        return PointerArg(Ptr{Cvoid}(pointer(Base.unsafe_convert(Cstring, cx))), cx)
+        cx = cstring_arg(x)
+        return PointerArg(Ptr{Cvoid}(pointer(cx)), cx)
     elseif P === Ptr{UInt8} || P === Ptr{Int8}
         cx = Base.cconvert(P, x)
         return PointerArg(Ptr{Cvoid}(Base.unsafe_convert(P, cx)), cx)
@@ -1019,7 +1040,8 @@ end
 
 The mangled symbols the thunk module for this library will call: the
 functions the manifest lists (every function in the metadata when there is no
-manifest), the STL method table's members, and the constructors and
+manifest) less the pure virtual ones, whose thunks call through the vtable,
+the STL method table's members, and the constructors and
 destructors of the temporaries those functions' by-value class parameters
 need (`JLCSIRGenerator.lifetime_callees`), which the module names whether or
 not the manifest lists them.
@@ -1033,6 +1055,13 @@ function _module_callees(metadata, needed_symbols)::Set{String}
             m = String(get(f, "mangled", ""))
             isempty(m) || push!(out, m)
         end
+    end
+    # A pure virtual member function's thunk calls through the vtable and
+    # names no symbol (`Compiler._is_vtable_only`): there is nothing to
+    # resolve, and looked up, its name would be reported unresolved and its
+    # thunk left out.
+    for f in get(metadata, "functions", Any[])
+        Compiler._is_vtable_only(f) && delete!(out, String(get(f, "mangled", "")))
     end
     for (_, methods) in get(metadata, "stl_methods", Dict{String,Any}())
         for m in methods

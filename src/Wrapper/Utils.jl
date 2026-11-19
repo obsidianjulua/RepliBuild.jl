@@ -26,6 +26,8 @@ import .._glob_to_regex, .._glob_matcher   # package level: the Builder asks the
 # question there — see Builder/Compiler.jl's _pe_exported_names.
 import ..Compiler: _pe_exported_names, _nm_dynamic_names, _runtime_defined_names,
                    _pe_crt_dll, _link_dir_dlls, _canon_path
+# The operator-aware reading of a demangled name (`_operator_spelling`).
+import ..Compiler: _operator_token_at, _qualified_name_parts, _demangle
 const _INTERNAL_TYPE_BLOCKLIST = INTERNAL_TYPE_BLOCKLIST
 
 # Julia types a foreign signature may name without the generator declaring them.
@@ -169,6 +171,13 @@ consumers call these names. What is new is that the function is total:
 - **A deleting destructor is `delete_`, not `destroy_`** (2026-11-14): `~` is
   spelled by the symbol's variant (`_is_deleting_destructor`), since D0 frees
   the object and D1/D2 do not. The curated list is otherwise frozen.
+- **Every operator's name is a function of the operator alone** (2026-11-18):
+  one whose curated spelling was shared or made from its parameter list
+  (`<`, `>`, `<=`, `>=`, shifts, `->`, `->*`, `()`, `[]`, `,`, `new[]`,
+  `delete[]`) is spelled with its word (`_OPERATOR_WORDS`, decided by the
+  symbol: `_operator_spelling`); every other keeps its curated name.
+  `operator()`, `operator[]` and `operator,` also keep their old shared
+  `Class_operator` (`_operator_legacy_aliases`).
 
 Not injective in general, on purpose. C++ overloads share one name, and Julia
 dispatches on argument types. The `_+` collapse, the trailing-`_` rstrip and
@@ -179,7 +188,49 @@ reported by `_dedup_method_chunks`. Anything keyed per symbol uses `mangled`
 """
 function _julia_function_name(raw::AbstractString, mangled::AbstractString = "";
                               rename::Bool = true)::String
-    n = String(raw)
+    # An operator whose curated spelling is not a function of the operator
+    # alone gets its word (`_OPERATOR_WORDS`); every other name, operators
+    # included, goes through the curated pass unchanged.
+    op = _operator_spelling(String(raw), mangled)
+    legacy = nothing
+    n = if op === nothing
+        _curated_function_name(String(raw), mangled)
+    else
+        (respelled, token) = op
+        token in _OPERATOR_LEGACY_ALIASED && (legacy = _curated_function_name(String(raw), mangled))
+        _curated_function_name(respelled, mangled)
+    end
+    # `[wrap.rename]`, the one hand-chosen name, applied here so the function
+    # loop, the overload prediction, both varargs paths and the proxy and
+    # deleter references all see it. Off (`rename = false`) only for a name
+    # that is not a binding of the symbol: the proxy's short method name. A
+    # key written against an operator's old shared name (`Vec3_operator`)
+    # still matches it.
+    rt = _RENAMES[]
+    if rename && rt !== nothing
+        chosen = _apply_rename!(rt, n, mangled; legacy = legacy)
+        chosen === nothing || return chosen
+    end
+    # The name screen (NameScreen.jl), last: a name Julia or the wrapper's own
+    # text already uses gets its alternative. A chosen name above wins, and is
+    # keyed by the name as it is here, before the screen (`String`).
+    src = isempty(mangled) ? raw : mangled
+    n = _screened_function_name(n, src)
+    rename && rt !== nothing &&
+        push!(get!(() -> Set{String}(), rt.derived, n), isempty(mangled) ? n : String(mangled))
+    if rename && legacy !== nothing
+        legacy = _screened_function_name(legacy, src)
+        legacy == n || (_OPERATOR_LEGACY[n] = legacy)
+        rt === nothing ||
+            push!(get!(() -> Set{String}(), rt.derived, legacy), isempty(mangled) ? legacy : String(mangled))
+    end
+    return n
+end
+
+# The curated pass: the replace-list, the catch-all and the fallbacks
+# `_julia_function_name` documents, before `[wrap.rename]` and the screen.
+function _curated_function_name(raw::String, mangled::AbstractString)::String
+    n = raw
     # A destructor. The deleting variant (Itanium D0) is `delete_`: it runs
     # `~X()` AND the class's `operator delete`, so a caller who frees the
     # storage after it double-frees. Named `destroy_` like D1 and D2, a class
@@ -224,22 +275,160 @@ function _julia_function_name(raw::AbstractString, mangled::AbstractString = "";
     end
     Base.is_id_start_char(first(n)) || (n = "_" * n)
     n in _JULIA_RESERVED_WORDS && (n *= "_")
-    # `[wrap.rename]`, the one hand-chosen name, applied here so the function
-    # loop, the overload prediction, both varargs paths and the proxy and
-    # deleter references all see it. Off (`rename = false`) only for a name
-    # that is not a binding of the symbol: the proxy's short method name.
-    rt = _RENAMES[]
-    if rename && rt !== nothing
-        chosen = _apply_rename!(rt, n, mangled)
-        chosen === nothing || return chosen
-    end
-    # The name screen (NameScreen.jl), last: a name Julia or the wrapper's own
-    # text already uses gets its alternative. A chosen name above wins, and is
-    # keyed by the name as it is here, before the screen (`String`).
-    n = _screened_function_name(n, isempty(mangled) ? raw : mangled)
-    rename && rt !== nothing &&
-        push!(get!(() -> Set{String}(), rt.derived, n), isempty(mangled) ? n : String(mangled))
     return n
+end
+
+# ── Operators (2026-11-18) ──────────────────────────────────────────────────
+
+"""
+    _OPERATOR_WORDS
+
+The word an operator's Julia name takes after `operator`, for each operator
+whose curated spelling was not a function of the operator alone. The curated
+list gives `<` and `>` as `_`, and drops `(`, `)`, `[`, `]` and `,`, so before
+2026-11-18 `operator()`, `operator[]` and `operator,` were all `Class_operator`,
+`<=`/`>=` and `<<=`/`>>=` came out alike, `->` was `operatorminus` like unary
+`-`, `new[]` was `operator_new` like `new`, and every operator with an open
+`<` or a `>` was named from its parameter list (the build read the `<` as a
+template bracket; `_param_list_paren`). Words follow the curated ones, one per
+character (`+` plus, `=` assign, so `<=` is `lessassign`). Every operator not
+listed keeps its curated name exactly (`operatorplus`, `operatorassignassign`,
+`operator!assign`, `operatordestroy` for `~`, `operator_assign` for `<=>`,
+`operator_new`, `operator_co_await`, a literal's `operator_km`, a conversion's
+`operator_bool`): each was already the operator's alone, and unique.
+"""
+const _OPERATOR_WORDS = Dict{String,String}(
+    "<" => "less", ">" => "greater", "<=" => "lessassign", ">=" => "greaterassign",
+    "<<" => "lessless", ">>" => "greatergreater",
+    "<<=" => "lesslessassign", ">>=" => "greatergreaterassign",
+    "->" => "minusgreater", "->*" => "minusgreatermul",
+    "()" => "call", "[]" => "index", "," => "comma",
+    "new[]" => "_new_array", "delete[]" => "_delete_array",
+)
+
+# The operators whose old shared name (`Class_operator`) stays bound, beside the
+# new one, to exactly the methods it had (`_operator_legacy_aliases`).
+const _OPERATOR_LEGACY_ALIASED = ("()", "[]", ",")
+
+# New name => old shared name, for each such operator the derivation named in
+# the generator run in progress; read and emptied by `_operator_legacy_aliases`.
+const _OPERATOR_LEGACY = Dict{String,String}()
+
+"""
+    _operator_spelling(raw, mangled) -> Union{Nothing,Tuple{String,String}}
+
+When the function is an operator listed in `_OPERATOR_WORDS`, `raw` with the
+operator spelled as its word, and the operator; otherwise `nothing`, and the
+curated pass names it as it always has.
+
+Which operator it is comes from the symbol, never from `raw`: `raw` is
+`Class_name` joined with `_`, so `Cls_operator` could be `Cls::operator()` or a
+method `Cls::foo_operator` of a class `Cls_foo`, and old metadata spells
+`operator<` with its parameter list. The symbol is demangled
+(`Compiler._demangle`) and its own name read by `_qualified_name_parts` and
+`_operator_token_at`, so template arguments, ABI tags and a return type
+elsewhere in the name cannot confuse it. Without a symbol (the method proxy's
+short name) `raw` is the member's own name and is read directly. A symbol that
+is not Itanium (a C function, which may be named `operator`) is never an
+operator.
+
+The operator is then found in `raw` as its last `operator` followed by that
+token, and anything after the token up to a parameter list (old metadata) is
+dropped; template arguments are kept (`operator< <int>` → `operatorless_int`).
+"""
+function _operator_spelling(raw::String, mangled::AbstractString)::Union{Nothing,Tuple{String,String}}
+    occursin("operator", raw) || return nothing
+    own = if isempty(mangled)
+        raw
+    elseif startswith(mangled, "_Z")
+        dem = _demangle(mangled)
+        dem === nothing && return nothing
+        String(strip(_qualified_name_parts(dem)[end]))
+    else
+        return nothing
+    end
+    t = _operator_token_at(own, firstindex(own))
+    t === nothing && return nothing
+    token = isempty(t[1]) ? (t[2] == lastindex(own) ? "()" : "") : t[1]
+    haskey(_OPERATOR_WORDS, token) || return nothing
+    for r in reverse(findall("operator", raw))
+        after = last(r) + 1
+        tail = after > ncodeunits(raw) ? "" : SubString(raw, after)
+        rest = if token == "()"
+            isempty(tail) ? "" : startswith(tail, "()") ? SubString(tail, 3) : nothing
+        elseif token in _OPERATOR_WORD_TOKENS_JL
+            lt = lstrip(tail, ' ')
+            startswith(lt, token) ? SubString(lt, ncodeunits(token) + 1) : nothing
+        else
+            startswith(tail, token) ? SubString(tail, ncodeunits(token) + 1) : nothing
+        end
+        rest === nothing && continue
+        return (raw[1:prevind(raw, first(r))] * "operator" * _OPERATOR_WORDS[token] *
+                _before_parameter_list(rest), token)
+    end
+    return nothing
+end
+
+const _OPERATOR_WORD_TOKENS_JL = ("new[]", "delete[]")
+
+# `s` up to its first `(` outside `<>`: the template arguments after an
+# operator's token, without the parameter list old metadata carries there.
+function _before_parameter_list(s::AbstractString)::String
+    depth = 0
+    for i in eachindex(s)
+        c = s[i]
+        if c == '<'
+            depth += 1
+        elseif c == '>'
+            depth = max(0, depth - 1)
+        elseif c == '(' && depth == 0
+            return String(SubString(s, 1, prevind(s, i)))
+        end
+    end
+    return String(s)
+end
+
+"""
+    _operator_legacy_aliases(chunks) -> (chunks, names)
+
+`chunks` with, after each chunk that binds an operator `_OPERATOR_LEGACY`
+renamed from its old shared name, a copy binding the old name instead
+(`Vec3_operatorcall` → `Vec3_operator`, a `_ptr` or `_safe` sibling likewise),
+and the names the copies bind, to export. GeneratorCpp runs it just before
+`_dedup_method_chunks`. Since `Class_operator` gets the same chunks in the
+same order as before, the dedup keeps for it exactly the methods it kept
+before 2026-11-18: callers of the old name see no change, and the operators
+are reachable apart under their own names.
+
+A chunk that binds anything else besides is not copied (a copy would define
+that twice). The table is emptied: it belongs to one generator run.
+"""
+function _operator_legacy_aliases(chunks::Vector{String})
+    isempty(_OPERATOR_LEGACY) && return (chunks, String[])
+    table = copy(_OPERATOR_LEGACY)
+    empty!(_OPERATOR_LEGACY)
+    news = sort!(collect(keys(table)); by = k -> (-ncodeunits(k), k))
+    renamer(nm) = Regex("(?<![A-Za-z0-9_!])\\Q" * nm * "\\E(?=_|[^A-Za-z0-9_!]|\$)")
+    out = String[]
+    names = String[]
+    for c in chunks
+        push!(out, c)
+        hits = filter(nm -> occursin(nm, c), news)
+        isempty(hits) && continue
+        defs = _defined_bindings(c)
+        isempty(defs) && continue
+        owner(d) = findfirst(nm -> d == nm || startswith(d, nm * "_"), hits)
+        all(((d, kind, _),) -> kind === :function && owner(d) !== nothing, defs) || continue
+        alias = c
+        for nm in hits
+            alias = replace(alias, renamer(nm) => table[nm])
+        end
+        push!(out, alias)
+        for (d, _, _) in _defined_bindings(alias)
+            d in names || push!(names, d)
+        end
+    end
+    return (out, names)
 end
 
 # ── [wrap.rename] ───────────────────────────────────────────────────────────
@@ -291,6 +480,7 @@ table, and return its result with the table for `_check_renames`. An empty
 table installs nothing and returns `nothing` for it.
 """
 function with_renames(f, table::AbstractDict)
+    empty!(_OPERATOR_LEGACY)      # one generator run's (`_operator_legacy_aliases`)
     isempty(table) && return (f(), nothing)
     rt = _RenameTable(table)
     _RENAMES[] !== nothing && error("RepliBuild: with_renames nested; a wrap runs one generator at a time")
@@ -304,11 +494,13 @@ end
 
 # The chosen name, or `nothing` when no key names this symbol: the caller then
 # records the name it binds (`rt.derived`), which the name screen may still move.
-function _apply_rename!(rt::_RenameTable, derived::String, mangled::AbstractString)::Union{Nothing,String}
+function _apply_rename!(rt::_RenameTable, derived::String, mangled::AbstractString;
+                        legacy::Union{Nothing,String} = nothing)::Union{Nothing,String}
     symbol = isempty(mangled) ? derived : String(mangled)
     chosen = Dict{String,Vector{String}}()      # Julia name => keys that chose it
     for (key, re, value) in rt.entries
-        (occursin(re, derived) || (!isempty(mangled) && occursin(re, mangled))) || continue
+        (occursin(re, derived) || (!isempty(mangled) && occursin(re, mangled)) ||
+         (legacy !== nothing && occursin(re, legacy))) || continue
         rt.hit[key] += 1
         push!(get!(() -> String[], chosen, value), key)
     end
@@ -592,7 +784,12 @@ function _apply_symbol_filter!(metadata::Dict{String,Any}, patterns::Vector{Stri
     gdropped = 0
     if globals isa Dict
         for k in collect(keys(globals))
-            if _matches(k)
+            # The key is the symbol; a C++ global also answers to its
+            # qualified name (`cfg::depth`).
+            g = globals[k]
+            q = g isa AbstractDict && !isempty(String(something(get(g, "scope", ""), ""))) &&
+                get(g, "name", nothing) isa AbstractString ? string(g["scope"], "::", g["name"]) : nothing
+            if _matches(k) || _matches(q)
                 delete!(globals, k)
                 gdropped += 1
             end
@@ -741,7 +938,7 @@ function _surface_type_keys_impl(metadata::Dict{String,Any},
     if globals isa Dict
         for (gname, g) in globals
             g isa Dict || continue
-            if runtime_defined !== nothing && !(string(gname) in runtime_defined)
+            if runtime_defined !== nothing && !(_global_symbol(gname, g) in runtime_defined)
                 continue
             end
             for k in ("julia_type", "c_type", "type"), r in resolve(get(g, k, nothing))
@@ -808,7 +1005,40 @@ function _drop_unresolvable_globals!(metadata::Dict{String,Any},
     globals isa Dict || return 0
     dropped = 0
     for k in collect(keys(globals))
-        if !(string(k) in runtime_defined)
+        if !(_global_symbol(k, globals[k]) in runtime_defined)
+            delete!(globals, k)
+            dropped += 1
+        end
+    end
+    return dropped
+end
+
+"""
+    _global_symbol(key, entry) -> String
+
+The symbol the loader binds for a `globals` entry: its `symbol`
+(`cfg::depth` is `_ZN3cfg5depthE`), else the key, which is the symbol in
+metadata older than the field and the DWARF name of a C global.
+"""
+_global_symbol(key, entry) =
+    (s = entry isa AbstractDict ? get(entry, "symbol", nothing) : nothing; s isa AbstractString ? String(s) : string(key))
+
+"""
+    _drop_nonpublic_globals!(metadata) -> Int
+
+Remove every private or protected static data member from `globals` and
+return how many: the class keeps it to itself, and an accessor would hand it
+out. The parser records the access as written or, undeclared, as the
+record's default (`Compiler._library_variables`); an entry without
+`accessibility` is public, as every global of older metadata is.
+"""
+function _drop_nonpublic_globals!(metadata::Dict{String,Any})::Int
+    globals = get(metadata, "globals", nothing)
+    globals isa Dict || return 0
+    dropped = 0
+    for k in collect(keys(globals))
+        g = globals[k]
+        if g isa AbstractDict && get(g, "accessibility", "public") in ("private", "protected")
             delete!(globals, k)
             dropped += 1
         end
@@ -2026,6 +2256,70 @@ function _cstring_policy_lines(free_sym::String; indent::String="    ")::String
 end
 
 """
+    _points_to_plain_char(c_type) -> Bool
+
+Whether the C spelling `c_type` is a pointer to plain `char`, cv-qualifiers
+off on both levels: the one type C writes text with. Only such a pointer is a
+C string, in a parameter (every `ccall` path converts an `AbstractString`
+there with `JITManager.cstring_arg`, Tier 2 tells `pointer_arg` `Cstring`) and
+in a return (`_signed_char_returns!`). `signed char*`, `unsigned char*`,
+`int8_t*`, `char**` and a `char&` are data. A spelling this cannot read (a
+typedef of `char*`) answers `false`, so it keeps what it had before.
+"""
+function _points_to_plain_char(c_type::AbstractString)::Bool
+    FG = JLCSIRGenerator.FunctionGen
+    t = FG._strip_top_cv(c_type)
+    endswith(t, "*") || return false
+    return FG._strip_top_cv(chop(t)) == "char"
+end
+
+"""
+    _cstring_param_arg(name, c_type, ccall_type) -> Union{String,Nothing}
+
+The expression a `ccall` path binds a parameter's argument to before the call,
+or `nothing` for the name itself: `RepliBuild.JITManager.cstring_arg(name)`
+for a pointer to plain `char` (`_points_to_plain_char`) whose ccall type is a
+byte pointer, so a string there has Julia's `Cstring` semantics (a `SubString`
+copied and NUL-terminated, an embedded NUL refused) while a `Ptr`, a `Ref`, a
+byte vector pass as before. The ccall type stays the byte pointer: as `Cstring`
+it would refuse those. GeneratorC, GeneratorCpp's `ccall` path and the
+`[wrap.varargs]` fixed parameters all ask this.
+"""
+function _cstring_param_arg(name::AbstractString, c_type::AbstractString,
+                            ccall_type::AbstractString)::Union{String,Nothing}
+    ccall_type in ("Ptr{UInt8}", "Ptr{Int8}", "Ptr{Cchar}", "Cstring") || return nothing
+    _points_to_plain_char(c_type) || return nothing
+    return "RepliBuild.JITManager.cstring_arg($name)"
+end
+
+"""
+    _signed_char_returns!(metadata) -> Int
+
+Give a function that returns a pointer to `signed char` the return type
+`Ptr{Int8}`: bytes, not text. The build has mapped it so since 2026-11-18
+(`Compiler.dwarf_type_to_julia`); metadata written before says `Cstring`, and
+then the wrapper copied `{-1, -2, 0}` into the `String` `"\\xff\\xfe"`. The
+return's `c_type` is what tells the two apart (`const signed char*` against
+`const char*`), and only a spelling that names `signed char` is rewritten, so
+a `char*` return, or one spelled through a typedef, keeps the Cstring policy.
+Run before either generator, so every tier sees one answer. Returns the count.
+"""
+function _signed_char_returns!(metadata::AbstractDict)::Int
+    FG = JLCSIRGenerator.FunctionGen
+    n = 0
+    for f in get(metadata, "functions", Any[])
+        f isa AbstractDict || continue
+        rt = get(f, "return_type", nothing)
+        rt isa AbstractDict && get(rt, "julia_type", "") == "Cstring" || continue
+        t = FG._strip_top_cv(String(get(rt, "c_type", "")))
+        (endswith(t, "*") && FG._strip_top_cv(chop(t)) == "signed char") || continue
+        rt["julia_type"] = "Ptr{Int8}"
+        n += 1
+    end
+    return n
+end
+
+"""
     _cstring_wrapper_pair(julia_name, param_sig, raw_bind, raw_return, free_sym;
                           doc_comment="") -> String
 
@@ -3043,7 +3337,121 @@ enumerator. GeneratorC and the C arm of the varargs path read this one list.
 """
 const _C_INTEGER_PARAM_CTYPES = ("Cint", "Cuint", "Clong", "Culong", "Cshort", "Cushort",
                                  "Clonglong", "Culonglong", "Csize_t", "Cssize_t",
-                                 "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64")
+                                 "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64",
+                                 "Cchar")
+
+"""
+    _char_param_ctype(julia_type, c_type) -> String
+
+The ccall type of a parameter taken BY VALUE as a character type, from its C
+spelling: plain `char` is `Cchar`, the host's `char` (`Int8` on x86-64,
+`UInt8` on AArch64), and `signed char` is `Int8` on every host. The metadata
+spells a plain `char` parameter `UInt8` (the parameter map's answer, which
+`char*` positions rely on) and `signed char` `Cchar`, and `ccall` extends an
+`i8` by the Julia type's sign: a `UInt8` is passed `zeroext` where clang's
+callee reads a `char` `signext` on x86-64. Any other parameter keeps
+`julia_type`, a pointer to `char` included. Both generators' parameter step
+(`_ccall_param_type`) asks this, so a re-wrap fixes old metadata.
+"""
+function _char_param_ctype(julia_type::AbstractString, c_type::AbstractString)::String
+    ct = strip(replace(String(c_type), r"\b(?:const|volatile)\b" => ""))
+    ct == "char" && julia_type in ("UInt8", "Int8", "Cchar") && return "Cchar"
+    ct == "signed char" && julia_type in ("Int8", "Cchar") && return "Int8"
+    return String(julia_type)
+end
+
+"""
+    _integer_arg_conversion(ctype, name) -> String
+
+The expression a wrapper body converts an integer argument `name` to its C
+type `ctype` with. `Cint(x)` for every integer but plain `char`: C converts
+any integer to a `char` implicitly, and `char` is signed on one host and
+unsigned on another, so `0x41`, `65` and `Cchar(65)` are one argument, and so
+are `250` and `Cchar(-6)` on a signed-`char` host. Any value that is a valid
+`char` or a valid byte (-128..255) is taken as its byte; anything else is an
+`InexactError`. An enum passes through `Integer`, as `Cint(e)` does. The C
+generator, the C arm of the varargs path, and both C++ bodies (`ccall` and
+Tier 2) convert through this.
+"""
+_integer_arg_conversion(ctype::AbstractString, name::AbstractString) =
+    ctype == "Cchar" ?
+        "(let v = Base.Integer($name); -128 <= v <= 255 || Base.throw(Base.InexactError(:Cchar, Cchar, $name)); v % Cchar end)" :
+        "$ctype($name)"
+
+"""
+    _open_enum_type_names(chunks) -> Set{String}
+
+The enum types of an enum section (`_EnumChunk`s) that are open enums
+(`_open_enum_chunk`), an alias of one included: every pending enum but a
+bitmask, which is an integer alias (`_is_bitflag_enum`, decided on the same
+values the renderer decides on).
+"""
+function _open_enum_type_names(chunks)::Set{String}
+    open = Set{String}(c.name for c in chunks
+                       if c isa _PendingEnum && !_is_bitflag_enum(last.(c.members)))
+    for c in chunks
+        c isa _PendingEnumAlias && c.canonical in open && push!(open, c.name)
+    end
+    return open
+end
+
+"""
+    _bitfield_signed_type(member, dwarf_structs) -> Union{Nothing,String}
+
+The Julia type a SIGNED bitfield is read as, or `nothing` for one read as
+unsigned. A bitfield's value is its declared type's: `int c:7` holds
+-64..63, `unsigned d:17` 0..131071. The type is the member's declared one
+(`Cint`, `Int64`), plain `char` the host's (`Cchar`), and an enum's its
+underlying integer's (`__enum__<name>`'s `julia_type`), which is how the
+compiler reads an enum bitfield. A width the type cannot hold (C++ allows
+`int x:40`) is `nothing`, as are `bool` and every unsigned type.
+"""
+function _bitfield_signed_type(member, dwarf_structs)::Union{Nothing,String}
+    bits = get(member, "bit_size", 0)
+    bits isa Integer || return nothing
+    ct = String(strip(replace(String(get(member, "c_type", "")), r"\b(?:const|volatile)\b" => "")))
+    t = if ct == "char"
+        "Cchar"
+    elseif ct == "signed char"
+        "Int8"
+    else
+        name = replace(ct, r"^enum\s+" => "")
+        key = "__enum__" * name
+        haskey(dwarf_structs, key) || (key = "__enum__" * last(split(name, "::")))
+        haskey(dwarf_structs, key) ? String(get(dwarf_structs[key], "julia_type", "")) :
+                                     String(get(member, "julia_type", ""))
+    end
+    width = get(Dict("Int8" => 8, "Int16" => 16, "Int32" => 32, "Int64" => 64), _concrete_ctype(t), 0)
+    return 1 <= bits <= width ? t : nothing
+end
+
+"""
+    _bitfield_sign_extend(raw, bits, T) -> String
+
+The expression reading a signed bitfield from `raw`, the field's `bits` bits
+as an unsigned integer: shifted to the top of 64 bits and back as `Int64`,
+an arithmetic shift, then narrowed to `T` (which holds it:
+`_bitfield_signed_type`).
+"""
+_bitfield_sign_extend(raw::AbstractString, bits::Integer, T::AbstractString) =
+    "(Base.reinterpret(Int64, Base.UInt64($raw) << $(64 - bits)) >> $(64 - bits)) % $T"
+
+"""
+    _bitfield_signed_store(setter, bits, T) -> String
+
+The first lines of a signed bitfield's setter: a value outside the field's
+range (-2^(bits-1) .. 2^(bits-1)-1) is an `InexactError`, as a conversion
+to a type that narrow would be, and one inside is rebound to its two's
+complement bits, which the setter's unsigned store takes as it takes an
+unsigned field's value.
+"""
+function _bitfield_signed_store(setter::AbstractString, bits::Integer, T::AbstractString)
+    lo = -(Int128(1) << (bits - 1))
+    hi = (Int128(1) << (bits - 1)) - 1
+    mask = (UInt128(1) << bits) - 1
+    return "    ($lo <= v <= $hi) || Base.throw(Base.InexactError(:$setter, $T, v))\n" *
+           "    v = (v % UInt64) & Base.UInt64($mask)\n"
+end
 
 """
     _method_sig_keys(chunk) -> Vector{String}

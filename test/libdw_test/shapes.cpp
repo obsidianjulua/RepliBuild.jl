@@ -15,4 +15,6 @@ Arr<int, 3> g_arr;
 const volatile int g_cv = 4;
 typedef union { int i; float f; } U;
 U g_u;
+struct Iface { virtual ~Iface(); virtual int tag() const = 0; virtual void poke(int n) = 0; };
+Iface::~Iface() {}
 }
