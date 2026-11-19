@@ -142,6 +142,9 @@ _screen_why(why::Symbol, name::AbstractString) =
     why === :base_type    ? "`$name` is a type of Base or Core, and a function of that name would be a method of it in every module" :
     why === :own_use      ? "the wrapper's own text uses `$name`" :
     why === :own_binding  ? "the wrapper itself binds `$name`" :
+    why === :type_constructor ?
+        "the type `$name` defines a method of the same signature itself (a constructor such as its " *
+        "zero-initializer `$name()`), and keeps it" :
                             "the wrapper's own text may use `$name`"
 
 # ── The screen of one wrap ──────────────────────────────────────────────────
@@ -891,11 +894,47 @@ const _NAME_SCREEN_GENERATIONS = 4
 # do not explain: an import, the module, or one more type, constant or global
 # than the record and the enumerator the library gave that name. Methods
 # beside a type are its constructors, and methods beside methods an overload
-# set, as `_assert_no_duplicate_toplevel_names` reads them.
+# set, as `_assert_no_duplicate_toplevel_names` reads them; a method of a
+# signature the type's own constructors define is `_constructor_clashes`'.
 function _own_binding_beside(kinds::Vector{Symbol}, name::String, sc::_NameScreen)::Bool
     (:import in kinds || :module in kinds) && return true
     explained = (name in sc.kept[:type]) + (name in sc.kept[:enumerator])
     return count(k -> k !== :function, kinds) > explained
+end
+
+"""
+    _constructor_clashes(sc, uses, text) -> Set{String}
+
+The functions `sc` kept that stand beside a type of their name and define a
+method the text defines twice: a constructor the wrapper emits for the type
+has that signature. C gives a struct tag a namespace of its own, so
+`struct conf` and the global `conf` (or `struct pool *pool(void)`) are two
+names in C and one in Julia, and the global's accessor `conf()` and the
+struct's zero-initializer `conf()` are one method: included as a file, the
+later replaced the earlier, and a precompiled package refused the overwrite
+(curl's `Curl_ssl`, 2026-11-18; `_assert_no_duplicate_methods`). The type's
+constructor keeps the name, since every record promises `T()`; the function
+moves like any screened name.
+
+Read off the text (`_method_definitions`, the guard's own reading), and only
+for a name the text binds as a type, so a library without the shape pays
+nothing.
+"""
+function _constructor_clashes(sc::_NameScreen, uses::_NameUses, text::AbstractString)::Set{String}
+    out = Set{String}()
+    beside = Set{String}(n for n in sc.kept[:function]
+                         if any(k -> k === :struct || k === :type, get(uses.bound, n, Symbol[])))
+    isempty(beside) && return out
+    seen = Set{String}()
+    for (sig, _) in _method_definitions(text)
+        if sig in seen
+            name = sig[1:prevind(sig, something(findfirst('(', sig), lastindex(sig) + 1))]
+            name in beside && push!(out, name)
+        else
+            push!(seen, sig)
+        end
+    end
+    return out
 end
 
 """
@@ -909,7 +948,9 @@ A candidate the probe moved had to move when the text still references or
 binds the original name: with the library's own binding out of the way, that
 use is the wrapper's. A name kept as the library spells it has to move when
 the text binds it as something else too (`_own_binding_beside`): the module's
-own constant, an import, the module. Decisions only accumulate, so the
+own constant, an import, the module; and a function kept beside a type of its
+name has to move when one of its methods is a constructor the type defines
+already (`_constructor_clashes`). Decisions only accumulate, so the
 generations end.
 """
 function _screen_verdict(sc::_NameScreen, text::AbstractString)::Union{Nothing,_NameScreen}
@@ -928,6 +969,9 @@ function _screen_verdict(sc::_NameScreen, text::AbstractString)::Union{Nothing,_
         kinds = get(uses.bound, name, nothing)
         kinds === nothing && continue
         _own_binding_beside(kinds, name, sc) && (want[(kind, name)] = :own_binding)
+    end
+    for name in _constructor_clashes(sc, uses, text)
+        haskey(want, (:function, name)) || (want[(:function, name)] = :type_constructor)
     end
     moved = Set{Tuple{Symbol,String}}((m.kind, m.from) for m in sc.moves if m.why !== :syntax &&
                                       m.why !== :every_module && m.why !== :base_type)

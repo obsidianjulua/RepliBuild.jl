@@ -3337,9 +3337,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             scope = String(something(get(var_info, "scope", ""), ""))
             bare = String(get(var_info, "name", var_name))
             qualified = isempty(scope) ? bare : scope * "::" * bare
-            safe_name = isempty(scope) ?
-                _screened_function_name(make_cpp_identifier(bare), var_name) :
-                _screened_function_name(make_cpp_identifier(replace(qualified, "::" => "_")), symbol)
+            # The value and the pointer accessor are screened apart, both named
+            # from the library's spelling (GeneratorC's loop says why).
+            (base_name, screen_src) = isempty(scope) ?
+                (make_cpp_identifier(bare), var_name) :
+                (make_cpp_identifier(replace(qualified, "::" => "_")), symbol)
+            safe_name = _screened_function_name(base_name, screen_src)
+            ptr_name = _screened_function_name(base_name * "_ptr", screen_src)
             sym_expr = Base.isidentifier(symbol) ? ":$symbol" : "Symbol($(repr(symbol)))"
 
             # ...and the TYPE too. Only the name was sanitized here, so a global
@@ -3365,16 +3369,16 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             if !all(m -> m.match in holdable, eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", julia_type))
                 push!(func_chunks, """
                 \"""
-                    $(safe_name)_ptr()
+                    $(ptr_name)()
 
                 Get pointer to global variable `$qualified` (no Julia value type: raw pointer only).
                 \"""
-                function $(safe_name)_ptr()::Ptr{Cvoid}
+                function $(ptr_name)()::Ptr{Cvoid}
                     return cglobal(($sym_expr, LIBRARY_PATH))
                 end
 
                 """)
-                push!(exports, "$(safe_name)_ptr")
+                push!(exports, ptr_name)
                 continue
             end
 
@@ -3394,18 +3398,18 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             end
 
             \"""
-                $(safe_name)_ptr()
+                $(ptr_name)()
 
             Get pointer to global variable `$qualified`.
             \"""
-            function $(safe_name)_ptr()::Ptr{$julia_type}
+            function $(ptr_name)()::Ptr{$julia_type}
                 return cglobal(($sym_expr, LIBRARY_PATH), $julia_type)
             end
 
             """)
 
             push!(exports, safe_name)
-            push!(exports, "$(safe_name)_ptr")
+            push!(exports, ptr_name)
         end
         
         push!(func_chunks, "\n")
