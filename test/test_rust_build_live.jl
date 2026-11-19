@@ -241,8 +241,6 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         cfg = RepliBuild.ConfigurationManager.load_config(_RBL_TOML)
         @test occursin("cargo builds", _rbl_error(() -> RepliBuild.Compiler.compile_project(cfg)))
         @test occursin("[rust] project", _rbl_error(() -> RepliBuild.Wrapper.wrap_library(cfg, lib)))
-        msg = _rbl_error(() -> RepliBuild.wrap(_RBL_TOML))
-        @test occursin("not built yet", msg) && occursin("compilation_metadata.json", msg)
     end
 
     @testset "a no_std crate that denies its own warnings, from a dependency" begin

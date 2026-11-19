@@ -402,8 +402,15 @@ include("Builder.jl")
 # IRGen: MLIR bindings, IR generation, JIT execution
 include("IRGen.jl")
 
+# What a generated Rust wrapper calls at run time (thunks, the catching frame).
+include("RustRuntime.jl")
+
 # Wrapper: Julia binding generation
 include("Wrapper.jl")
+
+# The Rust front end's generator: its own file and its own rules (it reads
+# another metadata shape than the C and C++ generators).
+include("Wrapper/Rust/GeneratorRust.jl")
 include("Wrapper/Cpp/STLWrappers.jl")
 
 # ThunkBuilder: bridge between Builder and IRGen (needs Wrapper.is_c_lto_safe)
@@ -906,7 +913,7 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
         # Rust: cargo and rustc compile and link the crate; RepliBuild sets
         # their flags and reads the library, its DWARF and the IR back.
         if config.rust !== nothing
-            return abspath(RustBuild.build_rust_project(config))
+            return abspath(RustBuild.build_rust_project(config; generator = PackageRegistry._generator_fingerprint()))
         end
 
         # Compile the project (C++ → IR → library + metadata)
@@ -1009,13 +1016,10 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
             return GraphMode.wrap_graph_project(config)
         end
 
-        # Rust: the build writes the metadata a wrapper is generated from;
-        # the generator that reads it is not built yet.
+        # Rust: its own generator, from the metadata its build wrote.
         if config.rust !== nothing
-            error("wrap: wrappers for a [rust] project are not built yet. `build` writes " *
-                  joinpath(ConfigurationManager.get_output_path(config), "compilation_metadata.json") *
-                  ", which says how each function of the crate is called; the generator that reads it " *
-                  "is the next piece (docs/updates/RUST_FRONT_END.md).")
+            isempty(headers) || error("wrap: `headers` does not apply to a [rust] project; a crate has none.")
+            return abspath(GeneratorRust.wrap_project(config))
         end
 
         # Find library

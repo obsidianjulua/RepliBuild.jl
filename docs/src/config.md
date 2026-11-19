@@ -176,8 +176,12 @@ apply: flags come from CMake.
 
 Present: the project is a Rust crate, and cargo builds it.
 
-**In progress.** `RepliBuild.build` works on a Rust crate; `RepliBuild.wrap`
-does not yet, so there is no generated Julia module for one today.
+**In progress.** `build`, `wrap` and `use` work on a Rust crate for functions
+that take and return plain data: numbers, `bool`, `char`, strings and slices
+in, and records, tuples, enums and `Option` of those out. A function that
+hands over a value which owns memory (`String`, `Vec`, `Box`) or a trait
+object is in the module as a stub that says so, and is listed in the module's
+`UNSUPPORTED`. A Rust panic arrives as a `RepliBuild.RustRuntime.RustPanic`.
 
 | Key | Default | Meaning |
 |:----|:--------|:--------|

@@ -159,14 +159,47 @@ end
     end
 end
 
-@testset "[rust]: wrap says the generator is not built" begin
+@testset "[rust]: wrap needs the build, and the registry hashes the crate" begin
     mktempdir() do dir
-        toml = rust_project(dir, "[rust]\n")
-        # `wrap` says what exists and what does not, and does not call it a failure of the build.
-        # (The guards inside `compile_project` and `wrap_library` are held by
-        # test_rust_build_live.jl, which has those two compiled anyway.)
+        toml = rust_project(dir, "[rust]\nmanifest = \"crate/Cargo.toml\"\n")
+        # `wrap` is generated from what `build` wrote.
         msg = rust_error(() -> RepliBuild.wrap(toml))
-        @test occursin("not built yet", msg) && occursin("compilation_metadata.json", msg)
+        @test occursin("Library not found", msg) && occursin("RepliBuild.build", msg)
+        @test occursin("does not apply to a [rust] project", rust_error(() -> RepliBuild.wrap(toml; headers = ["x.h"])))
+
+        # What a build of the crate reads is what the registry hashes: every
+        # file of the crate's tree, and nothing RepliBuild or cargo wrote.
+        mkpath(joinpath(dir, "crate", "src")); mkpath(joinpath(dir, "crate", "target", "debug")); mkpath(joinpath(dir, "crate", ".git"))
+        write(joinpath(dir, "crate", "Cargo.toml"), "[package]\nname = \"demo\"\n")
+        write(joinpath(dir, "crate", "src", "lib.rs"), "pub fn f() {}\n")
+        write(joinpath(dir, "crate", "target", "debug", "junk"), "x")
+        write(joinpath(dir, "crate", ".git", "HEAD"), "x")
+        cfg = RCM.load_config(toml)
+        @test RB.source_root(cfg) == replace(joinpath(realpath(dir), "crate"), '\\' => '/') ||
+              RB.source_root(cfg) == replace(joinpath(abspath(dir), "crate"), '\\' => '/')
+        @test [first(p) for p in RB.input_files(cfg)] == ["Cargo.toml", "src/lib.rs"]
+        @test RB.source_identity(cfg) == ""
+        h = RepliBuild.PackageRegistry.hash_config
+        before = h(cfg)
+        write(joinpath(dir, "crate", "target", "debug", "junk"), "y")          # cargo's own output
+        @test h(cfg) == before
+        write(joinpath(dir, "crate", "src", "lib.rs"), "pub fn f() -> i32 { 1 }\n")
+        @test h(cfg) != before
+        # A crate at the project's root: the build and output directories are not its source.
+        root = rust_project(joinpath(dir, "flat"), "[rust]\n")
+        mkpath(joinpath(dir, "flat", "src")); mkpath(joinpath(dir, "flat", "build")); mkpath(joinpath(dir, "flat", "julia"))
+        write(joinpath(dir, "flat", "Cargo.toml"), ""); write(joinpath(dir, "flat", "src", "lib.rs"), "")
+        write(joinpath(dir, "flat", "build", "x"), ""); write(joinpath(dir, "flat", "julia", "y"), "")
+        @test [first(p) for p in RB.input_files(RCM.load_config(root))] == ["Cargo.toml", "replibuild.toml", "src/lib.rs"]
+    end
+    # From a dependency, the pin is part of what the source is.
+    mktempdir() do dir
+        dep(commit) = "[rust]\ndependency = \"up\"\n\n[dependencies.up]\ntype = \"git\"\nurl = \"https://example.invalid/up.git\"\n" *
+                      "tag = \"v1\"\ncommit = \"$commit\"\n"
+        a = RCM.load_config(rust_project(joinpath(dir, "a"), dep("0"^40)))
+        b = RCM.load_config(rust_project(joinpath(dir, "b"), dep("1"^40)))
+        @test occursin("0"^40, RB.source_identity(a)) && RB.source_identity(a) != RB.source_identity(b)
+        @test endswith(RB.source_root(a), ".replibuild_cache/deps/up") && isempty(RB.input_files(a))   # not fetched: no files, no error
     end
 end
 
@@ -185,9 +218,17 @@ end
     @test manifest["dependencies"] == Dict("rb-fix" => Dict("path" => "/p/up/crate"))
     # Its own workspace: a workspace in a directory above does not claim it.
     @test manifest["workspace"] == Dict()
-    # One line makes the crate part of the library, under its CRATE name.
+    # One line makes the crate part of the library, under its CRATE name...
     @test occursin("\nextern crate rb_fix;\n", files["lib.rs"])
-    @test count(l -> !startswith(l, "//") && !isempty(strip(l)), split(files["lib.rs"], '\n')) == 1
+    # ...and the rest is RepliBuild's own: the frame that ends a panic, which
+    # only Rust may do. Nothing else of the crate is named or touched.
+    code = join((l for l in split(files["lib.rs"], '\n') if !startswith(strip(l), "//")), "\n")
+    @test count("rb_fix", code) == 1
+    @test occursin("pub extern \"C\" fn __rb_catch(", code) && occursin("catch_unwind(AssertUnwindSafe(|| thunk(args, ret)))", code)
+    @test occursin("pub extern \"C\" fn __rb_panic_message(buf: *mut u8, cap: usize) -> usize", code)
+    @test count("#[no_mangle]", code) == 2
+    # A panic outside that frame still goes to whatever hook was there before.
+    @test occursin("previous(info)", code)
     feat = TOML.parse(RB.root_files(rc(; features = ["a", "b"], default_features = false), crate)["Cargo.toml"])
     @test feat["dependencies"]["rb-fix"] == Dict("path" => "/p/up/crate", "features" => ["a", "b"], "default-features" => false)
     # The same inputs give the same text: a rewrite that changes nothing must not make cargo rebuild.

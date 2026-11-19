@@ -1409,12 +1409,13 @@ of §15's walk now exists in `src/`.
    function was written with: `flip(Side) -> Side` and `flag(bool) -> bool`
    are one function once optimized, and the library does not say which the
    merged one was. What a wrapper shows for such a function is undecided.
-5. **Steps 1 to 5 of §15's walk are built** (§19). `RepliBuild.build` on a
-   `[rust]` project writes the library and a `compilation_metadata.json`
-   that says, for every function of the crate, how it is called; the dialect
-   has the call form of §13.3 (`jlcs.native_call`, a new op), and
-   `RustThunks` generates and JITs a thunk per function from the metadata.
-   `wrap` is not built: steps 6 and 7.
+5. **Steps 1 to 6 of §15's walk are built, and the first part of 7** (§19,
+   §20). `RepliBuild.build` on a `[rust]` project writes the library and a
+   `compilation_metadata.json` that says, for every function of the crate,
+   how it is called; the dialect has the call form of §13.3
+   (`jlcs.native_call`, a new op); `RustThunks` generates and JITs a thunk
+   per function; `wrap` writes a Julia module for functions of plain data,
+   and a panic arrives as a Julia exception.
 6. **A real crate goes through it: libm** (§19.1), from its pinned upstream
    commit. 114 functions, every one callable from Julia through a generated
    thunk, ten of them returning two values in two registers. It took two
@@ -1531,25 +1532,53 @@ and 12 units in the last place from its own `sinf` and `cosf` at 1.5 and
 
 Not part of the repository's tests (it clones from the network): the recipe
 and its check are the Hub package `packages/rustlibm` (`replibuild.toml`,
-`test_deep.jl`), build only and not in the Hub's index until `wrap` exists.
+`test_deep.jl`). Since §20 it is wrapped and in the Hub's index:
+`RepliBuild.use("rustlibm")`, 104 plain calls and 10 through thunks.
 
-## 20. The walk from here
+## 20. Wrap, for plain data (built 2026-11-19)
 
-6. **The catching frame, before the generator.** At opt-level 0 no function
-   is `nounwind`, so every call without it is one panic from ending Julia.
-   It goes in the root crate, which now exists: `__rb_catch` (Part I §6.3),
-   measured on Linux through a JIT'd thunk in §17.
-7. **GeneratorRust** (`wrap`): Julia types and names from the metadata,
-   `ccall` where every IR type is a scalar or a pointer, the thunk otherwise.
-8. **The rest of the generated crate**: drop functions, declared
-   instantiations, `dyn` forwarders, and forwarders for `#[inline]`
-   functions, which have no symbol at any optimization level.
+| §15 step | Where | What it does |
+|---|---|---|
+| 7a. The catching frame | `RustBuild._CATCH_FRAME`, in the root crate | `__rb_catch(thunk, args, ret)` ends a panic inside the library; `__rb_panic_message` gives its text (where and what). RepliBuild's own two functions, so `extern "C"`; a hook keeps a caught panic's text off stderr and passes any other panic on |
+| — | `RustRuntime.jl` | `Library` (one per wrapped library, thunks JIT'd on first use, never at load), `invoke` (through the frame when the function may panic), `RustPanic` |
+| 6. GeneratorRust | `Wrapper/Rust/GeneratorRust.jl` | the module: a type per record and enum, a function per function, a stub with its reason for what is not wrapped |
+| — | `PackageRegistry.hash_config` | a Rust project's inputs: every file of the crate's tree, its dependency pin, and `rustc -vV` |
+
+How a value crosses: it is turned into the bytes Rust lays it out as, and the
+call's IR arguments are read from those bytes where the join says each one
+is. So a record, a tuple or an enum with data is a Julia struct of its bytes
+with a property per field at its DWARF offset, and the compiler's field
+order and niches need no model.
+
+The call is a plain `ccall` where every type of the `define` line is a
+scalar or a pointer AND the function is `nounwind`; its thunk otherwise;
+inside the catching frame when it is not `nounwind`. On the fixture crate
+unoptimized, every Rust function is guarded; optimized, 16 are plain calls,
+15 thunks and 3 guarded.
+
+Not wrapped, as stubs that say why: a function that moves a value which may
+own memory (a `Box`, anything of `alloc`, a record holding a raw pointer),
+and trait objects. On the fixture: 9 of 43. On libm: none of 114, and
+`RepliBuild.use("rustlibm")` works.
+
+## 21. The walk from here
+
+8. **Ownership**: drop functions in the root crate per owned type, owning
+   Julia types with finalizers, `String` and `Vec` out and in, moves,
+   `Result<T, E>` as a value or an exception.
+9. **What has no symbol.** Naming a function BY PATH in the root crate is
+   enough: `dep::small as *const ()`, `dep::largest::<f64> as *const ()`.
+   rustc then compiles it into the root crate (internal linkage), its
+   `define` line and its DIE appear in the root's IR and DWARF, and its
+   address is in an exported table. Measured 2026-11-19 for an `#[inline]`
+   function, a generic function and a method of a generic type. So Part I
+   §6.5's `sig` is not needed: a `[[rust.instantiate]]` entry is a path. What
+   remains to decide is where the list of paths comes from (the TOML, or
+   rustdoc's JSON, which is nightly-only today).
+10. **Trait objects**, callbacks, statics.
+11. **Shipping**: AOT thunks, `discover` on a Cargo project, the doctor,
+    a user guide page, Windows and AArch64.
 
 Before any of this reaches a machine without a local libJLCS: the dialect's
 ABI version is 2, and the published artifact is version 1
 (`deps/jlcs_jll/README.md` has the steps).
-
-Not built, and not on that list: `discover` on a Cargo project; the
-environment doctor reporting cargo and rustc; statics; a C-ABI record
-argument; AOT thunks for Rust; Windows and AArch64 runs of what is built
-here.

@@ -75,7 +75,6 @@ import ..LibDW
 import ..Tools
 import ..RustDWARF
 import ..RustABI
-import ..PackageRegistry
 import .._parse_json
 
 """
@@ -92,6 +91,79 @@ function manifest_path(config::RepliBuildConfig)::String
     isempty(rc.dependency) && return rc.manifest
     root = DependencyResolver.checkout_root(config, rc.dependency)
     return ConfigurationManager._graph_path(joinpath(root, rc.manifest))
+end
+
+"""
+    source_root(config) -> String
+
+The directory whose files are the crate's source: the checkout of `[rust]
+dependency`, whole (a workspace's other members and its lock file are in
+it), or the manifest's directory when the crate is in the project.
+"""
+function source_root(config::RepliBuildConfig)::String
+    rc = config.rust
+    isempty(rc.dependency) && return dirname(rc.manifest)
+    return ConfigurationManager._graph_path(DependencyResolver.checkout_root(config, rc.dependency))
+end
+
+"""
+    input_files(config) -> Vector{Pair{String,String}}
+
+Every file under `source_root` that a build of the crate may read, as
+`relative path => absolute path`, sorted: what the registry hashes to decide
+whether a vendored build is still this crate's. Left out: `.git`, cargo's
+own `target` directories, and RepliBuild's cache, build and output
+directories when the crate is in the project.
+"""
+function input_files(config::RepliBuildConfig)::Vector{Pair{String,String}}
+    root = source_root(config)
+    isdir(root) || return Pair{String,String}[]
+    own = [ConfigurationManager._graph_path(p) for p in (ConfigurationManager.get_build_path(config),
+                                                        ConfigurationManager.get_output_path(config))]
+    out = Pair{String,String}[]
+    for (dir, dirs, files) in walkdir(root)
+        filter!(d -> !(d in (".git", "target", ".replibuild_cache")) &&
+                     !(ConfigurationManager._graph_path(joinpath(dir, d)) in own), dirs)
+        sort!(dirs)
+        for f in sort(files)
+            path = joinpath(dir, f)
+            isfile(path) || continue
+            push!(out, replace(relpath(path, root), '\\' => '/') => path)
+        end
+    end
+    return out
+end
+
+"""
+    source_identity(config) -> String
+
+What names the crate's source apart from its files: `""` for a crate in the
+project, and for a `[rust] dependency` the entry's name, type, pin and
+location with `[rust] manifest`, as `GraphMode.source_identity` does for a
+graph. A moved pin is another build even before the checkout follows it.
+"""
+function source_identity(config::RepliBuildConfig)::String
+    rc = config.rust
+    isempty(rc.dependency) && return ""
+    dep = config.dependencies.items[rc.dependency]
+    return join(["replibuild-rust-dependency", rc.dependency, dep.type, dep.url, dep.tag,
+                 dep.commit, dep.sha256, dep.subdir, dep.path, rc.manifest], "\n")
+end
+
+"""
+    toolchain_identity(config) -> String
+
+`rustc -vV` and `cargo -V` as the crate's directory sees them, or
+`"unavailable"` when they cannot be run: a build made by one rustc is not a
+build by another, and the registry must not serve it as one.
+"""
+function toolchain_identity(config::RepliBuildConfig)::String
+    dir = source_root(config)
+    return try
+        toolchain(isdir(dir) ? dir : config.project.root).identity
+    catch
+        "unavailable"
+    end
 end
 
 # `[rust]` with its manifest where it is on this machine.
@@ -277,6 +349,73 @@ end
 # The build
 # =============================================================================
 
+# The Rust RepliBuild supplies itself, in the root crate: the frame that ends
+# a panic. A Rust function that panics unwinds through the thunk that called
+# it, and only Rust may end a Rust panic: C++ `catch (...)` aborts when it
+# destroys one, and a Julia frame cannot take one at all. So a call that may
+# panic is made as `__rb_catch(thunk, args, ret)`, which is where the unwind
+# stops; the panic's own text (where it happened and what it said) is kept
+# for the caller, per thread, and printed nowhere.
+#
+# These two functions are RepliBuild's own, so they are `extern "C"` and
+# unmangled: Julia calls them with plain `ccall`. Nothing of the wrapped
+# crate is touched. The hook passes every panic that is not inside
+# `__rb_catch` on to the hook that was there before.
+const _CATCH_FRAME = raw"""
+
+use std::cell::{Cell, RefCell};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::Once;
+
+thread_local! {
+    static RB_PANIC: RefCell<String> = RefCell::new(String::new());
+    static RB_DEPTH: Cell<u32> = Cell::new(0);
+}
+static RB_HOOK: Once = Once::new();
+
+/// Call `thunk(args, ret)`. A panic that unwinds out of it ends here:
+/// 1 for a normal return, 0 for a panic, whose text `__rb_panic_message` gives.
+#[no_mangle]
+pub extern "C" fn __rb_catch(
+    thunk: extern "C-unwind" fn(*mut u8, *mut u8),
+    args: *mut u8,
+    ret: *mut u8,
+) -> u8 {
+    RB_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if RB_DEPTH.with(|d| d.get()) > 0 {
+                let text = info.to_string();
+                RB_PANIC.with(|m| *m.borrow_mut() = text);
+            } else {
+                previous(info);
+            }
+        }));
+    });
+    RB_PANIC.with(|m| m.borrow_mut().clear());
+    RB_DEPTH.with(|d| d.set(d.get() + 1));
+    let outcome = catch_unwind(AssertUnwindSafe(|| thunk(args, ret)));
+    RB_DEPTH.with(|d| d.set(d.get() - 1));
+    match outcome {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Copy this thread's last panic text into `buf` (at most `cap` bytes); its whole length.
+#[no_mangle]
+pub extern "C" fn __rb_panic_message(buf: *mut u8, cap: usize) -> usize {
+    RB_PANIC.with(|m| {
+        let text = m.borrow();
+        let n = text.len().min(cap);
+        if n > 0 {
+            unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), buf, n) };
+        }
+        text.len()
+    })
+}
+"""
+
 "The generated root crate's name: the library cargo builds is `lib<this>.<ext>`."
 root_name(crate::Crate) = crate.name * "_rb"
 
@@ -288,7 +427,8 @@ root_dir(rc::RustConfig) = dirname(rc.target_dir) * "/root"
 
 The generated root crate, file name to text: a `Cargo.toml` that builds a
 `dylib` and depends on the wrapped crate by path, with the features `[rust]`
-asks for, and a `lib.rs` whose one line makes the crate part of the library.
+asks for, and a `lib.rs` whose `extern crate` line makes the crate part of
+the library, followed by the frame that catches a panic (`_CATCH_FRAME`).
 The empty `[workspace]` table keeps a workspace in a directory above from
 claiming it.
 """
@@ -307,7 +447,7 @@ function root_files(rc::RustConfig, crate::Crate)::Dict{String,String}
            sprint(io -> TOML.print(io, manifest; sorted = true))
     lib = "// Generated by RepliBuild. The library is this crate; `$(crate.name)` is its\n" *
           "// dependency, and a `dylib` carries its dependencies and exports their functions.\n" *
-          "extern crate $(crate.name);\n"
+          "extern crate $(crate.name);\n" * _CATCH_FRAME
     return Dict("Cargo.toml" => toml, "lib.rs" => lib)
 end
 
@@ -450,10 +590,11 @@ end
 
 # What the metadata was extracted from, and by what: the library and the IR
 # by content, the toolchain, and the code that reads them.
-function _metadata_key(library::AbstractString, ir_files::Vector{String}, tc::Toolchain, crate::Crate)::String
+function _metadata_key(library::AbstractString, ir_files::Vector{String}, tc::Toolchain, crate::Crate,
+                       generator::AbstractString)::String
     ctx = SHA.SHA256_CTX()
     Compiler._key_feed!(ctx, METADATA_VERSION)
-    Compiler._key_feed!(ctx, PackageRegistry._generator_fingerprint())
+    Compiler._key_feed!(ctx, generator)
     Compiler._key_feed!(ctx, tc.identity)
     Compiler._key_feed!(ctx, crate.name)
     Compiler._key_feed!(ctx, _file_sha(library))
@@ -467,7 +608,7 @@ _metadata_path(config::RepliBuildConfig) = joinpath(get_output_path(config), "co
 _key_path(config::RepliBuildConfig) = joinpath(get_output_path(config), "rust_metadata.key")
 
 """
-    build_rust_project(config) -> String
+    build_rust_project(config; generator = "") -> String
 
 `RepliBuild.build` for a `[rust]` project: write the root crate, build it
 with cargo, copy its dynamic library to `[paths] output`, and write
@@ -475,10 +616,13 @@ with cargo, copy its dynamic library to `[paths] output`, and write
 
 cargo decides what is recompiled; it is always asked. The metadata is
 extracted again only when the library, the IR, the toolchain or RepliBuild
-itself changed (`rust_metadata.key`). The key is removed before an
+itself changed (`rust_metadata.key`). `generator` names RepliBuild for that
+key; `RepliBuild.build` passes the registry's fingerprint of the checkout,
+which this module cannot ask for itself (the registry hashes Rust projects
+through it, so the registry comes after). The key is removed before an
 extraction, so one that fails leaves nothing claiming success.
 """
-function build_rust_project(config::RepliBuildConfig)::String
+function build_rust_project(config::RepliBuildConfig; generator::AbstractString = "")::String
     config.rust === nothing && error("build_rust_project: the project has no [rust] section")
     rc = _located(config)
     println("RepliBuild | $(config.project.name) [rust]")
@@ -509,7 +653,7 @@ function build_rust_project(config::RepliBuildConfig)::String
             "(opt-level $(rc.opt_level), rustc $(tc.release), LLVM $(tc.llvm))")
 
     library = joinpath(out_dir, get_library_name(config))
-    key = _metadata_key(artifact.library, [ir], tc, crate)
+    key = _metadata_key(artifact.library, [ir], tc, crate, generator)
     keyfile = _key_path(config)
     if isfile(library) && isfile(_metadata_path(config)) && isfile(keyfile) &&
        strip(read(keyfile, String)) == key && _file_sha(library) == _file_sha(artifact.library)

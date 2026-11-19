@@ -36,3 +36,29 @@ function rust_row(x, tail::AbstractString)
     return x.rows[hits[1]]
 end
 passes(row) = [(p["name"], p["pass"], p["ir"]) for p in row["parameters"]]
+
+"""
+The metadata `RustBuild.extract_metadata` would write for one vendored build:
+its rows in path order, each with the Rust path the demangler would print
+(spelled here from the DWARF scope, since these tests run no tool).
+"""
+function rust_metadata(opt::Int)
+    x = rust_extract(opt)
+    rows = Dict{String,Any}[]
+    for s in x.symbols
+        row = copy(x.rows[s])
+        own = get(x.dwarf, s, nothing)
+        row["own_debug_info"] = own !== nothing
+        x.target[s] == s || (row["alias_of"] = x.target[s])
+        row["path"] = !startswith(s, "_R") ? s :
+                      endswith(s, "4Area4area") ? "<lean::Shape as lean::Area>::area" :
+                      row["owner"] !== nothing ? "<$(row["owner"])>::$(row["name"])" : "lean::$(row["name"])"
+        push!(rows, row)
+    end
+    sort!(rows; by = r -> (r["path"], r["symbol"]))
+    return Dict{String,Any}("language" => "rust", "metadata_version" => "rust-1",
+                            "crate" => Dict{String,Any}("name" => "lean", "package" => "lean", "root" => "lean_rb"),
+                            "library" => "liblean.so", "library_sha" => "0"^64,
+                            "toolchain" => Dict{String,Any}("rustc" => "fixture"),
+                            "functions" => rows, "types" => x.types, "skipped" => Any[])
+end

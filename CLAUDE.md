@@ -22,11 +22,13 @@ Ingest and llmcall are John's features with julia dont use them clancker.
 | 2 | MLIR thunks via the JLCS dialect (`libJLCS.so`) | C++ methods, by-value aggregates, packed structs, unions, virtual dispatch, EH |
 | 3 | `ccall` | Everything else; the default for C |
 
-A **Rust front end is in progress** (branch work since 2026-11-19): `build` on a
-`[rust]` project works and its functions are callable through generated thunks
-(`RustThunks`, the dialect's `jlcs.native_call`); `wrap` does not exist yet. It
-wraps plain Rust, never `extern "C"`; design and measurements are
-`docs/updates/RUST_FRONT_END.md`, the rules are under "Rust front end" below.
+A **Rust front end is in progress** (branch work since 2026-11-19): `build`,
+`wrap` and `use` work on a `[rust]` project for functions of plain data, through
+plain `ccall`s and generated thunks (`RustThunks`, the dialect's
+`jlcs.native_call`); ownership (`String`, `Vec`, `Box`), generics and trait
+objects are not built. It wraps plain Rust, never `extern "C"`; design and
+measurements are `docs/updates/RUST_FRONT_END.md`, the rules are under "Rust
+front end" below.
 
 Positioning: a hands-on dev tool for wrapping libraries **from source**, not a
 JLL/BinaryBuilder replacement. DWARF from the real compile is the source of truth —
@@ -118,12 +120,12 @@ skill drives adding a package.
   force re-extraction. That keeps the clone and the per-file IR cache.
 - **To date a fix into an artifact, grep the artifact for the fix's signature**, never
   the mtime.
-- **`packages/rustlibm` is the Rust reference package, build only**
-  (2026-11-19): the `libm` crate from its pinned commit, `[rust] dependency`.
-  It is not in `index.toml` and has no wrapper (`wrap` for Rust is unbuilt);
-  its `test_deep.jl` builds it and drives all 114 functions through
-  `RustThunks` by hand. John's Hub is the starter every user's own Hub begins
-  from, so a build-only package belongs there.
+- **`packages/rustlibm` is the Rust reference package** (2026-11-19): the
+  `libm` crate from its pinned commit, `[rust] dependency`, in `index.toml`.
+  `use("rustlibm")` wraps all 114 functions (104 plain calls, 10 through
+  thunks); its `test_deep.jl` checks them against Julia's own math through
+  the generated module. John's Hub is the starter every user's own Hub
+  begins from, so an in-progress package belongs there.
 - **Consumer compensation is a feature request.** A workaround hand-rolled in several
   Hub consumers is evidence of a missing generator feature. When a policy moves into
   the generator, grep the consumers for the workaround.
@@ -473,9 +475,13 @@ If you are asked to work on it:
   (`RustDWARF`). `RustABI` and `RustDWARF` are text in, tables out, and run no
   tool. `IRGen/RustThunks.jl` turns the rows into thunks (one
   `jlcs.native_call` each), JITs them (`load`) and calls one (`call_raw`).
+  `Wrapper/Rust/GeneratorRust.jl` is `wrap`: the Julia module, from the
+  metadata alone. `RustRuntime.jl` is what that module calls: `Library`,
+  `invoke`, `RustPanic`.
   (`test_rust_abi.jl`, `test_rust_dwarf.jl`, `test_rust_config.jl`,
-  `test_rust_thunks.jl`, devtests `test_rust_build_live.jl`,
-  `test_rust_thunks_live.jl`.)
+  `test_rust_thunks.jl`, `test_rust_wrap.jl`, devtests
+  `test_rust_build_live.jl`, `test_rust_thunks_live.jl`,
+  `test_rust_wrap_live.jl`.)
 - `Builder/PackageRegistry.jl` — `~/.replibuild/` registry. **A project builds
   where it lives.** An entry points at the project's own TOML; `register` builds
   and wraps in place, vendors the output to `builds/<hash_config>/` (immutable:
@@ -2014,6 +2020,38 @@ outward-facing, so ask first.
   zeroext, signext, inreg, sret, byval, and `align` with those two). `load`
   looks every callee up through the library's handle first: ORC waits forever
   on a symbol it cannot find.
+- **A Rust value crosses as its bytes** (`GeneratorRust`). A record, tuple
+  or enum with data is a Julia struct of `_rb_bytes` with a property per
+  field at its DWARF offset; a by-value argument is encoded into a byte
+  buffer and the call's IR arguments are read from that buffer where the
+  join says (`pass`, and the leaves' offsets for a pair). Never a Julia
+  struct of fields: the compiler reorders fields and fills niches. The
+  generator's own calls into Base are qualified (`Base.convert`): a crate's
+  function names fill the module (`test_rust_wrap.jl` holds the list).
+- **A Rust function is a plain `ccall` only when every type of its `define`
+  line is a scalar or a pointer AND it is `nounwind`** (`emit_function`'s
+  `plain`); else its thunk, and inside the catching frame when it is not
+  `nounwind` (`RustRuntime.invoke`, `guarded`). A panic through a bare
+  `ccall` or an unguarded thunk ends the process. One bit (`i1`) and a
+  hidden return pointer are the thunk's, never a `ccall`'s.
+- **Only Rust ends a Rust panic.** The root crate carries `__rb_catch` and
+  `__rb_panic_message` (`RustBuild._CATCH_FRAME`): RepliBuild's own
+  functions, so `extern "C"` and unmangled, and never part of the surface
+  (the surface is the WRAPPED crate's IR). Its panic hook records a panic
+  only inside `__rb_catch` and passes any other on to the previous hook.
+- **What may own memory is not moved** (`GeneratorRust.owns`): a `Box`,
+  anything of `alloc`, a record with a raw pointer field. Until drop
+  functions exist, such a function is a stub that raises its reason and an
+  entry of the module's `UNSUPPORTED`; nothing is left out silently and
+  nothing is wrapped that would leak or double-free.
+- **A wrapper JITs nothing at load.** `RustRuntime.Library` opens the
+  library; the thunk session is created at the first thunk call, and never
+  while Julia is generating output. A wrapper of plain calls needs no libJLCS.
+- **The registry hashes a Rust project's own inputs** (`hash_config`'s rust
+  branch: `RustBuild.input_files`, `source_identity`, `toolchain_identity`):
+  `[compile] source_files` is C and C++ and would miss every `.rs`.
+  `PackageRegistry` is included after the Rust modules for this, so
+  `RustBuild` takes the generator fingerprint from its caller.
 - **The dialect's ABI version is 2 since `native_call`; the published libJLCS
   artifact is version 1** and is refused. Until it is rebuilt and republished
   (`deps/jlcs_jll/README.md`, outward-facing, ask first), Tier 2 on this
@@ -2424,16 +2462,19 @@ don't file them as defects. Never extrapolate a narrow entry into "X is unbuilt"
 read the generator output first. (User-facing C++ RAII — `Managed<T>` finalizers with
 DWARF-resolved destructors — **is** built.)
 
-- **Rust, everything after the thunks** (2026-11-19;
-  `docs/updates/RUST_FRONT_END.md` §20): the catching frame for panics (in
-  the root crate; until then a panic in a call ends the process), then
-  GeneratorRust (`wrap`), then drop functions, declared generic
-  instantiations, `dyn` forwarders and forwarders for `#[inline]` functions.
-  Also unbuilt: `discover` on a Cargo project, the doctor reporting cargo
-  and rustc (`build` still asks the C/C++ doctor first), statics, an
+- **Rust, beyond plain data** (2026-11-19; `docs/updates/RUST_FRONT_END.md`
+  §21): ownership (drop functions in the root crate, owning Julia types,
+  `String`/`Vec`/`Box` out and in, `Result` as a value or an exception);
+  functions with no symbol (`#[inline]`, generic), which need only their
+  PATH named in the root crate (measured) and a decision on where the list
+  comes from; trait objects, callbacks, statics; constructing an enum with
+  data from Julia. Also unbuilt: `discover` on a Cargo project, the doctor
+  reporting cargo and rustc (`build` still asks the C/C++ doctor first), an
   `extern "C"` function taking a record the C way, AOT thunks for Rust, a
-  crate with several codegen units. Measured on Linux x86-64 only; AArch64
-  and Windows runs of the built part are not done.
+  crate with several codegen units, a user guide page. What a wrapper shows
+  for a function the compiler merged into another (`own_debug_info` false)
+  is the other's types, with a note: John's call whether that stands.
+  Measured on Linux x86-64 only; AArch64 and Windows are not run.
 - Toolchain records by value that still trap (narrowed 2026-11-13; `tuple`,
   `optional` and `complex` are laid out, above): one with a virtual base, a
   struct (not a union) holding an empty record as a member, and anything
