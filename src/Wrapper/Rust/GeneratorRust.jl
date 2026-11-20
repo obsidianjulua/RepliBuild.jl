@@ -159,6 +159,8 @@ mutable struct Ctx
     dyn::Dict{String,Any}        # `dyn Trait` => its implementors, each with the function that makes a reference to one
     dyn_names::Dict{String,String}   # `dyn Trait` => the name its helper functions carry
     callbacks::Dict{String,Any}  # a Rust function pointer's type => the library's function of that signature, and its setter
+    trampolines::Vector{String}  # the text of each callback trampoline the functions use, in the order they were asked for
+    trampoline_of::Dict{Tuple{String,Int},Int}   # (a function pointer's type, which such parameter of its function) => its trampoline
 end
 
 function Ctx(metadata::AbstractDict)
@@ -168,7 +170,8 @@ function Ctx(metadata::AbstractDict)
               Dict{String,Any}(String(k) => v for (k, v) in get(metadata, "glue_refused", Dict{String,Any}())),
               Set{String}(String(h) for h in get(metadata, "glue_helpers", Any[])), Dict{String,String}(),
               Dict{String,Any}(String(k) => v for (k, v) in get(metadata, "dyn", Dict{String,Any}())), Dict{String,String}(),
-              Dict{String,Any}(String(k) => v for (k, v) in get(metadata, "callbacks", Dict{String,Any}())))
+              Dict{String,Any}(String(k) => v for (k, v) in get(metadata, "callbacks", Dict{String,Any}())),
+              String[], Dict{Tuple{String,Int},Int}())
     # A trait object is known when something implements its trait, or when a
     # `Box` of it is a value this holds: either can be passed where one is taken.
     known = Set{String}(keys(ctx.dyn))
@@ -829,6 +832,7 @@ function emit_function(ctx::Ctx, row::AbstractDict, name::String, index::Int)::E
     leave = String[]
     cleanup = String[]            # statements after a call that returned
     keep = String[]               # what GC.@preserve holds
+    seen = Dict{String,Int}()     # a kind of function pointer => how many parameters of it so far
     values = Vector{Union{Nothing,Tuple{String,String}}}(nothing, length(irp))   # per IR parameter: (Julia type, expression)
     args = String[]               # the Julia signature
     docs = String[]
@@ -963,35 +967,58 @@ function emit_function(ctx::Ctx, row::AbstractDict, name::String, index::Int)::E
             zero(c) = c.kind === :unit ? "nothing" : c.kind === :ptr ? "Base.C_NULL" : c.kind === :bool ? "false" :
                       c.kind === :cenum ? "$(c.extra)(0)" : c.kind === :char ? "Base.UInt32(0)" : "Base.zero($(ctype(c)))"
             bs = ["b$j" for j in eachindex(cs)]
-            call = "$pname(" * join((given(c, b) for (c, b) in zip(cs, bs)), ", ") * ")"
             rtype = rk.kind === :unit ? "Base.Cvoid" : ctype(rk)
             types = "(" * join((ctype(c) for c in cs), ", ") * (length(cs) == 1 ? "," : "") * ")"
-            # An error in Julia's function must not unwind through Rust: it is
-            # kept, a zero is returned in its place, and it is thrown once the
-            # library's function has returned.
-            push!(prelude, "$(pname)_e = Base.RefValue{Base.Any}(nothing)")
-            push!(prelude, "$(pname)_w = (" * join(bs, ", ") * ") -> try")
-            push!(prelude, "        " * back(rk, call))
-            push!(prelude, "    catch _x")
-            push!(prelude, "        $(pname)_e[] === nothing && ($(pname)_e[] = _x)")
-            push!(prelude, "        " * zero(rk))
-            push!(prelude, "    end")
-            push!(prelude, "$(pname)_c = $pname isa Base.Ptr ? $pname : Base.@cfunction(\$($(pname)_w), $rtype, $types)")
-            push!(prelude, "$(pname)_f = $pname isa Base.Ptr ? Base.Ptr{Base.Cvoid}($pname) : Base.unsafe_convert(Base.Ptr{Base.Cvoid}, $(pname)_c)")
-            push!(keep, "$(pname)_c")
+            # Which trampoline: one per kind of function pointer, and per such
+            # parameter of one function (a function taking two of a kind
+            # holds two Julia functions at once).
+            seen[String(p["type"])] = nth = get(seen, String(p["type"]), 0) + 1
+            (cb.c || nth == 1) ||
+                return unsupported("the parameter `$shown` is a second Rust function pointer of the kind `$(p["type"])` in " *
+                                   "one call, and the library has one function of that signature to be given")
+            k = get!(ctx.trampoline_of, (String(p["type"]), nth)) do
+                # A plain function of the module, which `@cfunction` makes a C
+                # function on every platform; a closure is one only on some
+                # (not on AArch64). It calls the Julia function the wrapper
+                # holds for the length of the call. An error in that function
+                # must not unwind through Rust: it is kept, a zero is returned
+                # in its place, and the wrapper throws it once the library's
+                # function has returned.
+                n = length(ctx.trampolines) + 1
+                call = "_RB_CB_F_$n[](" * join((given(c, b) for (c, b) in zip(cs, bs)), ", ") * ")"
+                push!(ctx.trampolines,
+                      "const _RB_CB_F_$n = Base.RefValue{Base.Any}(nothing)      # `$(p["type"])`: the function being called back\n" *
+                      "const _RB_CB_E_$n = Base.RefValue{Base.Any}(nothing)      # the error it raised, if it raised one\n" *
+                      "function _rb_cb_$n(" * join(("$b::$(ctype(c))" for (c, b) in zip(cs, bs)), ", ") * ")\n" *
+                      "    try\n" *
+                      "        return " * back(rk, call) * "\n" *
+                      "    catch _x\n" *
+                      "        _RB_CB_E_$n[] === nothing && (_RB_CB_E_$n[] = _x)\n" *
+                      "        return " * zero(rk) * "\n" *
+                      "    end\n" *
+                      "end\n")
+                n
+            end
+            push!(prelude, "$(pname)_f = $pname isa Base.Ptr ? Base.Ptr{Base.Cvoid}($pname) : Base.@cfunction(_rb_cb_$k, $rtype, $types)")
+            # The trampoline's function is the module's, so one call at a time
+            # holds it: taken under the lock, and put back whatever happens.
+            push!(enter, "Base.lock(_RB_CALLBACKS)")
+            push!(enter, "$(pname)_hf = _RB_CB_F_$k[]; $(pname)_he = _RB_CB_E_$k[]")
+            push!(enter, "$pname isa Base.Ptr || (_RB_CB_F_$k[] = $pname; _RB_CB_E_$k[] = nothing)")
+            pushfirst!(leave, "Base.unlock(_RB_CALLBACKS)")
+            pushfirst!(leave, "_RB_CB_F_$k[] = $(pname)_hf; _RB_CB_E_$k[] = $(pname)_he")
             if cb.c
                 values[irs[1]] = ("Base.Ptr{Base.Cvoid}", "$(pname)_f")
             else
                 # A Rust function pointer: the library is given its own function
                 # of this signature, which calls on to the C function set here.
-                push!(enter, "Base.lock(_RB_CALLBACKS)")
                 push!(enter, "$(pname)_o = ccall(($(_sym(entry["set"])), LIBRARY_PATH), Base.Ptr{Base.Cvoid}, (Base.Ptr{Base.Cvoid},), $(pname)_f)")
-                pushfirst!(leave, "Base.unlock(_RB_CALLBACKS)")
                 pushfirst!(leave, "ccall(($(_sym(entry["set"])), LIBRARY_PATH), Base.Ptr{Base.Cvoid}, (Base.Ptr{Base.Cvoid},), $(pname)_o)")
                 values[irs[1]] = ("Base.Ptr{Base.Cvoid}",
                                   "Base.unsafe_load(Base.cglobal(($(_sym(entry["at"])), LIBRARY_PATH), Base.Ptr{Base.Cvoid}))")
             end
-            push!(cleanup, "$(pname)_e[] === nothing || Base.throw($(pname)_e[])")
+            # Read before `leave` puts the holder back: this call's error.
+            push!(cleanup, "($pname isa Base.Ptr || _RB_CB_E_$k[] === nothing) || Base.throw(_RB_CB_E_$k[])")
             push!(args, "$pname::Base.Union{Base.Function,Base.Ptr}")
         elseif t.kind === :dyn && pass == "pair" && haskey(ctx.dyn_names, t.extra.trait)
             # A reference to a trait object: two pointers, which the helper for
@@ -1672,8 +1699,9 @@ function generate(metadata::AbstractDict; module_name::AbstractString, library_p
     println(io, "                                                        thunks_sha = THUNKS_SHA, convention = $(repr(RustThunks.CONVENTION)))")
     println(io, "end")
     println(io, "const _THUNKS = [Base.RefValue{Base.Ptr{Base.Cvoid}}(Base.C_NULL) for _ in 1:$(length(rows))]")
-    println(io, "# One call at a time gives the library a Julia function to call back: what the library's")
-    println(io, "# function of that signature calls on to is set around the call.")
+    println(io, "# One call at a time gives the library a Julia function to call back: the function a")
+    println(io, "# trampoline calls, and what the library's function of that signature calls on to, are")
+    println(io, "# set around the call.")
     println(io, "const _RB_CALLBACKS = Base.ReentrantLock()")
     println(io)
     println(io, "function __init__()")
@@ -1701,6 +1729,14 @@ function generate(metadata::AbstractDict; module_name::AbstractString, library_p
         println(io, "# ── Trait objects ────────────────────────────────────────────────────────")
         println(io)
         print(io, traits)
+    end
+    if !isempty(ctx.trampolines)
+        println(io, "# ── Callbacks ────────────────────────────────────────────────────────────")
+        println(io, "# What the library calls when it is given a Julia function: a plain function of")
+        println(io, "# this module, made a C function, which calls the Julia function a wrapper holds")
+        println(io, "# for the length of its call.")
+        println(io)
+        foreach(t -> println(io, t), ctx.trampolines)
     end
     println(io, "# ── Functions ────────────────────────────────────────────────────────────")
     println(io)

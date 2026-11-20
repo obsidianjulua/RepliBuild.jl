@@ -378,23 +378,45 @@ end
     @test occursin("function Scale_label(a1)", body(text, "Scale_label")) && occursin("function Area_area(a1)", body(text, "Area_area"))
     @test occursin("(the trait's method, called on a trait object)", text)
 
-    # A callback. Julia's function is made a C function; an error in it is kept and thrown after
-    # the call. A Rust function pointer is the library's own function of that signature, which
-    # calls on to it: what that calls is set around the call, and put back whatever happens.
+    # A callback. What the library calls is a plain function of the module,
+    # made a C function, which calls the Julia function the wrapper holds for
+    # the length of the call; an error in it is kept and thrown after the
+    # call. A Rust function pointer is the library's own function of that
+    # signature, which calls on to it: what that calls is set around the
+    # call, and everything is put back whatever happens.
     apply = body(text, "apply")
     cb = md["callbacks"]["fn(i32) -> i32"]
     @test occursin("function apply(a1::Base.Union{Base.Function,Base.Ptr}, a2::Base.Integer)", apply)
-    @test occursin("a1_c = a1 isa Base.Ptr ? a1 : Base.@cfunction(\$(a1_w), Base.Int32, (Base.Int32,))", apply)
+    @test occursin("a1_f = a1 isa Base.Ptr ? Base.Ptr{Base.Cvoid}(a1) : Base.@cfunction(_rb_cb_1, Base.Int32, (Base.Int32,))", apply)
     @test occursin("a1_o = ccall((:$(cb["set"]), LIBRARY_PATH), Base.Ptr{Base.Cvoid}, (Base.Ptr{Base.Cvoid},), a1_f)", apply)
     @test occursin("Base.unsafe_load(Base.cglobal((:$(cb["at"]), LIBRARY_PATH), Base.Ptr{Base.Cvoid}))", apply)
-    @test occursin("    try\n", apply) && occursin("    finally\n        ccall((:$(cb["set"]), LIBRARY_PATH), Base.Ptr{Base.Cvoid}, (Base.Ptr{Base.Cvoid},), a1_o)\n        Base.unlock(_RB_CALLBACKS)\n    end\n", apply)
-    @test occursin("a1_e[] === nothing || Base.throw(a1_e[])", apply) && occursin("Base.lock(_RB_CALLBACKS)", apply)
-    # A C function pointer is called as C calls: Julia's is passed as it is, with nothing set.
+    # Held under the lock, and the holder put back last, after the library's slot.
+    @test occursin("    Base.lock(_RB_CALLBACKS)\n    a1_hf = _RB_CB_F_1[]; a1_he = _RB_CB_E_1[]\n    a1 isa Base.Ptr || (_RB_CB_F_1[] = a1; _RB_CB_E_1[] = nothing)\n", apply)
+    @test occursin("    try\n", apply) && occursin("    finally\n        ccall((:$(cb["set"]), LIBRARY_PATH), Base.Ptr{Base.Cvoid}, (Base.Ptr{Base.Cvoid},), a1_o)\n        _RB_CB_F_1[] = a1_hf; _RB_CB_E_1[] = a1_he\n        Base.unlock(_RB_CALLBACKS)\n    end\n", apply)
+    # This call's error is read before the holder is put back.
+    @test occursin("(a1 isa Base.Ptr || _RB_CB_E_1[] === nothing) || Base.throw(_RB_CB_E_1[])", apply)
+    @test findfirst("Base.throw(_RB_CB_E_1[])", apply)[1] < findfirst("    finally\n", apply)[1]
+    # The function the library calls: typed as C passes, converting what Julia's returns, and
+    # never letting an error out.
+    section = text[first(findfirst("# ── Callbacks", text)):first(findfirst("# ── Functions", text))-1]
+    @test occursin("function _rb_cb_1(b1::Base.Int32)\n    try\n        return Base.convert(Base.Int32, _RB_CB_F_1[](b1))\n    catch _x\n" *
+                   "        _RB_CB_E_1[] === nothing && (_RB_CB_E_1[] = _x)\n        return Base.zero(Base.Int32)\n    end\nend\n", section)
+    # **No closure is made a C function.** `@cfunction(\$f, …)` exists only on
+    # some platforms: on AArch64 it is "closures are not supported on this
+    # platform", and every callback failed there (first AArch64 run, 2026-11-20).
+    @test !occursin("@cfunction(\$", text) && !occursin("cfunction(\$", text)
+    @test count("Base.@cfunction(_rb_cb_", text) >= 5
+    @test all(m -> occursin("function $(m.captures[1])(", section), eachmatch(r"@cfunction\((_rb_cb_\d+),", text))
+    # A C function pointer is called as C calls: the module's function is passed as it is, and the
+    # library is given nothing else. The Julia function it calls is held the same way.
     c = body(text, "apply_c")
-    @test occursin("Base.@cfunction(\$(a1_w), Base.Float64, (Base.Float64, Base.Float64))", c) && !occursin("_RB_CALLBACKS", c) && !occursin("finally", c)
+    @test occursin("Base.@cfunction(_rb_cb_2, Base.Float64, (Base.Float64, Base.Float64))", c)
+    @test !occursin("__rb_cb_set", c) && !occursin("__rb_cb_at", c)
+    @test occursin("_RB_CB_F_2[] = a1", c) && occursin("Base.unlock(_RB_CALLBACKS)", c)
     # What the callback is given is what the library passes: a record by reference is a pointer to one.
-    @test occursin("a2(b1, Base.Ptr{Rec}(b2))", body(text, "count_if")) && occursin("Base.Bool, (Base.UInt32, Base.Ptr{Base.Cvoid})", body(text, "count_if"))
+    @test occursin("_RB_CB_F_3[](b1, Base.Ptr{Rec}(b2))", section) && occursin("Base.Bool, (Base.UInt32, Base.Ptr{Base.Cvoid})", body(text, "count_if"))
     @test occursin("Base.Cvoid, (Base.UInt32,))", body(text, "each"))
+    @test occursin("return (_RB_CB_F_4[](b1); nothing)", section)
     @test occursin("is a callback that takes a `&str`", reasons_all["text_callback"])
 
     # Two functions with the same code keep their own types in this build.

@@ -30,8 +30,8 @@ instantiate` names, through plain `ccall`s and generated thunks
 (`String`, `Vec`, `Box`, records that hold them, `Result`), with trait
 objects, callbacks and statics; `wrap` compiles the thunks ahead of time,
 `discover` writes the project file for a folder with a `Cargo.toml`, and the
-doctor reports cargo and rustc. Measured on Linux x86-64 only: AArch64 and
-Windows are not run. It wraps plain Rust, never `extern "C"`; design
+doctor reports cargo and rustc. Measured on Linux x86-64, and on Linux
+AArch64 in CI only; Windows is not run. It wraps plain Rust, never `extern "C"`; design
 and measurements are `docs/updates/RUST_FRONT_END.md`, the rules are under
 "Rust front end" below.
 
@@ -2085,9 +2085,15 @@ outward-facing, so ask first.
   is the compiler's business. Per kind taken (`RustGlue.callbacks`), one
   line of `rb_glue.rs` is a Rust function of that signature (the library is
   given THAT, through `__rb_cb_at_<n>`), which calls on to an `extern "C"`
-  function in a slot (`__rb_cb_set_<n>`). Julia makes its function a C
-  function, sets the slot around the call under `_RB_CALLBACKS` and puts it
-  back in a `finally`. An error in the Julia function is kept and thrown
+  function in a slot (`__rb_cb_set_<n>`). The C function is a plain function
+  of the module, one per kind (`_rb_cb_<k>`, the "Callbacks" section), which
+  calls the Julia function the wrapper holds in `_RB_CB_F_<k>` for the length
+  of the call: the holder and the slot are set under `_RB_CALLBACKS` and put
+  back in a `finally`. **Never `@cfunction(\$f, …)`**: a closure is made a C
+  function only on some platforms, and on AArch64 every callback failed with
+  "closures are not supported on this platform" (first AArch64 run,
+  2026-11-20; `test_rust_wrap.jl` refuses one in a module's text). An error
+  in the Julia function is kept and thrown
   after the call returns: it must not unwind through Rust. An `extern "C"
   fn` parameter takes Julia's C function directly. A callback carries only
   what C does (`emit_function`'s callback arm); anything else is a stub with
@@ -2718,7 +2724,8 @@ DWARF-resolved destructors — **is** built.)
   §21 to §24). A generic function is wrapped only for the types
   `[rust] instantiate` names. Of trait objects and callbacks: a callback
   the library keeps and calls later, a callback that takes a string, a
-  slice or a record by value, a Julia type implementing a Rust trait, a
+  slice or a record by value, two Rust function pointers of one kind in one
+  call (the library has one function of that signature to be given), a Julia type implementing a Rust trait, a
   function that returns `&dyn Trait`, a `dyn` of two traits. Of ownership:
   building an owning record or an enum with data from Julia (only `String`
   and `Vec` are built), `Box::new` from a Julia value, a type nothing with
@@ -2731,7 +2738,11 @@ DWARF-resolved destructors — **is** built.)
   wrapper; the same holds for C++ AOT thunks). Not checked, and not checkable from Julia: that a value
   borrowing from another does not outlive it, and that a value is dropped
   on the thread that made it (a finalizer runs where the collector does).
-  Measured on Linux x86-64 only; AArch64 and Windows are not run.
+  Linux x86-64 is measured on the dev box. Linux AArch64 runs only in CI
+  (tier2-linux's arm cell, first run 2026-11-20: the build and thunk tests
+  passed there, compiled and JIT'd, and the wrapper's probes all but the two
+  callback ones, reworked since). Windows is not run: CI's Windows cells run
+  the pkg and unit suites only.
 - Toolchain records by value that still trap (narrowed 2026-11-13; `tuple`,
   `optional` and `complex` are laid out, above): one with a virtual base, a
   struct (not a union) holding an empty record as a member, and anything

@@ -1998,6 +1998,19 @@ Both are reproduced on the dev box now (`rustup` toolchains 1.99.0 and
 1.100.0 beside the default 1.97.1, with `CARGO_INCREMENTAL=0`), and the three
 live tests pass on all three.
 
+**The first AArch64 run (2026-11-20, CI's arm64 runner, Rust 1.100).** The
+build test and the thunk test passed whole: every probe through the JIT and
+through the compiled thunks library, hidden return pointers and returned
+pairs included. Nothing about a thunk had to change for the architecture,
+which is what stating the `define` line was for. The wrapper's probes passed
+but for callbacks, and that was Julia's limit, not the ABI's: a callback was
+a closure made a C function (`@cfunction(\$f, …)`), which Julia has on
+x86-64 and not on AArch64. A callback is now a plain function of the module
+per kind, made a C function on any platform, that calls the Julia function
+the wrapper holds for the length of the call (§23's slot, one level up).
+Two Rust function pointers of one kind in one call are refused: the library
+has one function of that signature to be given.
+
 Not built, and not run: Linux AArch64 and Windows (no Rust target for either
 is on the dev box; nothing here is x86-64's alone by design, and nothing has
 shown it); object files written by libJLCS itself, so that compiling thunks
