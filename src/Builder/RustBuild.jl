@@ -174,10 +174,11 @@ end
 # `[rust]` with its manifest where it is on this machine.
 _located(config::RepliBuildConfig) =
     RustConfig(manifest_path(config), "", config.rust.package, config.rust.opt_level,
-               config.rust.features, config.rust.default_features, config.rust.target_dir)
+               config.rust.features, config.rust.default_features, config.rust.target_dir,
+               config.rust.instantiate)
 
 "The shape of a Rust project's `compilation_metadata.json`. Bump it with any change to what a row means."
-const METADATA_VERSION = "rust-2"
+const METADATA_VERSION = "rust-3"
 
 # =============================================================================
 # The toolchain
@@ -430,6 +431,11 @@ pub extern "C" fn __rb_panic_message(buf: *mut u8, cap: usize) -> usize {
 # standard library's business, and is never spelled in Julia.
 const _OWNERSHIP = raw"""
 
+/// The address of a function this crate compiled because a line of `rb_glue.rs` named it.
+#[repr(transparent)]
+pub struct __RbAddr(*const ());
+unsafe impl Sync for __RbAddr {}
+
 /// Run the drop code of the value at `p`. 0: done. The largest integer: that code panicked.
 #[allow(dead_code)]
 unsafe fn __rb_drop<T>(p: *mut T) -> usize {
@@ -438,6 +444,43 @@ unsafe fn __rb_drop<T>(p: *mut T) -> usize {
         Err(_) => usize::MAX,
     }
 }
+
+/// The drop function of a type the compiler chose, not this file: a function
+/// that RETURNS the type is named (`__rb_ret1(dep::parse)`), and its return
+/// type becomes `T` here. Which of the two the compiler picks is its answer
+/// to "is this type dropped"; both do the same thing.
+type __RbDrop<T> = unsafe extern "C" fn(*mut T, usize) -> usize;
+#[allow(dead_code)]
+unsafe extern "C" fn __rb_drop_owned<T>(p: *mut T, _unused: usize) -> usize {
+    if p.is_null() { 0 } else { __rb_drop(p) }
+}
+#[allow(dead_code)]
+unsafe extern "C" fn __rb_drop_plain<T>(p: *mut T, _unused: usize) -> usize {
+    if p.is_null() { 0 } else { __rb_drop(p) }
+}
+#[allow(dead_code)]
+const fn __rb_pick<T>() -> __RbDrop<T> {
+    if core::mem::needs_drop::<T>() { __rb_drop_owned::<T> } else { __rb_drop_plain::<T> }
+}
+// One set per number of parameters: what the function returns, and the
+// payloads of a `Result` or an `Option` it returns.
+macro_rules! __rb_by_return {
+    ($ret:ident $ok:ident $err:ident $some:ident : $($a:ident),*) => {
+        #[allow(dead_code)] const fn $ret<$($a,)* R>(_f: fn($($a),*) -> R) -> __RbDrop<R> { __rb_pick::<R>() }
+        #[allow(dead_code)] const fn $ok<$($a,)* T, E>(_f: fn($($a),*) -> Result<T, E>) -> __RbDrop<T> { __rb_pick::<T>() }
+        #[allow(dead_code)] const fn $err<$($a,)* T, E>(_f: fn($($a),*) -> Result<T, E>) -> __RbDrop<E> { __rb_pick::<E>() }
+        #[allow(dead_code)] const fn $some<$($a,)* T>(_f: fn($($a),*) -> Option<T>) -> __RbDrop<T> { __rb_pick::<T>() }
+    };
+}
+__rb_by_return!(__rb_ret0 __rb_ok0 __rb_err0 __rb_some0 : );
+__rb_by_return!(__rb_ret1 __rb_ok1 __rb_err1 __rb_some1 : A1);
+__rb_by_return!(__rb_ret2 __rb_ok2 __rb_err2 __rb_some2 : A1, A2);
+__rb_by_return!(__rb_ret3 __rb_ok3 __rb_err3 __rb_some3 : A1, A2, A3);
+__rb_by_return!(__rb_ret4 __rb_ok4 __rb_err4 __rb_some4 : A1, A2, A3, A4);
+__rb_by_return!(__rb_ret5 __rb_ok5 __rb_err5 __rb_some5 : A1, A2, A3, A4, A5);
+__rb_by_return!(__rb_ret6 __rb_ok6 __rb_err6 __rb_some6 : A1, A2, A3, A4, A5, A6);
+__rb_by_return!(__rb_ret7 __rb_ok7 __rb_err7 __rb_some7 : A1, A2, A3, A4, A5, A6, A7);
+__rb_by_return!(__rb_ret8 __rb_ok8 __rb_err8 __rb_some8 : A1, A2, A3, A4, A5, A6, A7, A8);
 
 /// Build a `String` at `out` from `len` bytes of text.
 /// 0: built. 1: the bytes are not UTF-8, and nothing was built.
@@ -567,7 +610,7 @@ end
 
 # Write the file for `plan`, and beside it what the file was written from.
 function _write_glue(rc::RustConfig, plan::RustGlue.Plan; identity::AbstractString = "")
-    (text, _) = RustGlue.glue_text(plan.rows)
+    (text, _, _) = RustGlue.glue_text(plan.rows, plan.fns)
     path = _glue_path(rc)
     mkpath(dirname(path))
     (isfile(path) && read(path, String) == text) || write(path, text)
@@ -576,9 +619,13 @@ function _write_glue(rc::RustConfig, plan::RustGlue.Plan; identity::AbstractStri
             "identity" => String(identity),
             "file_sha" => bytes2hex(SHA.sha256(text)),
             "wanted" => plan.wanted,
-            "rows" => [Dict{String,Any}("n" => r.n, "key" => r.key, "spelling" => r.spelling, "vec" => r.vec)
+            "rows" => [Dict{String,Any}("n" => r.n, "key" => r.key, "spelling" => r.spelling, "vec" => r.vec, "call" => r.call)
                        for r in plan.rows],
-            "refused" => plan.refused), 2)
+            "refused" => plan.refused,
+            "wanted_fns" => plan.wanted_fns,
+            "fns" => [Dict{String,Any}("n" => f.n, "expr" => f.expr, "source" => f.source, "symbol" => f.symbol)
+                      for f in plan.fns],
+            "fn_refused" => plan.fn_refused), 2)
     end
     return path
 end
@@ -594,9 +641,14 @@ function _read_plan(rc::RustConfig, identity::AbstractString)::RustGlue.Plan
             d = _read_json(side)
             (d["identity"] == identity && d["file_sha"] == _file_sha(path)) ?
                 RustGlue.Plan(String[String(k) for k in d["wanted"]],
-                              RustGlue.Row[RustGlue.Row(Int(r["n"]), String(r["key"]), String(r["spelling"]), r["vec"] === true)
+                              RustGlue.Row[RustGlue.Row(Int(r["n"]), String(r["key"]), String(r["spelling"]), r["vec"] === true,
+                                                        String(get(r, "call", "")))
                                            for r in d["rows"]],
-                              Dict{String,String}(String(k) => String(v) for (k, v) in d["refused"])) : nothing
+                              Dict{String,String}(String(k) => String(v) for (k, v) in d["refused"]),
+                              String[String(k) for k in d["wanted_fns"]],
+                              RustGlue.FnRow[RustGlue.FnRow(Int(f["n"]), String(f["expr"]), String(f["source"]), String(f["symbol"]))
+                                             for f in d["fns"]],
+                              Dict{String,String}(String(k) => String(v) for (k, v) in d["fn_refused"])) : nothing
         catch
             nothing
         end
@@ -607,30 +659,59 @@ function _read_plan(rc::RustConfig, identity::AbstractString)::RustGlue.Plan
 end
 
 """
-    _plan_glue!(rc, crate, need, types, identity, build) -> (plan, messages)
+    _plan_glue!(rc, crate, need, fn_need, types, identity, build) -> (plan, messages)
 
-Write `rb_glue.rs` for the types `need` and build the library with it.
-`build()` runs cargo on the root crate and returns `(messages, stderr, exit
-code)`. Three steps, each a compile of the root crate alone (the wrapped
-crate is already built):
+Write `rb_glue.rs` for the types `need` and the functions `fn_need`, and
+build the library with it. `build()` runs cargo on the root crate and returns
+`(messages, stderr, exit code)`. Three steps, each a compile of the root
+crate alone (the wrapped crate is already built):
 
-1. the probe: every candidate path of every type, one `use` line each. The
-   compiler names the lines that do not resolve from outside the crate;
-2. the lines, each type spelled with the first candidate that resolved;
+1. the probe: every candidate path of every type and every found function,
+   one `use` line each. The compiler names the lines that do not resolve
+   from outside the crate;
+2. the lines, each spelled with the first candidate that resolved;
 3. again without any line the compiler refused, until it builds.
+
+`fn_need` is a list of `(source, key, path)`: a function the build found in
+the crate (`"inline"`, its symbol, its path as the demangler prints it), or
+an entry of `[rust] instantiate` (`"instantiate"`, the expression, twice).
+A found function with no public path is not the crate's API and is left out
+without a word; an `instantiate` entry that does not compile is the user's
+own line, and is an error with the compiler's message.
 
 A type that ends with no line is in the plan's `refused`, with the reason.
 Returns the plan the library was built with and that build's messages.
 """
-function _plan_glue!(rc::RustConfig, crate::Crate, need::Vector{String}, types::AbstractDict,
-                     identity::AbstractString, build)
+function _plan_glue!(rc::RustConfig, crate::Crate, need::Vector{String}, fn_need::Vector, types::AbstractDict,
+                     identity::AbstractString, build; functions = Any[])
     refused = Dict{String,String}()
+    fn_refused = Dict{String,String}()
     names = Dict{String,String}()
     for key in need
         why = RustGlue.unnameable(key)
         why === nothing ? (names[key] = RustGlue.source_name(key)) : (refused[key] = why)
     end
-    all_paths = sort!(unique!(reduce(vcat, [RustGlue.paths(names[k]) for k in sort!(collect(keys(names)))]; init = String[])))
+    # For a type no path may spell: the functions a value of it comes out of.
+    # Naming one of those has the compiler pick the type's drop function.
+    from = Dict{String,Vector{Any}}()
+    for key in need
+        found = Any[]
+        for pos in RustGlue.positions(functions, types, key)
+            e = RustGlue.function_expression(pos.path)
+            e === nothing || push!(found, (expr = e, helper = pos.helper, what = pos.what))
+        end
+        isempty(found) || (from[key] = found)
+    end
+    # A found function's path, as an expression could write it once its paths are chosen.
+    exprs = Dict{String,String}()
+    for f in fn_need
+        f.source == "inline" || continue
+        e = RustGlue.function_expression(f.path)
+        e === nothing ? (fn_refused[f.key] = "it has no name a Rust expression can write") : (exprs[f.key] = e)
+    end
+    texts = vcat([names[k] for k in sort!(collect(keys(names)))], [exprs[k] for k in sort!(collect(keys(exprs)))],
+                 [p.expr for k in sort!(collect(keys(from))) for p in from[k]])
+    all_paths = sort!(unique!(reduce(vcat, [RustGlue.paths(t) for t in texts]; init = String[])))
     chosen = Dict{String,String}()
     unresolved = Dict{String,String}()
     fail(what, messages, diagnostics) = begin
@@ -654,30 +735,138 @@ function _plan_glue!(rc::RustConfig, crate::Crate, need::Vector{String}, types::
     end
     rows = RustGlue.Row[]
     for (i, key) in enumerate(need)
-        haskey(names, key) || continue
-        spelling = RustGlue.spell(key, chosen)
-        if spelling === nothing
-            p = first(p for p in RustGlue.paths(names[key]) if !haskey(chosen, p))
-            refused[key] = "no path names `$p` from outside the crate ($(get(unresolved, p, "it did not resolve")))"
+        spelling = haskey(names, key) ? RustGlue.spell(key, chosen) : nothing
+        if spelling !== nothing
+            push!(rows, RustGlue.Row(i, key, spelling, RustGlue.vec_element(types, key) !== nothing))
             continue
         end
-        push!(rows, RustGlue.Row(i, key, spelling, RustGlue.vec_element(types, key) !== nothing))
+        if haskey(names, key)
+            p = first(p for p in RustGlue.paths(names[key]) if !haskey(chosen, p))
+            refused[key] = "no path names `$p` from outside the crate ($(get(unresolved, p, "it did not resolve")))"
+        end
+        # Not spelled: taken from the first function that returns one and has a public path.
+        for pos in get(from, key, Any[])
+            e = RustGlue.spell(pos.expr, chosen)
+            e === nothing && continue
+            push!(rows, RustGlue.Row(i, key, pos.what, false, "$(pos.helper)($e)"))
+            delete!(refused, key)
+            break
+        end
+        haskey(refused, key) && (refused[key] *= ", and no function with a public path returns one")
     end
+    fns = RustGlue.FnRow[]
+    for (i, f) in enumerate(fn_need)
+        if f.source == "inline"
+            haskey(exprs, f.key) || continue
+            e = RustGlue.spell(exprs[f.key], chosen)
+            e === nothing ? (fn_refused[f.key] = "no public path names it") : push!(fns, RustGlue.FnRow(i, e, "inline", f.key))
+        else
+            push!(fns, RustGlue.FnRow(i, f.key, "instantiate", ""))
+        end
+    end
+    wanted_fns = String[f.source * "|" * f.key for f in fn_need]
     for round in 1:8
-        plan = RustGlue.Plan(need, rows, refused)
+        plan = RustGlue.Plan(need, rows, refused, wanted_fns, fns, fn_refused)
         _write_glue(rc, plan; identity)
         (messages, diagnostics, code) = build()
         code == 0 && return (plan, messages)
         (bad, _) = RustGlue.error_lines(messages)
-        (_, line_of) = RustGlue.glue_text(rows)
+        (_, line_of, fn_line_of) = RustGlue.glue_text(rows, fns)
         dropped = RustGlue.Row[r for r in rows if haskey(bad, line_of[r.n])]
-        (isempty(dropped) || round == 8) && fail("with its per-type lines", messages, diagnostics)
+        dropped_fns = RustGlue.FnRow[f for f in fns if haskey(bad, fn_line_of[f.n])]
+        asked = [f for f in dropped_fns if f.source == "instantiate"]
+        if !isempty(asked)
+            _write_glue(rc, RustGlue.Plan(); identity)
+            error("[rust] instantiate: " * join(("`$(f.expr)` does not compile: $(bad[fn_line_of[f.n]])" for f in asked), "; ") *
+                  ". Each entry is a Rust expression that names one function of the crate, with its types: " *
+                  "\"$(crate.name)::largest::<f64>\".")
+        end
+        ((isempty(dropped) && isempty(dropped_fns)) || round == 8) && fail("with its generated lines", messages, diagnostics)
         for r in dropped
             refused[r.key] = "the line that drops it does not compile: $(bad[line_of[r.n]])"
         end
+        for f in dropped_fns
+            fn_refused[f.symbol] = "the line that names it does not compile: $(bad[fn_line_of[f.n]])"
+        end
         rows = RustGlue.Row[r for r in rows if !haskey(bad, line_of[r.n])]
+        fns = RustGlue.FnRow[f for f in fns if !haskey(bad, fn_line_of[f.n])]
     end
     error("unreachable")
+end
+
+"""
+    discovery_args(rc, crate) -> Vector{String}
+
+The command line of the compile that LISTS the crate's functions: the wrapped
+crate alone (`-p`), with the build's own profile and into the build's own
+target directory, so its dependencies are the ones already compiled, and
+`-C link-dead-code` for that one crate. With it rustc compiles every
+function that is not generic, used or not, `#[inline]` ones included; a
+normal compile leaves out what nothing uses and what is only ever inlined.
+The output is a second IR file of the crate beside the build's own, read for
+its `define` lines and linked into nothing (measured 2026-11-19: the next
+normal build is still up to date).
+"""
+function discovery_args(rc::RustConfig, crate::Crate)::Vector{String}
+    args = cargo_args(rc, crate)
+    cut = findfirst(==("--"), args)
+    return vcat(cut === nothing ? args : args[1:cut-1], ["-p", crate.package, "--", "-C", "link-dead-code"])
+end
+
+# The IR file of the wrapped crate that a cargo run reported building, or `nothing`.
+function _crate_ir(messages::AbstractString, crate::Crate)::Union{String,Nothing}
+    for line in eachsplit(messages, '\n')
+        startswith(line, "{") || continue
+        msg = try
+            _parse_json(line)
+        catch
+            continue
+        end
+        get(msg, "reason", "") == "compiler-artifact" || continue
+        target = get(msg, "target", Dict())
+        (replace(String(get(target, "name", "")), '-' => '_') == crate.name &&
+         _same_file(get(msg, "manifest_path", ""), crate.manifest)) || continue
+        k = findfirst(f -> endswith(f, ".rlib"), String[String(f) for f in get(msg, "filenames", String[])])
+        k === nothing && continue
+        rlib = String(msg["filenames"][k])
+        if basename(dirname(rlib)) != "deps"
+            # The crate cargo was asked for by name is reported where cargo
+            # puts a copy for the user (`target/debug/lib<crate>.rlib`), with
+            # no hash in its name. The IR is beside the file it is a copy of.
+            deps = joinpath(dirname(rlib), "deps")
+            isdir(deps) || return nothing
+            twins = [joinpath(deps, f) for f in readdir(deps) if startswith(f, "lib$(crate.name)-") && endswith(f, ".rlib")]
+            i = findfirst(t -> Base.samefile(t, rlib), twins)
+            i === nothing && (sha = _file_sha(rlib); i = findfirst(t -> _file_sha(t) == sha, twins))
+            i === nothing && return nothing
+            rlib = twins[i]
+        end
+        return joinpath(dirname(rlib), replace(replace(basename(rlib), r"^lib" => ""; count = 1), r"\.rlib$" => ".ll"))
+    end
+    return nothing
+end
+
+"""
+    unexported_functions(rc, crate, tc; keep_merged, exported) -> Union{Vector{String},Nothing}
+
+The symbols of the crate's own functions that the library does not export:
+what the listing compile (`discovery_args`) defines, rooted in the crate,
+less `exported`. `nothing` when that compile could not be made, which the
+build reports and goes on without: the library is as complete as it was.
+"""
+function unexported_functions(rc::RustConfig, crate::Crate, tc::Toolchain; keep_merged::Bool = true,
+                              exported = Set{String}())::Union{Vector{String},Nothing}
+    (messages, _, code) = _capture(_cargo(tc, discovery_args(rc, crate), dirname(crate.manifest); keep_merged))
+    code == 0 || return nothing
+    ir = _crate_ir(messages, crate)
+    (ir !== nothing && isfile(ir)) || return nothing
+    out = String[]
+    for sym in sort!(collect(keys(RustABI.definitions([ir]))))
+        sym in exported && continue
+        root = RustABI.v0_root(sym)
+        (root !== nothing && root.crate == crate.name && root.namespace == 'v') && push!(out, sym)
+    end
+    return out
 end
 
 # What a failed cargo run said: the compiler's errors, then cargo's own lines.
@@ -821,12 +1010,15 @@ function _file_sha(path::AbstractString)::String
 end
 
 # What the metadata was extracted from, and by what: the library and the IR
-# by content, the toolchain, and the code that reads them.
+# by content, the toolchain, the code that reads them, and what the project
+# file asks to have compiled in (`asked`: `[rust] instantiate`, which changes
+# the library only once a build acts on it).
 function _metadata_key(library::AbstractString, ir_files::Vector{String}, tc::Toolchain, crate::Crate,
-                       generator::AbstractString)::String
+                       generator::AbstractString, asked::Vector{String} = String[])::String
     ctx = SHA.SHA256_CTX()
     Compiler._key_feed!(ctx, METADATA_VERSION)
     Compiler._key_feed!(ctx, generator)
+    foreach(a -> Compiler._key_feed!(ctx, "instantiate:" * a), asked)
     Compiler._key_feed!(ctx, tc.identity)
     Compiler._key_feed!(ctx, crate.name)
     Compiler._key_feed!(ctx, _file_sha(library))
@@ -882,8 +1074,8 @@ function build_rust_project(config::RepliBuildConfig; generator::AbstractString 
         keep_merged[] = false
         (messages, diagnostics, code) = build()
     end
-    if code != 0 && !isempty(plan.rows)
-        # The per-type lines were written for the crate as it was. It changed
+    if code != 0 && !(isempty(plan.rows) && isempty(plan.fns))
+        # The generated lines were written for the crate as it was. It changed
         # under them: build without, and write them again from what is found.
         plan = RustGlue.Plan()
         _write_glue(rc, plan; identity)
@@ -903,7 +1095,7 @@ function build_rust_project(config::RepliBuildConfig; generator::AbstractString 
             "(opt-level $(rc.opt_level), rustc $(tc.release), LLVM $(tc.llvm))")
 
     library = joinpath(out_dir, get_library_name(config))
-    key = _metadata_key(artifact.library, [ir], tc, crate, generator)
+    key = _metadata_key(artifact.library, [ir], tc, crate, generator, rc.instantiate)
     keyfile = _key_path(config)
     if isfile(library) && isfile(_metadata_path(config)) && isfile(keyfile) &&
        strip(read(keyfile, String)) == key && _file_sha(library) == _file_sha(artifact.library)
@@ -918,19 +1110,34 @@ function build_rust_project(config::RepliBuildConfig; generator::AbstractString 
     rm(library; force = true)
     cp(artifact.library, library)
 
-    metadata = extract_metadata(config, crate, tc, library, [ir]; plan)
+    metadata = extract_metadata(config, crate, tc, library, [ir]; plan, allow_empty = true)
     need = RustGlue.wanted(metadata["functions"], metadata["types"])
-    if need != plan.wanted
-        # What this build's functions move is not what `rb_glue.rs` was
-        # written for (on a first build, nothing): write it, build the root
-        # crate again, and read the library that has it.
-        (plan, messages) = _plan_glue!(rc, crate, need, metadata["types"], identity, build)
-        artifact = find_artifacts(messages, crate)
-        rm(library; force = true)
-        cp(artifact.library, library)
-        metadata = extract_metadata(config, crate, tc, library, [artifact.ir]; plan)
-        key = _metadata_key(artifact.library, [artifact.ir], tc, crate, generator)
+    fn_need = _functions_wanted(rc, crate, tc, metadata; keep_merged = keep_merged[])
+    if need != plan.wanted || String[f.source * "|" * f.key for f in fn_need] != plan.wanted_fns
+        # What this build's functions move, and the functions the library
+        # has no symbol for, are not what `rb_glue.rs` was written for (on a
+        # first build, nothing): write it, build the root crate again, and
+        # read the library that has it. The functions compiled in move types
+        # of their own, which are asked about in a second round.
+        for round in 1:3
+            had = Set{String}(String(f["symbol"]) for f in metadata["functions"])
+            (plan, messages) = _plan_glue!(rc, crate, need, fn_need, metadata["types"], identity, build;
+                                           functions = metadata["functions"])
+            artifact = find_artifacts(messages, crate)
+            rm(library; force = true)
+            cp(artifact.library, library)
+            metadata = extract_metadata(config, crate, tc, library, [artifact.ir]; plan, allow_empty = true)
+            again = RustGlue.wanted(metadata["functions"], metadata["types"])
+            # Again when the functions compiled in move types that were not
+            # asked about, or when there are now functions a type with no
+            # spelling could be taken from.
+            more = Set{String}(String(f["symbol"]) for f in metadata["functions"]) != had
+            (again == need && !(more && !isempty(metadata["glue_refused"]))) && break
+            need = again
+        end
+        key = _metadata_key(artifact.library, [artifact.ir], tc, crate, generator, rc.instantiate)
     end
+    isempty(metadata["functions"]) && error(_no_surface_message(crate, metadata))
     open(_metadata_path(config), "w") do io
         JSON.print(io, metadata, 2)
     end
@@ -939,6 +1146,30 @@ function build_rust_project(config::RepliBuildConfig; generator::AbstractString 
     println("  done: $(round(time() - start, digits = 2))s")
     return library
 end
+
+# The functions the library has no symbol for and should have: the crate's
+# own that the listing compile finds, and the entries of `[rust] instantiate`.
+function _functions_wanted(rc::RustConfig, crate::Crate, tc::Toolchain, metadata::AbstractDict; keep_merged::Bool = true)
+    exported = Set{String}(String(f["symbol"]) for f in metadata["functions"] if !haskey(f, "address"))
+    foreach(r -> push!(exported, String(r["symbol"])), metadata["skipped"])
+    found = unexported_functions(rc, crate, tc; keep_merged, exported)
+    if found === nothing
+        println("  note: the crate's unexported functions could not be listed (the listing compile failed); " *
+                "its `#[inline]` functions are not wrapped")
+        found = String[]
+    end
+    paths = _demangle(found)
+    out = [(source = "inline", key = s, path = get(paths, s, s)) for s in found]
+    append!(out, [(source = "instantiate", key = e, path = e) for e in rc.instantiate])
+    return out
+end
+
+_no_surface_message(crate::Crate, metadata::AbstractDict) =
+    "The crate `$(crate.name)` has no function to wrap: its library exports none of the crate's own, and " *
+    "none of its unexported functions has a public path. A crate's API is its `pub fn`s; a generic " *
+    "function exists only for the types it is used with, which `[rust] instantiate` names." *
+    (isempty(metadata["skipped"]) ? "" : " $(length(metadata["skipped"])) exported definitions were not read " *
+                                         "(first: $(metadata["skipped"][1]["symbol"]): $(metadata["skipped"][1]["reason"])).")
 
 # =============================================================================
 # The metadata
@@ -1010,6 +1241,10 @@ Everything `compilation_metadata.json` holds for a Rust library.
   function that drops a value of it, and whether dropping one does anything.
   `glue_refused`: the types that were asked about and have none, with why.
   `glue_helpers`: the root crate's `String` functions the library exports.
+- A row with `address` is a function the library has no symbol for
+  (`instance`: `"inline"`, found in the crate, or `"instantiate"`, asked for
+  in the TOML): the root crate compiled it, and the exported static named
+  by `address` holds where it is. `instances` counts them.
 - `skipped`: exported definitions that were left out, each with its reason.
 
 An empty surface is an error, as it is for a C library
@@ -1019,28 +1254,66 @@ result.
 """
 function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
                           library::AbstractString, ir_files::Vector{String};
-                          plan::RustGlue.Plan = RustGlue.Plan())::Dict{String,Any}
+                          plan::RustGlue.Plan = RustGlue.Plan(), allow_empty::Bool = false)::Dict{String,Any}
     exported = Compiler._runtime_symbol_names(String(library))
     exported === nothing && error("the dynamic symbol table of $library could not be read")
     defs = RustABI.definitions(ir_files)
     aliases = RustABI.aliases(ir_files)
     (symbols, skipped, foreign) = RustABI.surface(defs, exported, crate.name; aliases)
-    if isempty(symbols)
-        error("The crate `$(crate.name)` has no function to wrap: its library exports $(length(exported)) " *
-              "symbols and its IR defines $(length(defs)) functions, and none is an exported function of " *
-              "the crate. A crate's API is its `pub fn`s outside generic code; generic functions exist " *
-              "only where they are instantiated." *
-              (isempty(skipped) ? "" : " $(length(skipped)) exported definitions were not read " *
-                                       "(first: $(skipped[1]["symbol"]): $(skipped[1]["reason"]))."))
+    # Functions the library has no symbol for, compiled into the root crate
+    # because a line of `rb_glue.rs` named them. The root crate's IR says
+    # which function each line's static points at; its `define` line is
+    # there too (or in the crate's own IR, when the crate had built it).
+    instances = NamedTuple[]
+    fn_refused = Dict{String,String}(plan.fn_refused)
+    table = Dict{String,String}()
+    picked = String[]                    # the drop functions the compiler chose for types that were not spelled
+    if !isempty(plan.fns) || any(r -> !isempty(r.call), plan.rows)
+        root_ir = joinpath(dirname(ir_files[1]), root_name(crate) * ".ll")
+        isfile(root_ir) || error("rustc wrote no IR file $root_ir for the root crate `$(root_name(crate))`")
+        table = RustGlue.address_table([root_ir])
+        picked = String[table[RustGlue.dropfn_symbol(r.n)] for r in plan.rows
+                        if !isempty(r.call) && haskey(table, RustGlue.dropfn_symbol(r.n))]
     end
+    if !isempty(plan.fns)
+        root_ir = joinpath(dirname(ir_files[1]), root_name(crate) * ".ll")
+        root_defs = RustABI.definitions([root_ir])
+        named = _demangle(unique!(vcat(collect(values(table)), String[f.symbol for f in plan.fns if !isempty(f.symbol)])))
+        taken = Set{String}(symbols)
+        for f in plan.fns
+            label = f.source == "inline" ? f.symbol : f.expr
+            address = RustGlue.fn_symbol(f.n)
+            sym = get(table, address, nothing)
+            if sym === nothing || !(address in exported)
+                fn_refused[label] = "its address is not in the library"
+                continue
+            end
+            sym in taken && continue                        # exported already, or named twice
+            if f.source == "inline" && get(named, sym, sym) != get(named, f.symbol, f.symbol)
+                fn_refused[label] = "its path names another function (`$(get(named, sym, sym))`)"
+                continue
+            end
+            def = get(root_defs, sym, get(defs, sym, nothing))
+            if def === nothing
+                fn_refused[label] = "the build has no `define` line for it"
+                continue
+            end
+            push!(taken, sym)
+            push!(instances, (symbol = sym, address = address, source = f.source, def = def))
+        end
+    end
+    (isempty(symbols) && isempty(instances) && !allow_empty) &&
+        error(_no_surface_message(crate, Dict{String,Any}("skipped" => skipped)))
     # An alias has its target's code, and often no DIE of its own.
     target = Dict(sym => RustABI.alias_target(sym, defs, aliases) for sym in symbols)
-    wanted = union(Set(symbols), Set(values(target)), Set(RustGlue.drop_symbol(r.n) for r in plan.rows))
+    wanted = union(Set{String}(symbols), Set{String}(values(target)),
+                   Set{String}(RustGlue.drop_symbol(r.n) for r in plan.rows),
+                   Set{String}(String(i.symbol) for i in instances), Set{String}(picked))
     (dwarf_functions, types) = _with_dump_lines(library) do lines
         units = RustDWARF.read_units(lines, wanted)
         RustDWARF.describe_functions(units, wanted)
     end
-    paths = _demangle(vcat(symbols, String[String(r["symbol"]) for r in skipped]))
+    paths = _demangle(vcat(symbols, String[String(r["symbol"]) for r in skipped], String[String(i.symbol) for i in instances]))
     for r in skipped
         r["path"] = get(paths, r["symbol"], r["symbol"])
     end
@@ -1066,9 +1339,21 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
         end
         push!(functions, row)
     end
+    for inst in instances
+        own = get(dwarf_functions, inst.symbol, nothing)
+        row = RustABI.join_function(inst.symbol, inst.def, own, types)
+        row["path"] = get(paths, inst.symbol, inst.symbol)
+        row["own_debug_info"] = own !== nothing
+        # Not a name the loader binds: the function is reached through the
+        # exported static that holds its address.
+        row["address"] = inst.address
+        row["instance"] = inst.source
+        push!(functions, row)
+    end
     sort!(functions; by = r -> (r["path"], r["symbol"]))
-    (glue, glue_refused) = RustGlue.verify(plan, dwarf_functions, types, exported)
-    root = RustABI.v0_root(symbols[1])
+    (glue, glue_refused) = RustGlue.verify(plan, dwarf_functions, types, exported; table, demangled = _demangle(picked))
+    first_symbol = isempty(symbols) ? (isempty(instances) ? "" : String(instances[1].symbol)) : symbols[1]
+    root = RustABI.v0_root(first_symbol)
     rc = config.rust
     return Dict{String,Any}(
         "metadata_version" => METADATA_VERSION,
@@ -1083,6 +1368,11 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
         "glue" => glue,
         "glue_refused" => glue_refused,
         "glue_helpers" => String[h for h in RustGlue.STRING_HELPERS if h in exported],
+        "instances" => Dict{String,Any}(
+            "inline" => count(i -> i.source == "inline", instances),
+            "instantiate" => count(i -> i.source == "instantiate", instances),
+            "not_public" => count(f -> startswith(f, "inline|") , plan.wanted_fns) - count(f -> f.source == "inline", plan.fns)),
+        "instances_refused" => Dict{String,Any}(k => v for (k, v) in fn_refused if any(f -> f.expr == k && f.source == "instantiate", plan.fns)),
         "skipped" => skipped,
         "foreign_definitions" => foreign,
         "toolchain" => Dict{String,Any}("rustc" => tc.release, "host" => tc.host, "llvm" => tc.llvm,
@@ -1106,6 +1396,12 @@ function report(io::IO, metadata::AbstractDict)
     refused = [f for f in functions if f["refusal"] !== nothing]
     println(io, "  rust: $(length(functions)) functions, $(length(functions) - length(refused)) callable, " *
                 "$(length(metadata["types"])) types")
+    inst = get(metadata, "instances", Dict{String,Any}())
+    if get(inst, "inline", 0) + get(inst, "instantiate", 0) + get(inst, "not_public", 0) > 0
+        println(io, "  no symbol of their own: $(inst["inline"]) inline functions and $(inst["instantiate"]) asked for in ",
+                "[rust] instantiate, compiled into the library; $(inst["not_public"]) more are not public")
+        _report_group(io, "not instantiated", Tuple{String,String}[(String(k), String(v)) for (k, v) in get(metadata, "instances_refused", Dict())])
+    end
     glue = get(metadata, "glue", Dict{String,Any}())
     if !isempty(glue) || !isempty(get(metadata, "glue_refused", Dict{String,Any}()))
         owned = count(g -> g["owns"] === true, values(glue))

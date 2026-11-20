@@ -138,7 +138,7 @@ if requires("Rust thunks (live)", :libJLCS, :cargo, :rustc, :nm)
     for opt in (0, 3)
         @testset "opt-level $opt" begin
             # test/*/*.toml is untracked, so the project file is written here.
-            write(_RTL_TOML, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = $opt\n")
+            write(_RTL_TOML, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = $opt\ninstantiate = [\"rb_fix::midpoint::<f64>\", \"rb_fix::Pair::<i32>::new\", \"rb_fix::Pair::<i32>::sum\", \"(rb_fix::into_f64 as fn(f32) -> f64)\"]\n")
             lib = withenv("REPLIBUILD_JULIA_ENV" => "none") do
                 redirect_stdout(() -> RepliBuild.build(_RTL_TOML), devnull)
             end
@@ -160,7 +160,7 @@ if requires("Rust thunks (live)", :libJLCS, :cargo, :rustc, :nm)
             v = probe_verdicts(r.output)
             @test r.ok
             @test haskey(v, "PROBE_DONE")
-            expected = ["thunks_for_every_callable", "option_i32", "two_field_record", "record_of_two_doubles", "tuple",
+            expected = ["thunks_for_every_callable", "functions_with_no_symbol", "option_i32", "two_field_record", "record_of_two_doubles", "tuple",
                         "str_returned", "method_returning_a_record", "trait_object", "three_byte_integer", "u128",
                         "bool", "fieldless_enum", "char_and_plain_scalars", "one_bit_values", "zero_sized",
                         "record_through_hidden_pointer", "enum_with_data", "string_out_and_in", "slices",

@@ -777,6 +777,10 @@ function emit_function(ctx::Ctx, row::AbstractDict, name::String, index::Int)::E
     path = String(row["path"])
     unsupported(reason) = Emitted(name, _stub(name, path, reason), "unsupported", reason)
     row["refusal"] === nothing || return unsupported(String(row["refusal"]))
+    # Rust lets nothing call a destructor by name: a value dropped that way would be dropped again.
+    occursin(r" as core::ops::drop::Drop>::drop$", path) &&
+        return unsupported("Rust does not let a destructor be called directly; " *
+                           "`RepliBuild.RustRuntime.drop!` ends the value this is the destructor of")
     ir = row["ir"]
     irp = ir["parameters"]
     ret = row["return"]
@@ -947,7 +951,9 @@ function emit_function(ctx::Ctx, row::AbstractDict, name::String, index::Int)::E
     println(io, "    $name($sig)", ret["type"] === nothing ? "" : " -> $(ret["type"])")
     println(io)
     println(io, "Rust: `$path`", get(row, "own_debug_info", true) === false ?
-                " (merged with another function by the compiler: the types shown are that function's)" : "")
+                " (merged with another function by the compiler: the types shown are that function's)" : "",
+            get(row, "instance", "") == "inline" ? " (an inline function: the library has it because the build named it)" :
+            get(row, "instance", "") == "instantiate" ? " (compiled for these types because `[rust] instantiate` asks for it)" : "")
     println(io, "\"\"\"")
     println(io, "function $name(", join(args, ", "), ")")
     for s in prelude
@@ -967,7 +973,11 @@ function emit_function(ctx::Ctx, row::AbstractDict, name::String, index::Int)::E
     if plain
         types = "(" * join((v[1] for v in vals), ", ") * (length(vals) == 1 ? "," : "") * ")"
         rjl = ret_ir == "void" ? "Base.Cvoid" : ir_julia(ret_ir)
-        call = "ccall(($(_sym(row["symbol"])), LIBRARY_PATH), $rjl, $types" *
+        # A function with no symbol is called where the library's static says it is.
+        callee = haskey(row, "address") ?
+            "Base.unsafe_load(Base.cglobal(($(_sym(row["address"])), LIBRARY_PATH), Base.Ptr{Base.Cvoid}))" :
+            "($(_sym(row["symbol"])), LIBRARY_PATH)"
+        call = "ccall($callee, $rjl, $types" *
                (isempty(vals) ? "" : ", " * join((v[2] for v in vals), ", ")) * ")"
         if rpass == "ignore"
             println(io, isempty(keep) ? "    $call" : "    GC.@preserve $(join(keep, " ")) $call")
@@ -1246,7 +1256,12 @@ function _emit_ownership(ctx::Ctx)::String
     println(io, "end")
     for (key, c) in owned
         drop = c.extra.drop
-        println(io, "$(_helper(drop))(p::Base.Ptr{Base.Cvoid}) = ccall(($(_sym(drop)), LIBRARY_PATH), Base.UInt, ",
+        # A type that was not spelled: the library's static holds where the
+        # drop function the compiler picked for it is.
+        callee = get(ctx.glue[key], "by_address", false) === true ?
+            "Base.unsafe_load(Base.cglobal(($(_sym(drop)), LIBRARY_PATH), Base.Ptr{Base.Cvoid}))" :
+            "($(_sym(drop)), LIBRARY_PATH)"
+        println(io, "$(_helper(drop))(p::Base.Ptr{Base.Cvoid}) = ccall($callee, Base.UInt, ",
                 "(Base.Ptr{Base.Cvoid}, Base.Ptr{Base.Cvoid}), p, Base.C_NULL)")
     end
     for (key, c) in owned

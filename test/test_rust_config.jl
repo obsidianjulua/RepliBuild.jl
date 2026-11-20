@@ -49,9 +49,13 @@ end
             opt_level = 3
             features = ["a", "b", "a"]
             default_features = false
+            instantiate = ["geo::largest::<f64>", " geo::Pair::<i32>::sum ", "geo::largest::<f64>"]
             """))
         @test full.rust.package == "inner" && full.rust.opt_level == 3
         @test full.rust.features == ["a", "b"] && !full.rust.default_features
+        # Generic functions to compile for particular types: the one thing no compile of the crate can say.
+        @test full.rust.instantiate == ["geo::largest::<f64>", "geo::Pair::<i32>::sum"]
+        @test isempty(cfg.rust.instantiate)
     end
 end
 
@@ -64,6 +68,12 @@ end
         @test occursin("opt_level", load("[rust]\nopt_level = true\n"))
         @test occursin("features", load("[rust]\nfeatures = \"a\"\n"))
         @test occursin("default_features", load("[rust]\ndefault_features = 1\n"))
+        # An entry is one Rust expression: not a list of statements, not empty, not a table.
+        @test occursin("instantiate", load("[rust]\ninstantiate = \"geo::f::<u8>\"\n"))
+        @test occursin("instantiate", load("[rust]\ninstantiate = [\"\"]\n"))
+        @test occursin("instantiate", load("[rust]\ninstantiate = [\"a::f; std::process::exit(1)\"]\n"))
+        @test occursin("instantiate", load("[rust]\ninstantiate = [\"{ a::f }\"]\n"))
+        @test occursin("instantiate", load("[rust]\ninstantiate = [3]\n"))
         @test occursin("manifest", load("[rust]\nmanifest = \"\"\n"))
         @test occursin("manifest must be a string", load("[rust]\nmanifest = 3\n"))
         # One mode per project.
@@ -85,13 +95,15 @@ end
             opt_level = 2
             features = ["simd"]
             default_features = false
+            instantiate = ["geo::largest::<f64>"]
             """)
         cfg = RCM.load_config(toml)
         RCM.save_config(cfg)
         saved = TOML.parsefile(toml)
         # Relative again, and nothing derived: a tracked TOML holds no machine path.
         @test saved["rust"] == Dict("manifest" => "crate/Cargo.toml", "package" => "inner", "opt_level" => 2,
-                                    "features" => ["simd"], "default_features" => false)
+                                    "features" => ["simd"], "default_features" => false,
+                                    "instantiate" => ["geo::largest::<f64>"])
         @test saved["wrap"]["language"] == "rust"
         again = RCM.load_config(toml)
         @test again.rust.manifest == cfg.rust.manifest && again.rust.target_dir == cfg.rust.target_dir
@@ -235,6 +247,15 @@ end
     @test occursin("core::str::from_utf8(bytes)", code)
     @test occursin("pub unsafe extern \"C\" fn __rb_string_view(s: *const String, data: *mut *const u8, len: *mut usize)", code)
     @test occursin("unsafe fn __rb_vec_view<T>(", code) && occursin("unsafe fn __rb_vec_new<T>(", code)
+    # What holds the address of a function the root crate compiled because a line named it.
+    @test occursin("pub struct __RbAddr(*const ());", code) && occursin("unsafe impl Sync for __RbAddr {}", code)
+    # A type no path spells: the compiler picks its drop function from a function that returns one,
+    # and which of the two it picks is its answer to "is this type dropped".
+    @test occursin("const fn __rb_pick<T>() -> __RbDrop<T>", code) &&
+          occursin("if core::mem::needs_drop::<T>() { __rb_drop_owned::<T> } else { __rb_drop_plain::<T> }", code)
+    @test occursin("__rb_by_return!(__rb_ret0 __rb_ok0 __rb_err0 __rb_some0 : );", code)
+    @test occursin("__rb_by_return!(__rb_ret$(RepliBuild.RustGlue.MAX_ARITY) ", code) &&
+          !occursin("__rb_ret$(RepliBuild.RustGlue.MAX_ARITY + 1)", code)
     @test count("#[no_mangle]", code) == 4
     # The per-type lines are a file of their own, which the build writes from what it found.
     @test endswith(rstrip(code), "include!(\"rb_glue.rs\");") && !haskey(files, "rb_glue.rs")
@@ -307,6 +328,17 @@ end
     @test "profile.dev.opt-level=3" in config(args3) && "profile.dev.incremental=true" in config(args3)
     @test "profile.dev.debug-assertions=false" in config(args3) && "profile.dev.overflow-checks=false" in config(args3)
     @test "profile.dev.debug=2" in config(args3)
+
+    # The compile that lists the crate's functions: the wrapped crate alone, with the build's own
+    # profile and target directory (its dependencies are the ones already compiled), keeping dead code.
+    disc = RB.discovery_args(rc(3), crate; )
+    @test disc[1] == "rustc" && disc[end-4:end] == ["-p", "rb-fix", "--", "-C", "link-dead-code"]
+    @test count(==("--"), disc) == 1 && !any(a -> startswith(a, "link-arg="), disc)
+    @test config(disc) == config(args3) && "--lib" in disc
+    for needed in (["--manifest-path", "/p/build/rust/root/Cargo.toml"], ["--target-dir", "/p/build/rust/target"])
+        i = findfirst(==(needed[1]), disc)
+        @test i !== nothing && disc[i+1] == needed[2]
+    end
 
     # PE: no self-binding flag (a DLL never imports its own symbols), and no clock in the header.
     pe = RB.cargo_args(rc(0), crate; windows = true)

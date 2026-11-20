@@ -176,8 +176,8 @@ apply: flags come from CMake.
 
 Present: the project is a Rust crate, and cargo builds it.
 
-**In progress.** `build`, `wrap` and `use` work on a Rust crate's functions
-that have a symbol in the library:
+**In progress.** `build`, `wrap` and `use` work on a Rust crate's public
+functions, `#[inline]` ones included:
 
 - numbers, `bool`, `char`, strings and slices in; records, tuples, enums and
   `Option` out;
@@ -190,9 +190,9 @@ that have a symbol in the library:
   `RepliBuild.RustRuntime.RustError` holding the error;
 - a Rust panic arrives as a `RepliBuild.RustRuntime.RustPanic`.
 
-Generic and `#[inline]` functions, and trait objects, are not wrapped yet.
-A function that is not wrapped is in the module as a stub that says why, and
-is listed in the module's `UNSUPPORTED`.
+A generic function is wrapped for the types `instantiate` names. Trait
+objects are not wrapped yet. A function that is not wrapped is in the module
+as a stub that says why, and is listed in the module's `UNSUPPORTED`.
 
 | Key | Default | Meaning |
 |:----|:--------|:--------|
@@ -202,6 +202,16 @@ is listed in the module's `UNSUPPORTED`.
 | `opt_level` | `0` | The optimization level the crate is compiled at, `0` to `3`. |
 | `features` | none | Cargo features to turn on: `["simd"]`. |
 | `default_features` | `true` | `false` turns the crate's default features off. |
+| `instantiate` | none | Generic functions to compile for particular types, each written as Rust names it: `["geo::largest::<f64>", "geo::Pair::<i32>::sum"]`. |
+
+A generic function such as `fn largest<T>(xs: &[T]) -> T` is not in a
+library until something uses it with a type, so `instantiate` says which
+types you want. Each entry becomes a function of the module named after it
+(`largest_f64`, `Pair_i32_sum`). An entry that is not a function of the
+crate is a build error that shows the compiler's message. A function that
+takes `impl Trait` is named by the type it should have:
+`"(geo::scale as fn(f32) -> f64)"`. Nothing else about a crate needs an
+entry: its `#[inline]` functions are found by the build.
 
 The crate is built as it is: it needs no `extern "C"`, no `#[repr(C)]` and no
 other change. `cargo` and `rustc` must be installed; `REPLIBUILD_TOOL_CARGO`

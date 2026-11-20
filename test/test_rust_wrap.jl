@@ -211,10 +211,20 @@ end
     ex = Meta.parseall(text)
     @test !any(a -> a isa Expr && a.head in (:incomplete, :error), ex.args)
     reasons = Dict(r["name"] => r["reason"] for r in report if r["tier"] == "unsupported")
-    # The one function left out returns the one type no path outside the crate names.
-    @test collect(keys(reasons)) == ["secret"]
-    @test occursin("it returns a `rb_fix::hidden::Secret`, which may own memory", reasons["secret"]) &&
-          occursin("no path names `rb_fix::hidden::Secret` from outside the crate", reasons["secret"])
+    reasons_all = copy(reasons)
+    delete!(reasons, "Guard_Drop_drop")
+    # Beside a destructor, the one function left out takes the one type nothing can name or get.
+    @test collect(keys(reasons)) == ["sealed_len"]
+    @test occursin("moves a `rb_fix::hidden::Sealed`, which may own memory", reasons["sealed_len"]) &&
+          occursin("no path names `rb_fix::hidden::Sealed` from outside the crate", reasons["sealed_len"]) &&
+          occursin("no function with a public path returns one", reasons["sealed_len"])
+    # A type no path spells is an owning object like any other; its drop function is the one the
+    # compiler picked, called where the library's static says it is.
+    @test occursin("return Secret(_RbRaw(), ", body(text, "secret")) && occursin("_rb_take!(a1::Secret)", body(text, "secret_take"))
+    at = md["glue"]["rb_fix::hidden::Secret"]["drop"]
+    @test occursin("$(at[2:end])(p::Base.Ptr{Base.Cvoid}) = ccall(Base.unsafe_load(Base.cglobal((:$at, LIBRARY_PATH), Base.Ptr{Base.Cvoid})), Base.UInt, ", text)
+    @test occursin("Base.throw(RepliBuild.RustRuntime.RustError(Fault(_RbRaw(), ", body(text, "parse_byte"))
+    @test occursin("function fault_text(a1::Base.Union{Fault,Base.Ptr})", body(text, "fault_text"))
 
     # A `String` out is a Julia String: copied, and Rust's dropped there.
     @test occursin("return _rb_string_take!(_ret_p)", body(text, "make_greeting"))
@@ -308,6 +318,24 @@ end
     @test occursin("Base.length(_t) == 16 || Base.throw(Base.ArgumentError(", sum16)
     # A slice of plain records is a vector of them.
     @test occursin("function recs_total(a1::Base.DenseVector{Rec})", body(text, "recs_total"))
+
+    # A function the library has no symbol for is called where the library's static says it is:
+    # a plain call through that address, or its thunk, which is given the address under the function's name.
+    small = body(text, "small")
+    address = only(f for f in md["functions"] if f["path"] == "rb_fix::small")["address"]
+    @test occursin("ccall(Base.unsafe_load(Base.cglobal((:$address, LIBRARY_PATH), Base.Ptr{Base.Cvoid})), Base.UInt32, (Base.UInt32,), ", small)
+    @test !occursin("4small, LIBRARY_PATH", small)
+    @test occursin("RepliBuild.RustRuntime.thunk(_THUNKS[", body(text, "sum_diff")) && !occursin("cglobal", body(text, "sum_diff"))
+    @test occursin(", true, _slots, _ret_p)", body(text, "divide"))                    # it may panic: the catching frame
+    @test occursin("function Named_rename(a1::Base.Union{Named,Base.Ptr}, a2::Base.AbstractString)", body(text, "Named_rename"))
+    @test occursin("return Tag(_RbRaw(), ", body(text, "Tag_Clone_clone"))             # a clone is a value of its own
+    @test occursin("function midpoint_f64(a1::Base.Real, a2::Base.Real)", body(text, "midpoint_f64"))
+    @test occursin("(an inline function: the library has it because the build named it)", text)
+    @test occursin("(compiled for these types because `[rust] instantiate` asks for it)", text)
+    # A function the library exports is still called by its name.
+    @test occursin(r"ccall\(\(:_R\w+3add, LIBRARY_PATH\), ", body(text, "add"))
+    # A destructor is in the library, and nothing may call it by name.
+    @test occursin("Rust does not let a destructor be called directly", reasons_all["Guard_Drop_drop"])
 
     # Two functions with the same code keep their own types in this build.
     @test occursin("function flip(a1::Side)", body(text, "flip")) && occursin("function flag(a1::Base.Bool)", body(text, "flag"))

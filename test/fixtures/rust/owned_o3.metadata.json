@@ -1,11 +1,329 @@
 {
  "crate": {
-  "disambiguator": "aFbpx7NP8XW",
+  "disambiguator": "lhJMa7RpzKa",
   "name": "rb_fix",
   "package": "rb-fix",
   "root": "rb_fix_rb"
  },
  "functions": [
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readnone",
+       "align 4",
+       "captures(none)",
+       "dereferenceable(4)"
+      ],
+      "name": "%self",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "drop",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "self",
+     "pass": "direct",
+     "type": "&mut rb_fix::Guard"
+    }
+   ],
+   "path": "<rb_fix::Guard as core::ops::drop::Drop>::drop",
+   "refusal": null,
+   "return": {
+    "pass": "ignore",
+    "type": null
+   },
+   "scope": [
+    "rb_fix",
+    "{impl#0}"
+   ],
+   "symbol": "_RNvXCslhJMa7RpzKa_6rb_fixNtB2_5GuardNtNtNtCs4NRVxsYgnAr_4core3ops4drop4Drop4drop"
+  },
+  {
+   "address": "__rb_fn_11",
+   "generic": false,
+   "instance": "inline",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%self",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(none)"
+      ],
+      "name": "%name.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%name.1",
+      "type": "i64"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "rename",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": "rb_fix::Named",
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "self",
+     "pass": "direct",
+     "type": "&mut rb_fix::Named"
+    },
+    {
+     "ir": [
+      2,
+      3
+     ],
+     "name": "name",
+     "pass": "pair",
+     "type": "&str"
+    }
+   ],
+   "path": "<rb_fix::Named>::rename",
+   "refusal": null,
+   "return": {
+    "pass": "ignore",
+    "type": null
+   },
+   "scope": [
+    "rb_fix",
+    "Named"
+   ],
+   "symbol": "_RNvMs2_CslhJMa7RpzKa_6rb_fixNtB5_5Named6rename"
+  },
+  {
+   "address": "__rb_fn_16",
+   "generic": false,
+   "instance": "instantiate",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 4",
+       "captures(none)",
+       "dereferenceable(8)"
+      ],
+      "name": "%self",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "sum<i32>",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": "rb_fix::Pair<i32>",
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "self",
+     "pass": "direct",
+     "type": "&rb_fix::Pair<i32>"
+    }
+   ],
+   "path": "<rb_fix::Pair<i32>>::sum",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "i32"
+   },
+   "scope": [
+    "rb_fix",
+    "Pair<i32>"
+   ],
+   "symbol": "_RNvMs3_CslhJMa7RpzKa_6rb_fixINtB5_4PairlE3sumCs6gPu7gxnMUK_9rb_fix_rb"
+  },
+  {
+   "address": "__rb_fn_12",
+   "generic": false,
+   "instance": "inline",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([32 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(address, read_provenance)",
+       "dereferenceable(32)"
+      ],
+      "name": "%self",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "clone",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2
+     ],
+     "name": "self",
+     "pass": "direct",
+     "type": "&rb_fix::Tag"
+    }
+   ],
+   "path": "<rb_fix::Tag as core::clone::Clone>::clone",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "rb_fix::Tag"
+   },
+   "scope": [
+    "rb_fix",
+    "{impl#6}"
+   ],
+   "symbol": "_RNvXs4_CslhJMa7RpzKa_6rb_fixNtB5_3TagNtNtCs4NRVxsYgnAr_4core5clone5Clone5clone"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%a",
+      "type": "i32"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%b",
+      "type": "i32"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "add",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "a",
+     "pass": "direct",
+     "type": "i32"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "b",
+     "pass": "direct",
+     "type": "i32"
+    }
+   ],
+   "path": "rb_fix::add",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "i32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix3add"
+  },
   {
    "generic": false,
    "ir": {
@@ -56,7 +374,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5box_d"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5box_d"
   },
   {
    "generic": false,
@@ -106,7 +424,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5boxed"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5boxed"
   },
   {
    "generic": false,
@@ -170,7 +488,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7bytes16"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7bytes16"
   },
   {
    "generic": false,
@@ -224,7 +542,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix11bytes16_sum"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix11bytes16_sum"
   },
   {
    "generic": false,
@@ -272,7 +590,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5check"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5check"
   },
   {
    "generic": false,
@@ -335,7 +653,139 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7compare"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7compare"
+  },
+  {
+   "address": "__rb_fn_5",
+   "generic": false,
+   "instance": "inline",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%a",
+      "type": "i32"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%b",
+      "type": "i32"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "divide",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "a",
+     "pass": "direct",
+     "type": "i32"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "b",
+     "pass": "direct",
+     "type": "i32"
+    }
+   ],
+   "path": "rb_fix::divide",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "i32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix6divide"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(address, read_provenance)",
+       "dereferenceable(24)"
+      ],
+      "name": "%f",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "fault_text",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2
+     ],
+     "name": "f",
+     "pass": "direct",
+     "type": "&rb_fix::hidden::Fault"
+    }
+   ],
+   "path": "rb_fix::fault_text",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "alloc::string::String"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10fault_text"
   },
   {
    "generic": false,
@@ -425,7 +875,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9find_word"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9find_word"
   },
   {
    "generic": false,
@@ -474,7 +924,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix4flag"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix4flag"
   },
   {
    "generic": false,
@@ -523,7 +973,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix4flip"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix4flip"
   },
   {
    "generic": false,
@@ -587,7 +1037,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix4grid"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix4grid"
   },
   {
    "generic": false,
@@ -635,7 +1085,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5guard"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5guard"
   },
   {
    "generic": false,
@@ -683,7 +1133,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix13guard_release"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix13guard_release"
   },
   {
    "generic": false,
@@ -752,7 +1202,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix10join_words"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10join_words"
   },
   {
    "generic": false,
@@ -801,7 +1251,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix10level_next"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10level_next"
   },
   {
    "generic": false,
@@ -846,7 +1296,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9make_area"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9make_area"
   },
   {
    "generic": false,
@@ -921,7 +1371,71 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix13make_greeting"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix13make_greeting"
+  },
+  {
+   "address": "__rb_fn_15",
+   "generic": true,
+   "instance": "instantiate",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%a",
+      "type": "double"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%b",
+      "type": "double"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "midpoint<f64>",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "a",
+     "pass": "direct",
+     "type": "f64"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "b",
+     "pass": "direct",
+     "type": "f64"
+    }
+   ],
+   "path": "rb_fix::midpoint::<f64>",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RINvCslhJMa7RpzKa_6rb_fix8midpointdECs6gPu7gxnMUK_9rb_fix_rb"
   },
   {
    "generic": false,
@@ -996,7 +1510,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix12name_and_len"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix12name_and_len"
   },
   {
    "generic": false,
@@ -1086,7 +1600,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5named"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5named"
   },
   {
    "generic": false,
@@ -1156,7 +1670,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix15named_into_name"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix15named_into_name"
   },
   {
    "generic": false,
@@ -1209,7 +1723,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9named_len"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9named_len"
   },
   {
    "generic": false,
@@ -1258,7 +1772,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7opt_box"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7opt_box"
   },
   {
    "generic": false,
@@ -1306,7 +1820,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9opt_bytes"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9opt_bytes"
   },
   {
    "generic": false,
@@ -1355,7 +1869,82 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix13ordering_sign"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix13ordering_sign"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "writeonly",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(none)"
+      ],
+      "name": "%s.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%s.1",
+      "type": "i64"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "parse_byte",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2,
+      3
+     ],
+     "name": "s",
+     "pass": "pair",
+     "type": "&str"
+    }
+   ],
+   "path": "rb_fix::parse_byte",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "core::result::Result<u8, rb_fix::hidden::Fault>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10parse_byte"
   },
   {
    "generic": false,
@@ -1429,7 +2018,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9parse_int"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9parse_int"
   },
   {
    "generic": false,
@@ -1481,7 +2070,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix11rec_sum_ref"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix11rec_sum_ref"
   },
   {
    "generic": false,
@@ -1544,7 +2133,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix4recs"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix4recs"
   },
   {
    "generic": false,
@@ -1605,7 +2194,61 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix10recs_total"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10recs_total"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_return",
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%s",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noundef",
+      "range(i64 0, -9223372036854775808)"
+     ],
+     "type": "i64"
+    }
+   },
+   "name": "sealed_len",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "s",
+     "pass": "indirect",
+     "type": "rb_fix::hidden::Sealed"
+    }
+   ],
+   "path": "rb_fix::sealed_len",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "usize"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10sealed_len"
   },
   {
    "generic": false,
@@ -1652,7 +2295,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix6secret"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix6secret"
   },
   {
    "generic": false,
@@ -1705,7 +2348,61 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix10secret_len"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10secret_len"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_return",
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%s",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noundef",
+      "range(i64 0, -9223372036854775808)"
+     ],
+     "type": "i64"
+    }
+   },
+   "name": "secret_take",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "s",
+     "pass": "indirect",
+     "type": "rb_fix::hidden::Secret"
+    }
+   ],
+   "path": "rb_fix::secret_take",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "usize"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix11secret_take"
   },
   {
    "generic": false,
@@ -1754,7 +2451,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5shout"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5shout"
   },
   {
    "generic": false,
@@ -1806,7 +2503,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix6slot_d"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix6slot_d"
   },
   {
    "generic": false,
@@ -1855,7 +2552,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9slot_make"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9slot_make"
   },
   {
    "generic": false,
@@ -1905,7 +2602,56 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix9slot_take"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9slot_take"
+  },
+  {
+   "address": "__rb_fn_4",
+   "generic": false,
+   "instance": "inline",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%x",
+      "type": "i32"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "small",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "x",
+     "pass": "direct",
+     "type": "i32"
+    }
+   ],
+   "path": "rb_fix::small",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "i32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5small"
   },
   {
    "generic": false,
@@ -1968,7 +2714,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7squares"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7squares"
   },
   {
    "generic": false,
@@ -2022,7 +2768,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix16string_len_owned"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix16string_len_owned"
   },
   {
    "generic": false,
@@ -2075,7 +2821,69 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix14string_ref_len"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix14string_ref_len"
+  },
+  {
+   "address": "__rb_fn_7",
+   "generic": false,
+   "instance": "inline",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%a",
+      "type": "double"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%b",
+      "type": "double"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "{ double, double }"
+    }
+   },
+   "name": "sum_diff",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "a",
+     "pass": "direct",
+     "type": "f64"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "b",
+     "pass": "direct",
+     "type": "f64"
+    }
+   ],
+   "path": "rb_fix::sum_diff",
+   "refusal": null,
+   "return": {
+    "pass": "pair",
+    "type": "(f64, f64)"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix8sum_diff"
   },
   {
    "generic": false,
@@ -2165,7 +2973,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5token"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5token"
   },
   {
    "generic": false,
@@ -2217,7 +3025,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix8token_id"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix8token_id"
   },
   {
    "generic": false,
@@ -2268,7 +3076,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7unbox_d"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7unbox_d"
   },
   {
    "generic": false,
@@ -2332,7 +3140,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix8vec_push"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix8vec_push"
   },
   {
    "generic": false,
@@ -2385,7 +3193,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix7vec_sum"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7vec_sum"
   },
   {
    "generic": false,
@@ -2444,7 +3252,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix4view"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix4view"
   },
   {
    "generic": false,
@@ -2502,7 +3310,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix8view_len"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix8view_len"
   },
   {
    "generic": false,
@@ -2577,7 +3385,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCsaFbpx7NP8XW_6rb_fix5words"
+   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5words"
   }
  ],
  "glue": {
@@ -2648,33 +3456,61 @@
    "owns": true,
    "spelling": "core::result::Result<i32, alloc::string::String>"
   },
+  "core::result::Result<u8, rb_fix::hidden::Fault>": {
+   "by_address": true,
+   "drop": "__rb_dropfn_14",
+   "owns": true,
+   "spelling": "what `rb_fix::parse_byte` returns"
+  },
   "rb_fix::Guard": {
-   "drop": "__rb_drop_17",
+   "drop": "__rb_drop_18",
    "owns": true,
    "spelling": "rb_fix::Guard"
   },
   "rb_fix::Named": {
-   "drop": "__rb_drop_18",
+   "drop": "__rb_drop_19",
    "owns": true,
    "spelling": "rb_fix::Named"
   },
+  "rb_fix::Pair<i32>": {
+   "drop": "__rb_drop_21",
+   "owns": false,
+   "spelling": "rb_fix::Pair<i32>"
+  },
   "rb_fix::Rec": {
-   "drop": "__rb_drop_20",
+   "drop": "__rb_drop_22",
    "owns": false,
    "spelling": "rb_fix::Rec"
   },
   "rb_fix::Slot": {
-   "drop": "__rb_drop_22",
+   "drop": "__rb_drop_24",
    "owns": true,
    "spelling": "rb_fix::Slot"
   },
+  "rb_fix::Tag": {
+   "drop": "__rb_drop_25",
+   "owns": true,
+   "spelling": "rb_fix::Tag"
+  },
   "rb_fix::View": {
-   "drop": "__rb_drop_24",
+   "drop": "__rb_drop_27",
    "owns": false,
    "spelling": "rb_fix::View"
   },
+  "rb_fix::hidden::Fault": {
+   "by_address": true,
+   "drop": "__rb_dropfn_28",
+   "owns": true,
+   "spelling": "the `Err` of what `rb_fix::parse_byte` returns"
+  },
+  "rb_fix::hidden::Secret": {
+   "by_address": true,
+   "drop": "__rb_dropfn_30",
+   "owns": true,
+   "spelling": "what `rb_fix::secret` returns"
+  },
   "rb_fix::inner::Token": {
-   "drop": "__rb_drop_26",
+   "drop": "__rb_drop_31",
    "owns": true,
    "spelling": "rb_fix::Token"
   }
@@ -2684,12 +3520,17 @@
   "__rb_string_view"
  ],
  "glue_refused": {
-  "rb_fix::hidden::Secret": "no path names `rb_fix::hidden::Secret` from outside the crate (module `hidden` is private)"
+  "rb_fix::hidden::Sealed": "no path names `rb_fix::hidden::Sealed` from outside the crate (module `hidden` is private), and no function with a public path returns one"
+ },
+ "instances": {
+  "inline": 13,
+  "instantiate": 2,
+  "not_public": 1
  },
  "language": "rust",
  "library": "librb_fix.so",
  "library_sha": "0000000000000000000000000000000000000000000000000000000000000000",
- "metadata_version": "rust-2",
+ "metadata_version": "rust-3",
  "skipped": [],
  "toolchain": {
   "rustc": "1.97.1"
@@ -2767,12 +3608,33 @@
    "size": 8,
    "target": "alloc::vec::Vec<f64, alloc::alloc::Global>"
   },
+  "&mut rb_fix::Guard": {
+   "kind": "pointer",
+   "name": "&mut rb_fix::Guard",
+   "pointer": "mut_ref",
+   "size": 8,
+   "target": "rb_fix::Guard"
+  },
+  "&mut rb_fix::Named": {
+   "kind": "pointer",
+   "name": "&mut rb_fix::Named",
+   "pointer": "mut_ref",
+   "size": 8,
+   "target": "rb_fix::Named"
+  },
   "&rb_fix::Named": {
    "kind": "pointer",
    "name": "&rb_fix::Named",
    "pointer": "ref",
    "size": 8,
    "target": "rb_fix::Named"
+  },
+  "&rb_fix::Pair<i32>": {
+   "kind": "pointer",
+   "name": "&rb_fix::Pair<i32>",
+   "pointer": "ref",
+   "size": 8,
+   "target": "rb_fix::Pair<i32>"
   },
   "&rb_fix::Rec": {
    "kind": "pointer",
@@ -2787,6 +3649,20 @@
    "pointer": "ref",
    "size": 8,
    "target": "rb_fix::Slot"
+  },
+  "&rb_fix::Tag": {
+   "kind": "pointer",
+   "name": "&rb_fix::Tag",
+   "pointer": "ref",
+   "size": 8,
+   "target": "rb_fix::Tag"
+  },
+  "&rb_fix::hidden::Fault": {
+   "kind": "pointer",
+   "name": "&rb_fix::hidden::Fault",
+   "pointer": "ref",
+   "size": 8,
+   "target": "rb_fix::hidden::Fault"
   },
   "&rb_fix::hidden::Secret": {
    "kind": "pointer",
@@ -2850,6 +3726,28 @@
    "name": "(alloc::string::String, usize)",
    "scope": [],
    "size": 32,
+   "tuple": true
+  },
+  "(f64, f64)": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 0,
+     "type": "f64"
+    },
+    {
+     "align": 8,
+     "name": "__1",
+     "offset": 8,
+     "type": "f64"
+    }
+   ],
+   "kind": "struct",
+   "name": "(f64, f64)",
+   "scope": [],
+   "size": 16,
    "tuple": true
   },
   "*const f64": {
@@ -3876,6 +4774,96 @@
    ],
    "size": 24
   },
+  "core::result::Result<u8, rb_fix::hidden::Fault>": {
+   "align": 8,
+   "discriminant": {
+    "align": 8,
+    "offset": 0,
+    "size": 8,
+    "type": "u64"
+   },
+   "fields": [],
+   "kind": "enum",
+   "name": "Result<u8, rb_fix::hidden::Fault>",
+   "scope": [
+    "core",
+    "result"
+   ],
+   "size": 24,
+   "variants": [
+    {
+     "default": false,
+     "discr_value": "18446744073709551614",
+     "name": "Ok",
+     "offset": 0,
+     "type": "core::result::Result<u8, rb_fix::hidden::Fault>::Ok"
+    },
+    {
+     "default": true,
+     "name": "Err",
+     "offset": 0,
+     "type": "core::result::Result<u8, rb_fix::hidden::Fault>::Err"
+    }
+   ]
+  },
+  "core::result::Result<u8, rb_fix::hidden::Fault>::Err": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 0,
+     "type": "rb_fix::hidden::Fault"
+    }
+   ],
+   "kind": "struct",
+   "name": "Err",
+   "params": [
+    {
+     "name": "T",
+     "type": "u8"
+    },
+    {
+     "name": "E",
+     "type": "rb_fix::hidden::Fault"
+    }
+   ],
+   "scope": [
+    "core",
+    "result",
+    "Result<u8, rb_fix::hidden::Fault>"
+   ],
+   "size": 24
+  },
+  "core::result::Result<u8, rb_fix::hidden::Fault>::Ok": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 1,
+     "name": "__0",
+     "offset": 8,
+     "type": "u8"
+    }
+   ],
+   "kind": "struct",
+   "name": "Ok",
+   "params": [
+    {
+     "name": "T",
+     "type": "u8"
+    },
+    {
+     "name": "E",
+     "type": "rb_fix::hidden::Fault"
+    }
+   ],
+   "scope": [
+    "core",
+    "result",
+    "Result<u8, rb_fix::hidden::Fault>"
+   ],
+   "size": 24
+  },
   "dyn rb_fix::Area": {
    "align": 1,
    "fields": [],
@@ -3971,6 +4959,35 @@
     "rb_fix"
    ],
    "size": 32
+  },
+  "rb_fix::Pair<i32>": {
+   "align": 4,
+   "fields": [
+    {
+     "align": 4,
+     "name": "a",
+     "offset": 0,
+     "type": "i32"
+    },
+    {
+     "align": 4,
+     "name": "b",
+     "offset": 4,
+     "type": "i32"
+    }
+   ],
+   "kind": "struct",
+   "name": "Pair<i32>",
+   "params": [
+    {
+     "name": "T",
+     "type": "i32"
+    }
+   ],
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 8
   },
   "rb_fix::Rec": {
    "align": 8,
@@ -4087,6 +5104,29 @@
    ],
    "size": 8
   },
+  "rb_fix::Tag": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "label",
+     "offset": 0,
+     "type": "alloc::string::String"
+    },
+    {
+     "align": 4,
+     "name": "n",
+     "offset": 24,
+     "type": "u32"
+    }
+   ],
+   "kind": "struct",
+   "name": "Tag",
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 32
+  },
   "rb_fix::View": {
    "align": 8,
    "fields": [
@@ -4109,6 +5149,87 @@
     "rb_fix"
    ],
    "size": 16
+  },
+  "rb_fix::hidden::Fault": {
+   "align": 8,
+   "discriminant": {
+    "align": 8,
+    "offset": 0,
+    "size": 8,
+    "type": "u64"
+   },
+   "fields": [],
+   "kind": "enum",
+   "name": "Fault",
+   "scope": [
+    "rb_fix",
+    "hidden"
+   ],
+   "size": 24,
+   "variants": [
+    {
+     "default": true,
+     "name": "Bad",
+     "offset": 0,
+     "type": "rb_fix::hidden::Fault::Bad"
+    },
+    {
+     "default": false,
+     "discr_value": "18446744073709551615",
+     "name": "Empty",
+     "offset": 0,
+     "type": "rb_fix::hidden::Fault::Empty"
+    }
+   ]
+  },
+  "rb_fix::hidden::Fault::Bad": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 0,
+     "type": "alloc::string::String"
+    }
+   ],
+   "kind": "struct",
+   "name": "Bad",
+   "scope": [
+    "rb_fix",
+    "hidden",
+    "Fault"
+   ],
+   "size": 24
+  },
+  "rb_fix::hidden::Fault::Empty": {
+   "align": 8,
+   "fields": [],
+   "kind": "struct",
+   "name": "Empty",
+   "scope": [
+    "rb_fix",
+    "hidden",
+    "Fault"
+   ],
+   "size": 24
+  },
+  "rb_fix::hidden::Sealed": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "v",
+     "offset": 0,
+     "type": "alloc::vec::Vec<u8, alloc::alloc::Global>"
+    }
+   ],
+   "kind": "struct",
+   "name": "Sealed",
+   "scope": [
+    "rb_fix",
+    "hidden"
+   ],
+   "size": 24
   },
   "rb_fix::hidden::Secret": {
    "align": 8,

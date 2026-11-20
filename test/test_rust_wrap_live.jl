@@ -31,7 +31,7 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
     for opt in (0, 3)
         @testset "opt-level $opt" begin
             # test/*/*.toml is untracked, so the project file is written here.
-            write(_RWL_TOML, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = $opt\n")
+            write(_RWL_TOML, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = $opt\ninstantiate = [\"rb_fix::midpoint::<f64>\", \"rb_fix::Pair::<i32>::new\", \"rb_fix::Pair::<i32>::sum\", \"(rb_fix::into_f64 as fn(f32) -> f64)\"]\n")
             lib = _rwl_quiet(() -> RepliBuild.build(_RWL_TOML))
             wrapper = _rwl_quiet(() -> RepliBuild.wrap(_RWL_TOML))
             @test wrapper == joinpath(dirname(lib), "RbFix.jl") && isfile(wrapper)
@@ -44,7 +44,8 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             unsupported = sort!([r["name"] for r in report if r["tier"] == "unsupported"])
             # What is left: two calls the build refused, a trait object, and
             # the one type no path outside the crate names.
-            @test unsupported == ["cpoint_norm", "dyn_area", "located", "secret"]
+            # A destructor is in the library and is never called by name.
+            @test unsupported == ["Guard_Drop_drop", "cpoint_norm", "dyn_area", "located", "sealed_len"]
             # Unoptimized, every Rust function goes through the catching frame;
             # optimized, the ones that cannot panic do not.
             tiers = Dict(r["name"] => r["tier"] for r in report)
@@ -66,7 +67,10 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
                         "vectors_of_plain_data", "a_vector_rust_changes_in_place", "vectors_of_strings",
                         "result_is_a_value_or_an_exception", "option_and_tuple_of_owned_values",
                         "a_box_is_held_and_moved", "an_enum_that_owns", "a_record_that_owns", "dropped_exactly_once",
-                        "a_raw_pointer_is_not_ownership", "what_the_module_says_it_owns"]
+                        "a_raw_pointer_is_not_ownership", "what_the_module_says_it_owns",
+                        "inline_functions", "a_panic_in_an_inline_function", "inline_methods", "derived_impls",
+                        "generic_functions_for_the_types_asked_for", "a_destructor_is_not_called_by_name",
+                        "types_no_path_spells"]
             for name in expected
                 @test (name, startswith(get(v, name, "no PROBE line"), "PASS") ? "PASS" : get(v, name, "no PROBE line")) ==
                       (name, "PASS")
@@ -79,7 +83,7 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
         mktempdir() do dir
             cp(joinpath(_RWL_DIR, "crate"), joinpath(dir, "crate"))
             toml = joinpath(dir, "replibuild.toml")
-            write(toml, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = 3\n")
+            write(toml, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = 3\ninstantiate = [\"rb_fix::midpoint::<f64>\", \"rb_fix::Pair::<i32>::new\", \"rb_fix::Pair::<i32>::sum\", \"(rb_fix::into_f64 as fn(f32) -> f64)\"]\n")
             home = joinpath(dir, "home")
             code = """
             using RepliBuild
@@ -88,6 +92,7 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             println("PROBE use: ", (M.add(2, 3), M.maybe(41), M.hello()) == (Int32(5), Int32(42), "Hello, World!") ? "PASS" : "FAIL")
             println("PROBE owned: ", (M.make_greeting("hub"), M.squares(3), RepliBuild.RustRuntime.isowned(M.boxed(1))) ==
                                      ("hello hub", [0.0, 1.0, 4.0], true) ? "PASS" : "FAIL")
+            println("PROBE inline: ", (M.small(41), M.midpoint_f64(1.0, 4.0), M.greet("hub")) == (Int32(42), 2.5, "hi hub") ? "PASS" : "FAIL")
             println("PROBE vendored: ", startswith(M.LIBRARY_PATH, $(repr(joinpath(home, "builds")))) ? "PASS" : "FAIL \$(M.LIBRARY_PATH)")
             e = try; M.checked_div(1, 0); nothing; catch err; err; end
             println("PROBE panic: ", e isa RepliBuild.RustRuntime.RustPanic ? "PASS" : "FAIL \$e")
@@ -99,7 +104,7 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             r = run_use()
             v = probe_verdicts(r.output)
             @test r.ok && haskey(v, "PROBE_DONE")
-            for name in ("use", "owned", "vendored", "panic")
+            for name in ("use", "owned", "inline", "vendored", "panic")
                 @test (name, get(v, name, "no PROBE line")) == (name, "PASS")
             end
             # One vendored build (beside it, `.debug` holds the thunk module's text for a debugger).

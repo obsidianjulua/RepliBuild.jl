@@ -93,6 +93,49 @@ end
     @test (RG.drop_symbol(12), RG.vec_view_symbol(12), RG.vec_new_symbol(12)) == ("__rb_drop_12", "__rb_vec_view_12", "__rb_vec_new_12")
 end
 
+@testset "RustGlue: a function the library has no symbol for" begin
+    # A path as the demangler prints it is an expression source can write, or it is not one.
+    @test RG.function_expression("dep::inner::deep") == "dep::inner::deep"
+    @test RG.function_expression("<dep::Rec>::dsum") == "<dep::Rec>::dsum"
+    @test RG.function_expression("<dep::Rec as core::clone::Clone>::clone") == "<dep::Rec as core::clone::Clone>::clone"
+    @test RG.function_expression("<alloc::vec::Vec<dep::Rec, alloc::alloc::Global> as dep::Sum>::total") ==
+          "<alloc::vec::Vec<dep::Rec> as dep::Sum>::total"
+    @test RG.function_expression("dep::uses::{closure#0}") === nothing
+    # Rust lets nothing call a destructor by name.
+    @test RG.function_expression("<dep::Guard as core::ops::drop::Drop>::drop") === nothing
+    # Its paths are chosen like a type's: the method stays, the type takes its public path.
+    chosen = Dict("dep::inner::Token" => "dep::Token", "dep::inner::deep" => "dep::deep", "core::clone::Clone" => "core::clone::Clone")
+    @test RG.spell("<dep::inner::Token>::id2", chosen) == "<dep::Token>::id2"
+    @test RG.spell("dep::inner::deep", chosen) == "dep::deep"
+    @test RG.spell("<dep::inner::Token as core::clone::Clone>::clone", chosen) == "<dep::Token as core::clone::Clone>::clone"
+
+    # One line per function, after the types' lines: naming it makes the compiler build it, and the static holds where.
+    rows = [RG.Row(1, "dep::Rec", "dep::Rec", false)]
+    fns = [RG.FnRow(4, "dep::small", "inline", "_RNvCsX_3dep5small"), RG.FnRow(9, "dep::largest::<f64>", "instantiate", "")]
+    (text, line_of, fn_line_of) = RG.glue_text(rows, fns)
+    ls = split(text, '\n')
+    @test ls[fn_line_of[4]] == "#[no_mangle] pub static __rb_fn_4: __RbAddr = __RbAddr((dep::small) as *const ());"
+    @test ls[fn_line_of[9]] == "#[no_mangle] pub static __rb_fn_9: __RbAddr = __RbAddr((dep::largest::<f64>) as *const ());"
+    @test line_of[1] < fn_line_of[4] < fn_line_of[9] && count(==('\n'), text) == 4
+    @test RG.glue_text(rows) == (RG.glue_text(rows, RG.FnRow[])[1], line_of)        # the types alone, as before
+    @test RG.fn_symbol(4) == "__rb_fn_4"
+
+    # Which function each static points at is the root crate's IR's word, at either optimization level.
+    mktempdir() do dir
+        ir = joinpath(dir, "root.ll")
+        write(ir, """
+            @__rb_fn_1 = local_unnamed_addr constant ptr @_RNvCs6MEz9VGGpyc_3dep5small, align 8, !dbg !0
+            @__rb_fn_10 = constant ptr @_RINvCs7I8noyAdbh6_3dep7largestdECs5ovRDRVLBmB_6dep_rb, align 8, !dbg !11
+            @__rb_other = constant ptr @not_one, align 8
+            @__rb_fn_3 = constant i64 7, align 8
+            define internal noundef i32 @_RNvCs6MEz9VGGpyc_3dep5small(i32 noundef %x) unnamed_addr #0 {
+            """)
+        @test RG.address_table([ir]) == Dict("__rb_fn_1" => "_RNvCs6MEz9VGGpyc_3dep5small",
+                                             "__rb_fn_10" => "_RINvCs7I8noyAdbh6_3dep7largestdECs5ovRDRVLBmB_6dep_rb")
+        @test isempty(RG.address_table(String[]))
+    end
+end
+
 @testset "RustGlue: what a failed compile said" begin
     msg(level, text, file, line; rendered = "$level: $text") =
         "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"$level\",\"message\":\"$text\",\"rendered\":\"$rendered\"," *
@@ -171,7 +214,7 @@ end
     @test Set(need) == union(Set(keys(md["glue"])), Set(keys(md["glue_refused"])))
     for key in ("alloc::string::String", "alloc::vec::Vec<f64, alloc::alloc::Global>",
                 "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>", "rb_fix::Named", "rb_fix::Guard", "rb_fix::View",
-                "rb_fix::Slot", "rb_fix::inner::Token", "rb_fix::hidden::Secret",
+                "rb_fix::Slot", "rb_fix::inner::Token", "rb_fix::hidden::Secret", "rb_fix::hidden::Sealed", "rb_fix::hidden::Fault",
                 "core::result::Result<i32, alloc::string::String>", "core::option::Option<alloc::string::String>",
                 "alloc::boxed::Box<dyn rb_fix::Area, alloc::alloc::Global>")
         @test key in need
@@ -197,7 +240,72 @@ end
     g = md["glue"]
     @test g["rb_fix::Guard"]["owns"] === true && g["rb_fix::View"]["owns"] === false && g["rb_fix::Rec"]["owns"] === false
     @test g["rb_fix::inner::Token"]["spelling"] == "rb_fix::Token"
-    @test occursin("module `hidden` is private", md["glue_refused"]["rb_fix::hidden::Secret"])
+    @test g["rb_fix::hidden::Secret"]["by_address"] === true && g["rb_fix::hidden::Fault"]["owns"] === true
+    @test occursin("module `hidden` is private", md["glue_refused"]["rb_fix::hidden::Sealed"])
+
+    # A type no path spells is taken from a function a value of it comes out of: what it
+    # returns first, then the payload of a `Result` or `Option` it returns.
+    fns = md["functions"]
+    secret = RG.positions(fns, types, "rb_fix::hidden::Secret")
+    @test [(p.path, p.helper) for p in secret] == [("rb_fix::secret", "__rb_ret0")]
+    @test secret[1].what == "what `rb_fix::secret` returns"
+    fault = RG.positions(fns, types, "rb_fix::hidden::Fault")
+    @test [(p.path, p.helper, p.what) for p in fault] == [("rb_fix::parse_byte", "__rb_err1", "the `Err` of what `rb_fix::parse_byte` returns")]
+    @test isempty(RG.positions(fns, types, "rb_fix::hidden::Sealed"))           # taken by value, returned by nothing
+    @test ("rb_fix::find_word", "__rb_some2") in [(p.path, p.helper) for p in RG.positions(fns, types, "alloc::string::String"; limit = 100)]
+    @test length(RG.positions(fns, types, "alloc::string::String")) == 4       # the best few, not all
+    @test first(RG.positions(fns, types, "alloc::string::String")).helper[1:8] == "__rb_ret"
+    # A function the build refused, or one of too many parameters, is not one to take a type from.
+    wide = deepcopy(only(f for f in fns if f["path"] == "rb_fix::secret"))
+    wide["parameters"] = [Dict{String,Any}("name" => "a$i", "type" => "u8") for i in 1:RG.MAX_ARITY+1]
+    @test isempty(RG.positions([wide], types, "rb_fix::hidden::Secret"))
+    wide["parameters"] = Any[]; wide["refusal"] = "refused"
+    @test isempty(RG.positions([wide], types, "rb_fix::hidden::Secret"))
+end
+
+@testset "RustGlue: a type taken from a function that returns it" begin
+    rows = [RG.Row(2, "dep::hidden::Secret", "what `dep::secret` returns", false, "__rb_ret0(dep::secret)"),
+            RG.Row(5, "dep::hidden::Fault", "the `Err` of what `dep::parse` returns", false, "__rb_err1(dep::parse)"),
+            RG.Row(6, "dep::Named", "dep::Named", false)]
+    (text, line_of) = RG.glue_text(rows)
+    ls = split(text, '\n')
+    @test ls[line_of[2]] == "#[no_mangle] pub static __rb_dropfn_2: __RbAddr = __RbAddr(__rb_ret0(dep::secret) as *const ());"
+    @test ls[line_of[5]] == "#[no_mangle] pub static __rb_dropfn_5: __RbAddr = __RbAddr(__rb_err1(dep::parse) as *const ());"
+    @test startswith(ls[line_of[6]], "#[no_mangle] pub unsafe extern \"C\" fn __rb_drop_6(p: *mut dep::Named, ")
+    @test RG.dropfn_symbol(5) == "__rb_dropfn_5" && RG.Row(1, "a", "a", true).call == ""
+
+    # What the library says: the function the compiler picked is named for whether the type
+    # is dropped, and its debug info for which type it is.
+    ptr(target) = Dict{String,Any}("kind" => "pointer", "target" => target)
+    types = Dict{String,Any}("dep::hidden::Secret" => Dict{String,Any}("kind" => "struct"), "*mut dep::hidden::Secret" => ptr("dep::hidden::Secret"),
+                             "dep::hidden::Fault" => Dict{String,Any}("kind" => "enum"), "*mut dep::hidden::Fault" => ptr("dep::hidden::Fault"),
+                             "dep::Flat" => Dict{String,Any}("kind" => "struct"), "*mut dep::Flat" => ptr("dep::Flat"))
+    fn(p) = Dict{String,Any}("parameters" => Any[Dict{String,Any}("name" => "p", "type" => p), Dict{String,Any}("name" => "_unused", "type" => "usize")])
+    dwarf = Dict{String,Any}("_Rowned_secret" => fn("*mut dep::hidden::Secret"), "_Rplain_flat" => fn("*mut dep::Flat"),
+                             "_Rowned_fault" => fn("*mut dep::hidden::Fault"))
+    demangled = Dict("_Rowned_secret" => "dep_rb::__rb_drop_owned::<dep::hidden::Secret>", "_Rplain_flat" => "dep_rb::__rb_drop_plain::<dep::Flat>",
+                     "_Rowned_fault" => "dep_rb::__rb_drop_owned::<dep::hidden::Fault>", "_Rother" => "dep_rb::something_else")
+    table = Dict("__rb_dropfn_1" => "_Rowned_secret", "__rb_dropfn_2" => "_Rplain_flat", "__rb_dropfn_3" => "_Rowned_fault",
+                 "__rb_dropfn_4" => "_Rother", "__rb_dropfn_6" => "_Rowned_secret")
+    exported = Set(["__rb_dropfn_$i" for i in (1, 2, 3, 4, 6)])
+    plan = RG.Plan(String[], [RG.Row(1, "dep::hidden::Secret", "what `dep::secret` returns", false, "__rb_ret0(dep::secret)"),
+                              RG.Row(2, "dep::Flat", "what `dep::flat` returns", false, "__rb_ret0(dep::flat)"),
+                              RG.Row(3, "dep::Wanted", "what `dep::other` returns", false, "__rb_ret0(dep::other)"),
+                              RG.Row(4, "dep::Odd", "what `dep::odd` returns", false, "__rb_ret0(dep::odd)"),
+                              RG.Row(5, "dep::Gone", "what `dep::gone` returns", false, "__rb_ret0(dep::gone)")],
+                   Dict{String,String}())
+    (glue, refused) = RG.verify(plan, dwarf, types, exported; table, demangled)
+    @test glue["dep::hidden::Secret"] == Dict{String,Any}("drop" => "__rb_dropfn_1", "by_address" => true, "owns" => true,
+                                                          "spelling" => "what `dep::secret` returns")
+    @test glue["dep::Flat"]["owns"] === false && glue["dep::Flat"]["by_address"] === true
+    @test sort!(collect(keys(glue))) == ["dep::Flat", "dep::hidden::Secret"]
+    @test occursin("is another type (`dep::hidden::Fault`)", refused["dep::Wanted"])
+    @test occursin("was not read", refused["dep::Odd"]) && occursin("is not in the library", refused["dep::Gone"])
+end
+
+@testset "RustGlue: the fixture's refusal" begin
+    md = RepliBuild._read_json(rust_fixture("owned_o3.metadata.json"))
+    @test collect(keys(md["glue_refused"])) == ["rb_fix::hidden::Sealed"]
 end
 
 @testset "RustGlue: the file and its record on disk" begin
@@ -211,6 +319,17 @@ end
         back = _RGT_RB._read_plan(rc, "one")
         @test back.wanted == plan.wanted && back.refused == plan.refused
         @test [(r.n, r.key, r.spelling, r.vec) for r in back.rows] == [(1, "dep::Token", "dep::Token", false)]
+        @test isempty(back.fns) && isempty(back.wanted_fns)
+        # The functions' lines are part of the same record.
+        both = RG.Plan(plan.wanted, plan.rows, plan.refused, ["inline|_Rsym", "instantiate|dep::f::<u8>"],
+                       [RG.FnRow(1, "dep::small", "inline", "_Rsym"), RG.FnRow(2, "dep::f::<u8>", "instantiate", "")],
+                       Dict("_Rother" => "no public path names it"))
+        _RGT_RB._write_glue(rc, both; identity = "one")
+        @test read(path, String) == RG.glue_text(both.rows, both.fns)[1]
+        again = _RGT_RB._read_plan(rc, "one")
+        @test again.wanted_fns == both.wanted_fns && again.fn_refused == both.fn_refused
+        @test [(f.n, f.expr, f.source, f.symbol) for f in again.fns] == [(1, "dep::small", "inline", "_Rsym"), (2, "dep::f::<u8>", "instantiate", "")]
+        _RGT_RB._write_glue(rc, plan; identity = "one")
         # Unchanged text is not rewritten: cargo rebuilds what is newer.
         stamp = mtime(path)
         sleep(0.05)

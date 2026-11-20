@@ -23,11 +23,12 @@ Ingest and llmcall are John's features with julia dont use them clancker.
 | 3 | `ccall` | Everything else; the default for C |
 
 A **Rust front end is in progress** (branch work since 2026-11-19): `build`,
-`wrap` and `use` work on a `[rust]` project for every function that has a
-symbol, through plain `ccall`s and generated thunks (`RustThunks`, the
-dialect's `jlcs.native_call`), ownership included (`String`, `Vec`, `Box`,
-records that hold them, `Result`); generic and `#[inline]` functions and
-trait objects are not built. It wraps plain Rust, never `extern "C"`; design
+`wrap` and `use` work on a `[rust]` project for a crate's public functions,
+`#[inline]` ones included, and generic ones for the types `[rust]
+instantiate` names, through plain `ccall`s and generated thunks
+(`RustThunks`, the dialect's `jlcs.native_call`), ownership included
+(`String`, `Vec`, `Box`, records that hold them, `Result`); trait objects
+are not built. It wraps plain Rust, never `extern "C"`; design
 and measurements are `docs/updates/RUST_FRONT_END.md`, the rules are under
 "Rust front end" below.
 
@@ -123,8 +124,9 @@ skill drives adding a package.
   the mtime.
 - **`packages/rustlibm` is the Rust reference package** (2026-11-19): the
   `libm` crate from its pinned commit, `[rust] dependency`, in `index.toml`.
-  `use("rustlibm")` wraps all 114 functions (104 plain calls, 10 through
-  thunks); its `test_deep.jl` checks them against Julia's own math through
+  `use("rustlibm")` wraps the 114 functions the library exports (104 plain
+  calls, 10 through thunks) and the 116 `#[inline]` ones the build finds in
+  the crate; its `test_deep.jl` checks them against Julia's own math through
   the generated module. John's Hub is the starter every user's own Hub
   begins from, so an in-progress package belongs there.
 - **`packages/rustsemver` is the Rust package for values Rust owns**
@@ -1999,7 +2001,48 @@ outward-facing, so ask first.
   kept one at opt-level 3; 17 of 17 with it). `cargo_args` states the whole
   profile (`codegen-units=1`, so exactly one `<crate>-<hash>.ll`); changing
   one setting there needs the surface re-measured. An `#[inline]` function
-  has no symbol at any level: it is not in the library, and not in the surface.
+  has no symbol at any level: the library has it only because the build
+  names it in the root crate (below).
+- **A TOML entry only for what no compile of the same code can say** (John,
+  2026-11-19, "same with c and cpp"). So `[rust] instantiate` exists, for a
+  generic function nobody instantiated: nothing in a compile of the crate
+  says which type a user wants. And nothing else about a crate has an entry:
+  its `#[inline]` functions are the compiler's to list, and are found
+  (`RustBuild.unexported_functions`: a second compile of the wrapped crate
+  alone with `-C link-dead-code`, into the same target directory, linked
+  into nothing; the normal build stays up to date). Before proposing a
+  `[rust]` key, ask whether a compile could answer.
+- **A function with no symbol is NAMED in the root crate, and that is all**
+  (`rb_glue.rs`: `pub static __rb_fn_<n>: __RbAddr = __RbAddr((<expr>) as
+  *const ());`). rustc then compiles it there; the root crate's IR
+  (`deps/<root>.ll`) says which function each static points at
+  (`RustGlue.address_table`), and its `define` line and DIE are read like
+  any function's. Never state such a function's signature in generated
+  Rust. Its metadata row has `address` (the static) and `instance`
+  (`"inline"` or `"instantiate"`), and **it is called by address, never by
+  name**: `RustThunks.load` reads the address through the library's handle
+  and registers it on that library's JIT under the function's symbol; a
+  plain call loads it with `cglobal`. Anything that takes a row's `symbol`
+  for a name the loader binds must ask for `address` first.
+- **A found function's path is spelled like a type's** (`function_expression`,
+  then the probe's chosen paths), and one with no public path is not the
+  crate's API: it is left out without a word, and only counted
+  (`instances.not_public`). An `instantiate` entry that does not compile is
+  the project file's own line: a build error with the compiler's message.
+- **A type no path spells is taken from a function that returns it**
+  (`RustGlue.positions`, `__rb_dropfn_<n>`): a `const fn` given the function
+  has the compiler pick `__rb_drop_owned::<T>` or `__rb_drop_plain::<T>` for
+  its return type, or for the `Ok`, `Err` or `Some` inside it. Which of the
+  two is "is this type dropped"; the picked function's DIE names `T`, which
+  is checked. Such a `glue` entry has `by_address`. Spelling is tried first
+  (it also gives a `Vec` its two functions).
+- **A destructor is never offered as a function** (`<T as
+  core::ops::drop::Drop>::drop`): Rust refuses a direct call of one, and a
+  value dropped that way would be dropped again by its owner.
+- **What the project file asks for is part of the metadata key**
+  (`_metadata_key`'s `asked`): `instantiate` changes the library only once
+  a build acts on it, so a key of the library and IR alone served the old
+  metadata for a changed list.
 - **The library is a generated root crate; the wrapped crate is its
   dependency** (`root_files`, `<[paths] build>/rust/root`). A `#![no_std]`
   crate cannot be the end of a link (libm: "`#[panic_handler]` function
@@ -2117,8 +2160,9 @@ outward-facing, so ask first.
 - **`rb_glue.rs` belongs to one compiler, crate and feature set**
   (`rb_glue.json`, `_glue_identity`, the file's hash): a file that does not
   match its record is replaced by an empty one before any compile, and a
-  build that fails with lines in the file is tried once more without them,
-  so a crate that changed under its lines still builds.
+  build that fails with lines in the file (of either kind: a type's or a
+  function's) is tried once more without them, so a crate that changed
+  under its lines still builds.
 - **A wrapper JITs nothing at load.** `RustRuntime.Library` opens the
   library; the thunk session is created at the first thunk call, and never
   while Julia is generating output. A wrapper of plain calls needs no libJLCS.
@@ -2540,16 +2584,12 @@ read the generator output first. (User-facing C++ RAII — `Managed<T>` finalize
 DWARF-resolved destructors — **is** built.)
 
 - **Rust, what is left** (2026-11-19; `docs/updates/RUST_FRONT_END.md`
-  §22): functions with no symbol (`#[inline]`, generic), which need only
-  their PATH named in the root crate (measured) and a decision on where the
-  list comes from; trait objects (a `Box<dyn Trait>` is held and dropped,
-  and cannot be passed as `&dyn Trait` yet), callbacks, statics. Of
-  ownership: building an owning record or an enum with data from Julia
-  (only `String` and `Vec` are built), `Box::new` from a Julia value, a
-  type of another crate the wrapped one does not re-export (the root crate
-  does not depend on it), a type a crate exports only under another name
-  (`pub use inner::Error as ParseError`: no shortening of the defined path
-  finds it; humantime), a slice of what is not plain data, a value aligned
+  §23): trait objects (a `Box<dyn Trait>` is held and dropped, and cannot be
+  passed as `&dyn Trait` yet), callbacks, statics. A generic function is
+  wrapped only for the types `[rust] instantiate` names. Of ownership:
+  building an owning record or an enum with data from Julia (only `String`
+  and `Vec` are built), `Box::new` from a Julia value, a type nothing with
+  a public path returns, a slice of what is not plain data, a value aligned
   beyond 16 bytes (tiny-skia's SIMD records). Also unbuilt: `discover` on a
   Cargo project, the doctor reporting cargo and rustc (`build` still asks
   the C/C++ doctor first), an `extern "C"` function taking a record the C

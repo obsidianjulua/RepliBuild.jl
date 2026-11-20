@@ -124,12 +124,26 @@ pub struct View { pub p: *const f64, pub n: usize }
 pub fn view(xs: &[f64]) -> View { View { p: xs.as_ptr(), n: xs.len() } }
 pub fn view_len(v: View) -> usize { v.n }
 
-// A type no path outside the crate reaches: nothing can name it to drop it.
+// Types no path outside the crate spells. `Secret` is public in a private
+// module, `Fault` is exported only under another name. A function returns
+// each, and that function can be named: the compiler takes the type from it.
+// Nothing returns a `Sealed`, so nothing can be written that drops one.
 mod hidden {
     pub struct Secret { pub v: Vec<u8> }
+    pub enum Fault { Bad(String), Empty }
+    pub struct Sealed { pub v: Vec<u8> }
 }
+pub use hidden::Fault as ParseFault;
 pub fn secret() -> hidden::Secret { hidden::Secret { v: vec![1, 2, 3] } }
 pub fn secret_len(s: &hidden::Secret) -> usize { s.v.len() }
+pub fn secret_take(s: hidden::Secret) -> usize { s.v.len() }
+pub fn parse_byte(s: &str) -> Result<u8, hidden::Fault> {
+    if s.is_empty() { Err(hidden::Fault::Empty) } else { s.parse().map_err(|_| hidden::Fault::Bad(s.to_string())) }
+}
+pub fn fault_text(f: &hidden::Fault) -> String {
+    match f { hidden::Fault::Bad(s) => format!("bad: {s}"), hidden::Fault::Empty => "empty".to_string() }
+}
+pub fn sealed_len(s: hidden::Sealed) -> usize { s.v.len() }
 
 // --- methods: `self` is an ordinary first parameter --------------------------------
 pub struct Acc { total: f64, count: u32 }
@@ -154,6 +168,38 @@ pub fn largest<T: PartialOrd + Copy>(xs: &[T]) -> T {
     m
 }
 pub fn largest_f64(xs: &[f64]) -> f64 { largest(xs) }
+
+// --- functions the library has no symbol for -----------------------------------------
+// An `#[inline]` function is compiled into its callers, and has no symbol of its own.
+#[inline] pub fn small(x: i32) -> i32 { x + 1 }
+#[inline] pub fn sum_diff(a: f64, b: f64) -> (f64, f64) { (a + b, a - b) }
+#[inline(always)] pub fn triple(x: u64) -> u64 { x * 3 }
+#[inline] pub fn greet(name: &str) -> String { format!("hi {name}") }
+#[inline] pub fn divide(a: i32, b: i32) -> i32 { if b == 0 { panic!("inline division by zero") } a / b }
+#[inline] fn private_helper(x: i32) -> i32 { x * 7 }
+pub fn uses_helper(x: i32) -> i32 { private_helper(x) + small(x) }
+impl Rec {
+    #[inline] pub fn dsum(&self) -> f64 { self.b + self.d as f64 }
+    #[inline] pub fn with_d(self, d: u32) -> Rec { Rec { d, ..self } }
+}
+impl Named {
+    #[inline] pub fn id(&self) -> u32 { self.id }
+    #[inline] pub fn rename(&mut self, name: &str) { self.name = name.to_string(); }
+}
+// What `derive` writes is inline too.
+#[derive(Clone, PartialEq, Default)]
+pub struct Tag { pub label: String, pub n: u32 }
+pub fn tag(label: &str, n: u32) -> Tag { Tag { label: label.to_string(), n } }
+// A generic function exists only for the types something uses it with.
+pub struct Pair<T> { pub a: T, pub b: T }
+impl<T: Copy + core::ops::Add<Output = T>> Pair<T> {
+    pub fn new(a: T, b: T) -> Pair<T> { Pair { a, b } }
+    pub fn sum(&self) -> T { self.a + self.b }
+}
+pub fn midpoint<T: Copy + core::ops::Add<Output = T> + core::ops::Div<Output = T> + From<u8>>(a: T, b: T) -> T {
+    (a + b) / T::from(2u8)
+}
+pub fn into_f64(x: impl Into<f64>) -> f64 { x.into() }
 
 // --- a panic, a static, and a caller-location parameter DWARF does not list ----------
 pub fn checked_div(a: i32, b: i32) -> i32 { if b == 0 { panic!("division by zero in rb_fix") } a / b }

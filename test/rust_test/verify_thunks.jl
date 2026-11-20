@@ -51,6 +51,19 @@ case("thunks_for_every_callable") do
         (true, true, true) ? true : (missing_thunks, length(S.thunks), length(callable), S.skipped)
 end
 
+# A function the library has no symbol for (an `#[inline]` one, a generic one
+# for the types the project asks for) is called through its thunk like any
+# other: the thunk's callee is where the library's static says the function is.
+case("functions_with_no_symbol") do
+    rows = [f for f in MD["functions"] if haskey(f, "address")]
+    pair = call("rb_fix::sum_diff", 5.0, 2.0)
+    (length(rows) >= 16, all(f -> haskey(S.thunks, f["symbol"]), [f for f in rows if f["refusal"] === nothing]),
+     at(call("rb_fix::small", Int32(41)), Int32, 0), at(call("rb_fix::triple", UInt64(5)), UInt64, 0),
+     at(pair, Float64, offset("(f64, f64)", "__0")), at(pair, Float64, offset("(f64, f64)", "__1")),
+     at(call("rb_fix::midpoint::<f64>", 1.0, 4.0), Float64, 0), at(call("rb_fix::into_f64::<f32>", 2.5f0), Float64, 0)) ==
+        (true, true, 42, 15, 7.0, 3.0, 2.5, 2.5)
+end
+
 # --- two scalars returned in two registers ------------------------------------
 case("option_i32") do
     opt = TYPES["core::option::Option<i32>"]

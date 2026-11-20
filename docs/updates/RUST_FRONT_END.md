@@ -1713,20 +1713,94 @@ depend on it), a type exported only under another name, and reading a
 way to: a value that borrows from another must not outlive it, and a
 finalizer may run on another thread than the one that made the value.
 
-## 22. The walk from here
+## 22. Functions with no symbol, and types with no name (built 2026-11-19)
 
-9. **What has no symbol, and what has no name.** Naming a function BY PATH
-   in the root crate is enough: `dep::small as *const ()`, `dep::largest::<f64> as *const ()`.
-   rustc then compiles it into the root crate (internal linkage), its
-   `define` line and its DIE appear in the root's IR and DWARF, and its
-   address is in an exported table. Measured 2026-11-19 for an `#[inline]`
-   function, a generic function and a method of a generic type. So Part I
-   §6.5's `sig` is not needed: a `[[rust.instantiate]]` entry is a path. What
-   remains to decide is where the list of paths comes from (the TOML, or
-   rustdoc's JSON, which is nightly-only today). The same naming reaches a
-   type no path spells (§21: one exported under another name): a generic
-   helper given the function infers its return type, and the helper's own
-   instantiation says in DWARF which type that was.
+| §15 step | Where | What it does |
+|---|---|---|
+| 9a. Which functions | `RustBuild.unexported_functions`, `discovery_args` | a second compile of the wrapped crate alone, with `-C link-dead-code`, whose IR lists every function of the crate that is not generic |
+| 9b. One line per function | `rb_glue.rs`: `__rb_fn_<n>` | the function is NAMED in the root crate, which makes rustc compile it there; an exported static holds its address |
+| 9c. Reading it back | `RustGlue.address_table`, `extract_metadata` | the root crate's IR says which function each static points at; its `define` line and DIE are in the build like any function's |
+| 9d. Calling it | `RustThunks.load`, `GeneratorRust` | by address: the thunk's callee is registered on the library's own JIT at that address, and a plain call loads it from the static |
+| 9e. Generic functions | `[rust] instantiate` | the one TOML entry: an expression that names a function with its types |
+| 9f. Types no path spells | `RustGlue.positions`, `__rb_dropfn_<n>` | the compiler takes the type from a function that returns one |
+
+**The rule for what goes in the TOML** (John, 2026-11-19): an entry only for
+what no compile of the same code can say, as for C and C++. So:
+
+- An `#[inline]` function needs none. It has no symbol because it is
+  compiled into its callers, and the compiler knows every one of them: with
+  `-C link-dead-code` on the wrapped crate alone, rustc writes out every
+  function that is not generic, used or not. That compile is of one crate,
+  into the build's own target directory with the build's own profile, so the
+  dependencies are the ones already built, it is linked into nothing, and
+  the normal build stays up to date (measured). Its IR is a second
+  `<crate>-<hash>.ll`; which one is found through the copy cargo makes of
+  the crate's `.rlib` (`_crate_ir`).
+- A generic function nobody instantiated needs one. Nothing in a compile of
+  the crate says which type a user wants `largest<T>` for. Instantiations
+  the crate makes itself are found like inline functions.
+
+**Naming is enough.** `(rb_fix::small) as *const ()` in a static of the root
+crate makes rustc compile `small` there, and the static's initializer in the
+root crate's IR is `ptr @<its symbol>`. The existing readers then describe
+it: the same join on its own `define` line, the same DWARF. Measured at
+opt-level 0 and 3 for an inline function, an inline method, a derived
+`Clone`, a generic function, a method of a generic type and a function
+taking `impl Trait`. A found function is named by its path as the demangler
+prints it, with its paths chosen as a type's are (§21's probe); one with no
+public path is not the crate's API and is left out. An `instantiate` entry
+that does not compile is the project file's own line and is an error.
+
+**A type no path spells is taken from a function that returns it.**
+`Secret` is public in a private module; humantime's `duration::Error` is
+exported as `DurationError`. §21 could spell neither. But a function that
+returns one can be named, and a `const fn` given that function has the
+compiler pick the drop function of its return type (or of the `Ok`, `Err` or
+`Some` inside it), with the type never written:
+
+    pub static __rb_dropfn_7: __RbAddr = __RbAddr(__rb_err1(dep::parse) as *const ());
+
+What the static points at is `__rb_drop_owned::<T>` or `__rb_drop_plain::<T>`:
+which of the two is the compiler's answer to "is this type dropped", and its
+debug info names `T`, which is checked against the type that was meant. So
+the only types left without a drop function are those nothing with a public
+path returns, and a value of such a type cannot reach Julia.
+
+**A destructor is in the library and is not offered.** `impl Drop for T`
+exports `<T as Drop>::drop`, which the wrap of §20 gave a Julia function.
+Rust refuses a direct call of one; a wrapper that made one would drop the
+value a second time later. It is a stub now.
+
+**Ten real crates again** (same pinned tags, opt-level 3; every module
+loads):
+
+| Crate | Functions with a symbol | Functions now | Wrapped |
+|---|---|---|---|
+| strsim | 13 | 16 | 16 |
+| humantime | 32 | 47 | 44 |
+| unicode-width | 16 | 20 | 20 |
+| miniz_oxide | 51 | 101 | 98 |
+| uuid | 119 | 222 | 222 |
+| kurbo | 194 | 842 | 838 |
+| semver | 43 | 62 | 58 |
+| lz4_flex | 28 | 57 | 52 |
+| ropey | 77 | 246 | 240 |
+| tiny-skia | 253 | 328 | 264 |
+| | 826 | 1,941 | 1,852 |
+
+A crate's API is mostly not in its symbol table: kurbo's is four times what
+its library exports. Called, not only loaded: ropey's `Rope::from_str`,
+`insert` and `len_lines` on an owned rope; kurbo's `Vec2` arithmetic;
+humantime's `parse_duration`, whose error is now a value Julia holds; libm's
+116 inline helper methods against its exported functions.
+
+Not built, of this: a generic function is wrapped only for the types the
+project file names (there is no way to offer "any `T`"); a type no function
+with a public path returns; a function of more than eight parameters is not
+used to take a type from.
+
+## 23. The walk from here
+
 10. **Trait objects**, callbacks, statics.
 11. **Shipping**: AOT thunks, `discover` on a Cargo project, the doctor,
     a user guide page, Windows and AArch64.

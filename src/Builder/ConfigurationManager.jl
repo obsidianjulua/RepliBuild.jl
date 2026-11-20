@@ -342,6 +342,12 @@ source is never edited and needs no `extern "C"`.
 - `features`, `default_features`: the Cargo features the crate is built with.
 - `target_dir`: cargo's target directory, `<[paths] build>/rust/target`.
   Derived at load, absolute and `/`-separated, never written back to a TOML.
+- `instantiate`: generic functions to compile for particular types, each a
+  Rust expression that names one function (`geo::largest::<f64>`,
+  `geo::Pair::<i32>::sum`). A generic function exists only where something
+  uses it with a type, and no compile of the crate says which types its
+  user wants: this is the one thing about a Rust crate the compiler cannot
+  be asked. An `#[inline]` function needs no entry; the build finds those.
 """
 struct RustConfig
     manifest::String
@@ -351,7 +357,10 @@ struct RustConfig
     features::Vector{String}
     default_features::Bool
     target_dir::String
+    instantiate::Vector{String}
 end
+RustConfig(manifest, dependency, package, opt_level, features, default_features, target_dir) =
+    RustConfig(manifest, dependency, package, opt_level, features, default_features, target_dir, String[])
 
 """Nested struct for [types] section - Type validation settings"""
 struct TypesConfig
@@ -1340,7 +1349,7 @@ function _checkout_relative(dependency::AbstractString, source::AbstractString, 
 end
 
 "The keys a `[rust]` section may have."
-const RUST_KEYS = ("manifest", "dependency", "package", "opt_level", "features", "default_features")
+const RUST_KEYS = ("manifest", "dependency", "package", "opt_level", "features", "default_features", "instantiate")
 
 """
     parse_rust_config(data, root, paths, deps = parse_dependencies_config(data))
@@ -1384,9 +1393,14 @@ function parse_rust_config(data::Dict, root::AbstractString, paths::PathsConfig,
     manifest = isempty(dependency) ? under_root(manifest) :
                _checkout_relative(dependency, manifest, deps; section = "rust", key = "manifest",
                                   owner = "A crate's source", action = "build", inside = "a file")
+    inst = get(r, "instantiate", String[])
+    (inst isa AbstractVector && all(x -> x isa AbstractString && !isempty(strip(x)) && !occursin(r"[\n\r;{}]", x), inst)) ||
+        error("[rust] instantiate must be a list of Rust expressions that each name one function " *
+              "(\"geo::largest::<f64>\"), got $(repr(inst))")
     return RustConfig(manifest, dependency, str("package", ""), Int(opt),
                       unique(String[String(x) for x in feats]), default_features,
-                      under_root(joinpath(paths.build, "rust", "target")))
+                      under_root(joinpath(paths.build, "rust", "target")),
+                      unique(String[String(strip(x)) for x in inst]))
 end
 
 """Validate TOML data has minimum required fields"""
@@ -1728,6 +1742,7 @@ function save_config(config::RepliBuildConfig)
         isempty(config.rust.package) || (rust_dict["package"] = config.rust.package)
         isempty(config.rust.features) || (rust_dict["features"] = config.rust.features)
         config.rust.default_features || (rust_dict["default_features"] = false)
+        isempty(config.rust.instantiate) || (rust_dict["instantiate"] = config.rust.instantiate)
         data["rust"] = rust_dict
     end
 

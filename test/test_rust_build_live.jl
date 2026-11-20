@@ -32,6 +32,9 @@ _rbl_write(opt::Int) = write(_RBL_TOML, """
     [rust]
     manifest = "crate/Cargo.toml"
     opt_level = $opt
+    # Generic functions exist only for the types something uses them with.
+    instantiate = ["rb_fix::midpoint::<f64>", "rb_fix::Pair::<i32>::new", "rb_fix::Pair::<i32>::sum",
+                   "(rb_fix::into_f64 as fn(f32) -> f64)"]
     """)
 
 function _rbl_build()
@@ -266,9 +269,21 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
             @test g["rb_fix::inner::Token"]["spelling"] == "rb_fix::Token" && owns("rb_fix::inner::Token")
             @test g["alloc::vec::Vec<f64, alloc::alloc::Global>"]["spelling"] == "alloc::vec::Vec<f64>"
             @test haskey(g["alloc::vec::Vec<f64, alloc::alloc::Global>"], "vec") && !haskey(g["alloc::string::String"], "vec")
-            # No path outside the crate names it: said, with the compiler's own reason.
-            @test collect(keys(m["glue_refused"])) == ["rb_fix::hidden::Secret"]
-            @test occursin("module `hidden` is private", m["glue_refused"]["rb_fix::hidden::Secret"])
+            # No path outside the crate spells `Secret` (public in a private
+            # module) or `Fault` (exported only under another name). A function
+            # returns each, and that function has a path: the compiler takes
+            # the type from it, and says the type is dropped.
+            for (key, from) in (("rb_fix::hidden::Secret", "what `rb_fix::secret` returns"),
+                                ("rb_fix::hidden::Fault", "the `Err` of what `rb_fix::parse_byte` returns"),
+                                ("core::result::Result<u8, rb_fix::hidden::Fault>", "what `rb_fix::parse_byte` returns"))
+                @test (key, get(get(g, key, Dict()), "spelling", "refused")) == (key, from)
+                @test g[key]["by_address"] === true && owns(key) && startswith(g[key]["drop"], "__rb_dropfn_")
+            end
+            @test !haskey(g["rb_fix::Named"], "by_address")
+            # Nothing returns a `Sealed`: said, with the compiler's own reason and that one.
+            @test collect(keys(m["glue_refused"])) == ["rb_fix::hidden::Sealed"]
+            @test occursin("module `hidden` is private", m["glue_refused"]["rb_fix::hidden::Sealed"]) &&
+                  occursin("no function with a public path returns one", m["glue_refused"]["rb_fix::hidden::Sealed"])
             @test sort(m["glue_helpers"]) == ["__rb_string_new", "__rb_string_view"]
             # Every type the functions move was asked about, and no other.
             @test Set(RG.wanted(m["functions"], m["types"])) == union(Set(keys(g)), Set(keys(m["glue_refused"])))
@@ -277,7 +292,10 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         @test occursin("ownership: ", out) && occursin("no drop function (1)", out)
         # One line of the file per answered type; the crate's own tree as it was.
         root = joinpath(_RBL_DIR, "build", "rust", "root")
-        @test count(l -> startswith(l, "#[no_mangle]"), readlines(joinpath(root, "rb_glue.rs"))) == length(md3["glue"])
+        glue_lines = readlines(joinpath(root, "rb_glue.rs"))
+        spelled = [e for e in values(md3["glue"]) if !get(e, "by_address", false)]
+        @test count(l -> startswith(l, "#[no_mangle] pub unsafe extern \"C\" fn __rb_drop_"), glue_lines) == length(spelled)
+        @test count(l -> startswith(l, "#[no_mangle] pub static __rb_dropfn_"), glue_lines) == length(md3["glue"]) - length(spelled) >= 3
         @test crate_tree == _rbl_tree(joinpath(_RBL_DIR, "crate"))
         # Each drop function is in the library and is its own: asked with no
         # value it says which it is, so none was merged into another. A copy
@@ -290,11 +308,102 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         h = Libdl.dlopen(copy)
         asked = 0
         for e in values(md3["glue"])
-            n = parse(UInt, match(r"(\d+)$", e["drop"]).captures[1])
-            @test ccall(Libdl.dlsym(h, e["drop"]), UInt, (Ptr{Cvoid}, Ptr{Cvoid}), C_NULL, C_NULL) == n
+            if get(e, "by_address", false)
+                # The static holds where the function the compiler picked is; with no value it does nothing.
+                fp = unsafe_load(Ptr{Ptr{Cvoid}}(Libdl.dlsym(h, e["drop"])))
+                @test fp != C_NULL && ccall(fp, UInt, (Ptr{Cvoid}, Ptr{Cvoid}), C_NULL, C_NULL) == 0
+            else
+                n = parse(UInt, match(r"(\d+)$", e["drop"]).captures[1])
+                @test ccall(Libdl.dlsym(h, e["drop"]), UInt, (Ptr{Cvoid}, Ptr{Cvoid}), C_NULL, C_NULL) == n
+            end
             asked += 1
         end
-        @test asked == length(md3["glue"]) >= 20
+        @test asked == length(md3["glue"]) >= 25
+    end
+
+    @testset "functions the library has no symbol for" begin
+        md3 = RepliBuild._read_json(meta_path)
+        exported = RepliBuild.Compiler._runtime_symbol_names(lib)
+        for m in (md, md3)
+            f = Dict(r["path"] => r for r in m["functions"])
+            # An `#[inline]` function is compiled into its callers and has no
+            # symbol; the build finds it in the crate and has it compiled in.
+            for path in ("rb_fix::small", "rb_fix::sum_diff", "rb_fix::triple", "rb_fix::greet", "rb_fix::divide",
+                         "<rb_fix::Rec>::dsum", "<rb_fix::Rec>::with_d", "<rb_fix::Named>::id", "<rb_fix::Named>::rename")
+                @test (path, get(get(f, path, Dict()), "instance", "absent")) == (path, "inline")
+                @test f[path]["refusal"] === nothing && f[path]["own_debug_info"]
+            end
+            # What `derive` writes is inline too.
+            @test f["<rb_fix::Tag as core::clone::Clone>::clone"]["instance"] == "inline"
+            @test f["<rb_fix::Tag as core::cmp::PartialEq>::eq"]["instance"] == "inline"
+            # A generic function for the types the project file asks for.
+            for path in ("rb_fix::midpoint::<f64>", "<rb_fix::Pair<i32>>::new", "<rb_fix::Pair<i32>>::sum", "rb_fix::into_f64::<f32>")
+                @test (path, get(get(f, path, Dict()), "instance", "absent")) == (path, "instantiate")
+                @test f[path]["refusal"] === nothing
+            end
+            @test f["rb_fix::midpoint::<f64>"]["generic"] && f["rb_fix::into_f64::<f32>"]["generic"]
+            # It is described like any function: the same join, on its own `define` line.
+            @test f["rb_fix::sum_diff"]["return"]["pass"] == "pair" && f["rb_fix::greet"]["return"]["type"] == "alloc::string::String"
+            @test [p["type"] for p in f["<rb_fix::Named>::rename"]["parameters"]] == ["&mut rb_fix::Named", "&str"]
+            # A function that is not public is not the crate's API, and is not there.
+            @test !haskey(f, "rb_fix::private_helper") && m["instances"]["not_public"] >= 1
+            @test m["instances"]["instantiate"] == 4 && m["instances"]["inline"] >= 12
+            @test isempty(m["instances_refused"])
+            # A function the library exports is reached by its name, as before.
+            @test !haskey(f["rb_fix::add"], "address") && !haskey(f["rb_fix::uses_helper"], "address")
+            @test allunique(r["symbol"] for r in m["functions"])
+        end
+        @test occursin("no symbol of their own", out)
+        # The loader binds none of these by name: each is reached through an
+        # exported static that holds where it is.
+        f3 = Dict(r["path"] => r for r in md3["functions"])
+        inst = [r for r in md3["functions"] if haskey(r, "address")]
+        @test length(inst) >= 16
+        @test all(r -> r["address"] in exported, inst) && allunique(r["address"] for r in inst)
+        @test !(f3["rb_fix::small"]["symbol"] in exported)
+        copy = tempname() * "." * Libdl.dlext
+        cp(lib, copy)
+        h = Libdl.dlopen(copy)
+        at(path) = unsafe_load(Ptr{Ptr{Cvoid}}(Libdl.dlsym(h, f3[path]["address"])))
+        @test ccall(at("rb_fix::small"), Int32, (Int32,), 41) == 42
+        @test ccall(at("rb_fix::triple"), UInt64, (UInt64,), 5) == 15
+        @test ccall(at("rb_fix::midpoint::<f64>"), Float64, (Float64, Float64), 1.0, 4.0) == 2.5
+        @test ccall(at("rb_fix::into_f64::<f32>"), Float64, (Float32,), 2.5f0) == 2.5
+        # The compile that lists the crate's functions is a second IR file of
+        # the crate; the build's own is untouched, and nothing is linked from it.
+        deps = joinpath(_RBL_DIR, "build", "rust", "target", "debug", "deps")
+        @test count(n -> startswith(n, "rb_fix-") && endswith(n, ".ll"), readdir(deps)) >= 2
+        @test crate_tree == _rbl_tree(joinpath(_RBL_DIR, "crate"))
+    end
+
+    @testset "a crate whose whole API has no symbol, and an entry that is not a function" begin
+        mktempdir() do dir
+            cp(joinpath(_RBL_DIR, "crate"), joinpath(dir, "crate"))
+            src = joinpath(dir, "crate", "src", "lib.rs")
+            toml = joinpath(dir, "replibuild.toml")
+            project(extra) = write(toml, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\n" * extra)
+            build() = withenv("REPLIBUILD_JULIA_ENV" => "none") do
+                redirect_stdout(() -> RepliBuild.build(toml), devnull)
+            end
+            # Nothing exported at all: one inline function and one generic one.
+            write(src, "#[inline] pub fn only(x: i32) -> i32 { x + 1 }\npub fn twice<T: Copy + core::ops::Add<Output = T>>(x: T) -> T { x + x }\n")
+            project("instantiate = [\"rb_fix::twice::<u8>\"]\n")
+            m = RepliBuild._read_json(joinpath(dirname(build()), "compilation_metadata.json"))
+            @test sort!([r["path"] for r in m["functions"]]) == ["rb_fix::only", "rb_fix::twice::<u8>"]
+            @test all(r -> haskey(r, "address") && r["refusal"] === nothing, m["functions"])
+            # An entry that names no function is the project file's own mistake: an error that names it.
+            project("instantiate = [\"rb_fix::no_such::<f64>\"]\n")
+            msg = _rbl_error(build)
+            @test occursin("[rust] instantiate", msg) && occursin("rb_fix::no_such::<f64>", msg)
+            # The entry alone changed, not the crate: the build still acted on it.
+            # And it is not left with the line: the next build succeeds.
+            project("")
+            m2 = RepliBuild._read_json(joinpath(dirname(build()), "compilation_metadata.json"))
+            @test [r["path"] for r in m2["functions"]] == ["rb_fix::only"]
+            # A crate with nothing to wrap is an error, as an empty C library is.
+            write(src, "pub fn twice<T: Copy + core::ops::Add<Output = T>>(x: T) -> T { x + x }\n")
+            @test occursin("has no function to wrap", _rbl_error(build))
+        end
     end
 
     @testset "the per-type lines follow the crate" begin

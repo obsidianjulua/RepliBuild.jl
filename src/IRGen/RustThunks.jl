@@ -266,6 +266,12 @@ Generate, lower and JIT the thunks for a Rust library from its
 Every callee is looked up through the library's own handle first, and a
 function the handle does not resolve gets no thunk: the JIT does not raise
 for a symbol it cannot find, it waits forever.
+
+A function the library has no symbol for (a row with `address`: an
+`#[inline]` function or an instantiation the root crate compiled) is not a
+name the loader binds. The library exports a static that holds where it is;
+that address is read through the handle and given to this library's JIT
+under the function's own name, and to no other.
 """
 function load(library::AbstractString, metadata::AbstractDict; opt_level::Int = 2)::Session
     get(metadata, "language", "") == "rust" ||
@@ -276,9 +282,20 @@ function load(library::AbstractString, metadata::AbstractDict; opt_level::Int = 
     handle = Libdl.dlopen(library, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
     bound = Set{String}()
     unbound = Dict{String,String}()
+    placed = Dict{String,Ptr{Cvoid}}()             # a function with no symbol => where it is
     for row in functions
         sym = String(row["symbol"])
-        if Libdl.dlsym_e(handle, sym) == C_NULL
+        address = get(row, "address", nothing)
+        if address isa AbstractString
+            cell = Libdl.dlsym_e(handle, String(address))
+            fp = cell == C_NULL ? C_NULL : unsafe_load(Ptr{Ptr{Cvoid}}(cell))
+            if fp == C_NULL
+                unbound[sym] = "the library does not export `$address`, which holds where this function is"
+            else
+                placed[sym] = fp
+                push!(bound, sym)
+            end
+        elseif Libdl.dlsym_e(handle, sym) == C_NULL
             unbound[sym] = "the library does not export `$sym`"
         else
             push!(bound, sym)
@@ -294,6 +311,9 @@ function load(library::AbstractString, metadata::AbstractDict; opt_level::Int = 
     MLIRNative.lower_to_llvm(mod) ||
         error(MLIRNative._with_diagnostics("RustThunks.load: the thunk module for $library did not lower."))
     jit = MLIRNative.create_jit(mod; opt_level, shared_libs = [library, MLIRNative.libJLCS_path()])
+    for sym in sort!(collect(keys(placed)))
+        MLIRNative.register_symbol(jit, sym, placed[sym])
+    end
     for sym in made
         addr = MLIRNative.lookup(jit, thunk_name(sym))
         if addr == C_NULL

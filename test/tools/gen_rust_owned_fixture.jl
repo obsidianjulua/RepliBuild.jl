@@ -23,7 +23,7 @@ const CRATE = normpath(joinpath(@__DIR__, "..", "rust_test", "crate"))
 const OUT = normpath(joinpath(@__DIR__, "..", "fixtures", "rust", "owned_o3.metadata.json"))
 
 # By Rust path. Each is here for one way a value is owned or handed over.
-const KEEP = ["rb_fix::make_greeting", "rb_fix::string_len_owned", "rb_fix::string_ref_len", "rb_fix::shout",
+const KEEP = ["rb_fix::add", "rb_fix::make_greeting", "rb_fix::string_len_owned", "rb_fix::string_ref_len", "rb_fix::shout",
               "rb_fix::squares", "rb_fix::vec_sum", "rb_fix::vec_push", "rb_fix::recs", "rb_fix::words",
               "rb_fix::join_words", "rb_fix::parse_int", "rb_fix::check", "rb_fix::find_word",
               "rb_fix::name_and_len", "rb_fix::boxed", "rb_fix::unbox_d", "rb_fix::box_d", "rb_fix::opt_box",
@@ -32,7 +32,13 @@ const KEEP = ["rb_fix::make_greeting", "rb_fix::string_len_owned", "rb_fix::stri
               "rb_fix::guard_release", "rb_fix::view", "rb_fix::view_len", "rb_fix::secret", "rb_fix::secret_len",
               "rb_fix::rec_sum_ref", "rb_fix::make_area", "rb_fix::flip", "rb_fix::flag", "rb_fix::compare",
               "rb_fix::ordering_sign", "rb_fix::level_next", "rb_fix::bytes16", "rb_fix::bytes16_sum", "rb_fix::grid",
-              "rb_fix::opt_bytes", "rb_fix::recs_total"]
+              "rb_fix::opt_bytes", "rb_fix::recs_total",
+              # Functions the library has no symbol for, and a destructor, which it has and nothing may call.
+              "rb_fix::small", "rb_fix::sum_diff", "rb_fix::divide", "<rb_fix::Named>::rename",
+              "<rb_fix::Tag as core::clone::Clone>::clone", "rb_fix::midpoint::<f64>", "<rb_fix::Pair<i32>>::sum",
+              "<rb_fix::Guard as core::ops::drop::Drop>::drop",
+              # Types no path spells, taken from the functions that return them; and one nothing returns.
+              "rb_fix::secret_take", "rb_fix::parse_byte", "rb_fix::fault_text", "rb_fix::sealed_len"]
 
 # Every type a description names.
 function reach!(seen::Set{String}, types, key)
@@ -61,6 +67,7 @@ mktempdir() do dir
         [rust]
         manifest = "crate/Cargo.toml"
         opt_level = 3
+        instantiate = ["rb_fix::midpoint::<f64>", "rb_fix::Pair::<i32>::sum"]
         """)
     lib = withenv("REPLIBUILD_JULIA_ENV" => "none", "REPLIBUILD_HOME" => mktempdir()) do
         RepliBuild.build(toml)
@@ -92,16 +99,24 @@ mktempdir() do dir
     owns("rb_fix::Rec") === false || error("the build does not say Rec is plain")
     get(get(glue, "rb_fix::inner::Token", Dict()), "spelling", "") == "rb_fix::Token" ||
         error("Token was not found under its public path")
-    haskey(refused, "rb_fix::hidden::Secret") || error("Secret, which no path names, was not refused")
+    get(get(glue, "rb_fix::hidden::Secret", Dict()), "by_address", false) === true ||
+        error("Secret, which no path names, was not taken from the function that returns it")
+    get(get(glue, "rb_fix::hidden::Fault", Dict()), "by_address", false) === true ||
+        error("Fault, exported under another name, was not taken from the function that returns it")
+    haskey(refused, "rb_fix::hidden::Sealed") || error("Sealed, which no path names and nothing returns, was not refused")
     haskey(get(glue, "alloc::vec::Vec<f64, alloc::alloc::Global>", Dict()), "vec") || error("Vec<f64> has no functions")
     isempty(setdiff(need, union(keys(glue), keys(refused)))) || error("a wanted type has neither an answer nor a refusal")
+    by_path = Dict(f["path"] => f for f in functions)
+    get(by_path["rb_fix::small"], "instance", "") == "inline" || error("`small`, an inline function, was not compiled in")
+    get(by_path["rb_fix::midpoint::<f64>"], "instance", "") == "instantiate" || error("`midpoint::<f64>` was not instantiated")
+    haskey(by_path["rb_fix::add"], "address") && error("`add`, which the library exports, is reached by an address")
 
     out = Dict{String,Any}(
         "metadata_version" => md["metadata_version"], "language" => "rust", "crate" => md["crate"],
         "library" => md["library"], "library_sha" => "0"^64,
         "toolchain" => Dict{String,Any}("rustc" => md["toolchain"]["rustc"]),
         "functions" => functions, "types" => types, "glue" => glue, "glue_refused" => refused,
-        "glue_helpers" => md["glue_helpers"], "skipped" => Any[])
+        "glue_helpers" => md["glue_helpers"], "instances" => md["instances"], "skipped" => Any[])
     open(OUT, "w") do io
         JSON.print(io, out, 1)
     end

@@ -115,12 +115,12 @@ case("a_panic_is_an_exception") do
 end
 # What is not wrapped says so, by name and with its reason, instead of being absent.
 case("unsupported_functions_say_why") do
-    # `Secret` is public in a private module that nothing re-exports: no Rust
-    # outside the crate can name it, so nothing can be written that drops one.
-    e = raised(() -> M.secret())
-    (e isa ErrorException, occursin("no drop function", e.msg), occursin("no path names `rb_fix::hidden::Secret`", M.UNSUPPORTED[:secret]),
-     haskey(M.UNSUPPORTED, :located), !haskey(M.FUNCTIONS, :secret), haskey(M.FUNCTIONS, :secret_len)) ==
-        (true, true, true, true, true, true)
+    # `Sealed` is public in a private module, and no function returns one: no
+    # Rust outside the crate can name it or get one, so nothing drops one.
+    e = raised(() -> M.sealed_len(1))
+    (e isa ErrorException, occursin("no drop function", e.msg), occursin("no path names `rb_fix::hidden::Sealed`", M.UNSUPPORTED[:sealed_len]),
+     occursin("no function with a public path returns one", M.UNSUPPORTED[:sealed_len]), haskey(M.UNSUPPORTED, :located),
+     !haskey(M.FUNCTIONS, :sealed_len)) == (true, true, true, true, true, true)
 end
 case("how_each_function_calls") do
     f = M.FUNCTIONS
@@ -217,6 +217,59 @@ case("what_the_module_says_it_owns") do
     o = M.OWNED
     (o[:Named], o[:Token], o[:RustString], haskey(o, :Guard), haskey(o, :Box_Rec), haskey(o, :View), haskey(o, :Rec)) ==
         ("rb_fix::Named", "rb_fix::inner::Token", "alloc::string::String", true, true, false, false)
+end
+
+# --- functions the library has no symbol for -----------------------------------
+# An `#[inline]` function is in the module like any other: the build found it and had it compiled in.
+case("inline_functions") do
+    (M.small(41), M.sum_diff(5.0, 2.0), M.triple(5), M.greet("you"), M.FUNCTIONS[:small] in (:ccall, :guarded), haskey(M.FUNCTIONS, :private_helper)) ==
+        (Int32(42), (7.0, 3.0), UInt64(15), "hi you", true, false)
+end
+case("a_panic_in_an_inline_function") do
+    e = raised(() -> M.divide(1, 0))
+    (M.divide(9, 3), e isa RT.RustPanic, e isa RT.RustPanic && occursin("inline division by zero", e.message), M.divide(8, 2)) ==
+        (Int32(3), true, true, Int32(4))
+end
+case("inline_methods") do
+    r = M.rec_make(1, 2.5, 3, 4)
+    n = M.named("ada", 7)
+    M.Named_rename(n, "grace")                    # `&mut self`, on the object that holds the value
+    (M.Rec_dsum(r), M.Rec_dsum(Ref(r)), M.Rec_with_d(r, 9).d, M.Named_id(n), n.name) == (6.5, 6.5, UInt32(9), UInt32(7), "grace")
+end
+# What `derive` writes: a clone is a second value, dropped on its own.
+case("derived_impls") do
+    t = M.tag("x", 3)
+    c = M.Tag_Clone_clone(t)
+    d = M.Tag_Default_default()
+    RT.drop!(t)
+    (c.label, c.n, M.Tag_PartialEq_eq(c, c), M.Tag_PartialEq_eq(c, d), d.label, d.n, RT.isowned(c), RT.isowned(t)) ==
+        ("x", UInt32(3), true, false, "", UInt32(0), true, false)
+end
+# A generic function is in the module for the types the project file names, and no other.
+case("generic_functions_for_the_types_asked_for") do
+    p = M.Pair_i32_new(20, 22)
+    (M.midpoint_f64(1.0, 4.0), M.Pair_i32_sum(p), p.a, M.into_f64_f32(2.5f0), isdefined(M, :midpoint_f32), isdefined(M, :midpoint)) ==
+        (2.5, Int32(42), Int32(20), 2.5, false, false)
+end
+# `Secret` is public in a private module and `Fault` is exported only under another name: no path
+# spells either. Each is returned by a function that has a path, and the compiler takes the type from it.
+case("types_no_path_spells") do
+    s = M.secret()
+    held = (s isa M.Secret, M.secret_len(s), RT.isowned(s), M.secret_take(s), RT.isowned(s))
+    bad = raised(() -> M.parse_byte("300"))
+    empty = raised(() -> M.parse_byte(""))
+    faults = (M.parse_byte("7"), bad isa RT.RustError, bad.value isa M.Fault, M.fault_text(bad.value), M.fault_text(empty.value),
+              RT.variant(bad.value), RT.variant(empty.value))
+    for i in 1:500                                # each dropped by Julia's collector, through the compiler's function
+        M.secret(); raised(() -> M.parse_byte("x$i"))
+    end
+    GC.gc(); GC.gc()
+    (held, faults, M.parse_byte("9"), haskey(M.OWNED, :Secret), haskey(M.OWNED, :Fault)) ==
+        ((true, UInt(3), true, UInt(3), false), (0x07, true, true, "bad: 300", "empty", :Bad, :Empty), 0x09, true, true)
+end
+case("a_destructor_is_not_called_by_name") do
+    e = raised(() -> M.Guard_Drop_drop(M.guard(1)))
+    (e isa ErrorException, occursin("destructor", M.UNSUPPORTED[:Guard_Drop_drop])) == (true, true)
 end
 
 println("PROBE_DONE")

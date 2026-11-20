@@ -32,6 +32,32 @@
 # row that does not compile is dropped and the rest built again
 # (`RustBuild` drives the compiles; nothing here runs a tool).
 #
+# A type no path spells (public in a private module, or exported only under
+# another name) is reached without spelling it: a function that RETURNS one
+# is named instead, and the compiler picks the drop function for whatever
+# that function returns,
+#
+#     pub static __rb_dropfn_7: __RbAddr = __RbAddr(__rb_err1(dep::parse) as *const ());
+#
+# The function the static points at is `__rb_drop_owned::<T>` or
+# `__rb_drop_plain::<T>`: which of the two is the compiler's answer to "is
+# this type dropped", and its debug info names `T`.
+#
+# The same file holds another kind of line: a function the library has no
+# symbol for. An `#[inline]` function, and a generic function for the types
+# someone wants, exist only where they are used; naming one makes the
+# compiler build it into the root crate:
+#
+#     pub static __rb_fn_12: __RbAddr = __RbAddr((dep::small) as *const ());
+#
+# The static holds its address. The root crate's IR says which function that
+# is (`address_table`), and from there it is a function like any other: its
+# `define` line and its debug info are in the build. Which `#[inline]`
+# functions a crate has is the compiler's to say (a second compile of the
+# crate that keeps dead code lists them); which types a generic function is
+# wanted for is the one thing no compile of the crate can say, and comes from
+# `[rust] instantiate`.
+#
 # Design: docs/updates/RUST_FRONT_END.md, Part III.
 
 module RustGlue
@@ -43,27 +69,59 @@ export Row, Plan, wanted, vec_element, payload_enum
 "The generated file of the root crate that holds one line per type."
 const FILE = "rb_glue.rs"
 
-"One type's line: its number (`__rb_drop_<n>`), the type's key in the metadata, how the line spells it, and whether it is a `Vec` (which gets two more functions)."
+"""
+One type's line: its number (`__rb_drop_<n>`), the type's key in the
+metadata, how the line spells it, and whether it is a `Vec` (which gets two
+more functions). A type that is not spelled has `call` instead: the
+expression that has the compiler pick its drop function from a function
+that returns one (`__rb_err1(dep::parse)`), and `spelling` then says in words
+where the type was taken from. Its static is `__rb_dropfn_<n>`.
+"""
 struct Row
     n::Int
     key::String
     spelling::String
     vec::Bool
+    call::String
+end
+Row(n, key, spelling, vec) = Row(n, key, spelling, vec, "")
+
+"""
+One function's line: its number (`__rb_fn_<n>`), the Rust expression that
+names it, where it came from (`"inline"`: the build found it in the crate;
+`"instantiate"`: `[rust] instantiate` asked for it), and for a found one the
+symbol it was found under, which the line's function must turn out to be.
+"""
+struct FnRow
+    n::Int
+    expr::String
+    source::String
+    symbol::String
 end
 
 """
 What `rb_glue.rs` was written from: the type keys it was asked for
 (`wanted`, sorted), the rows that are in the file, and for each wanted type
-with no row, why.
+with no row, why; then the same for functions (`wanted_fns` holds one
+`source|key` string per function asked for).
 """
 struct Plan
     wanted::Vector{String}
     rows::Vector{Row}
     refused::Dict{String,String}
+    wanted_fns::Vector{String}
+    fns::Vector{FnRow}
+    fn_refused::Dict{String,String}
 end
+Plan(wanted, rows, refused) = Plan(wanted, rows, refused, String[], FnRow[], Dict{String,String}())
 Plan() = Plan(String[], Row[], Dict{String,String}())
 
 drop_symbol(n::Integer) = "__rb_drop_$n"
+dropfn_symbol(n::Integer) = "__rb_dropfn_$n"
+fn_symbol(n::Integer) = "__rb_fn_$n"
+
+"How many parameters a function may have for its return type to be taken from it (the root crate has one helper per count)."
+const MAX_ARITY = 8
 vec_view_symbol(n::Integer) = "__rb_vec_view_$n"
 vec_new_symbol(n::Integer) = "__rb_vec_new_$n"
 
@@ -342,14 +400,23 @@ The length of the array `_owns` points at is the compiler's answer to "does
 dropping this type do anything". A `Vec` gets two more functions, to read
 its elements and to build one.
 """
-function glue_text(rows::Vector{Row})
+glue_text(rows::Vector{Row}) = glue_text(rows, FnRow[])[1:2]
+
+function glue_text(rows::Vector{Row}, fns::Vector{FnRow})
     io = IOBuffer()
     print(io, _HEADER)
     lines = Dict{Int,Int}()
+    fn_lines = Dict{Int,Int}()
     n = count(==('\n'), _HEADER)
     for r in rows
         n += 1
         s = r.spelling
+        if !isempty(r.call)
+            # Not spelled: the compiler picks the drop function of what the named function returns.
+            println(io, "#[no_mangle] pub static $(dropfn_symbol(r.n)): __RbAddr = __RbAddr($(r.call) as *const ());")
+            lines[r.n] = n
+            continue
+        end
         print(io, "#[no_mangle] pub unsafe extern \"C\" fn $(drop_symbol(r.n))(p: *mut $s, ",
               "_owns: *const [u8; core::mem::needs_drop::<$s>() as usize]) -> usize ",
               "{ if p.is_null() { $(r.n) } else { __rb_drop(p) } }")
@@ -362,7 +429,84 @@ function glue_text(rows::Vector{Row})
         println(io)
         lines[r.n] = n
     end
-    return (String(take!(io)), lines)
+    # A function the library has no symbol for: naming it makes the compiler
+    # build it here, and the static holds its address.
+    for f in fns
+        n += 1
+        println(io, "#[no_mangle] pub static $(fn_symbol(f.n)): __RbAddr = __RbAddr(($(f.expr)) as *const ());")
+        fn_lines[f.n] = n
+    end
+    return (String(take!(io)), lines, fn_lines)
+end
+
+"""
+    address_table(ir_files) -> Dict{String,String}
+
+Which function each `__rb_fn_<n>` static holds the address of, read from the
+root crate's IR: `@__rb_fn_3 = … constant ptr @<symbol>`. The function was
+named by a Rust expression; this is the compiler's word for what it named.
+"""
+function address_table(ir_files)::Dict{String,String}
+    out = Dict{String,String}()
+    for file in ir_files, line in eachline(file)
+        (startswith(line, "@__rb_fn_") || startswith(line, "@__rb_dropfn_")) || continue
+        m = match(r"^@(__rb_(?:fn|dropfn)_\d+) = .*\bconstant ptr @([-a-zA-Z$._][-a-zA-Z$._0-9]*)", line)
+        m === nothing || (out[String(m.captures[1])] = String(m.captures[2]))
+    end
+    return out
+end
+
+"""
+    positions(functions, types, key; limit = 4) -> Vector
+
+The functions a value of type `key` comes out of, best first: each as
+`(path, helper, what)`, where `helper` is the root crate's function that
+takes that type from the function's signature (`__rb_ret2`: what a function
+of two parameters returns; `__rb_ok1`, `__rb_err1`, `__rb_some0`: the payload
+of the `Result` or `Option` it returns) and `what` says it in words. A
+function of more than `MAX_ARITY` parameters, or one the build refused, is
+not used.
+"""
+function positions(functions, types::AbstractDict, key::AbstractString; limit::Int = 4)
+    out = Tuple{Int,String,String,String}[]
+    for f in functions
+        f["refusal"] === nothing || continue
+        arity = length(f["parameters"])
+        arity <= MAX_ARITY || continue
+        ret = get(f["return"], "type", nothing)
+        ret isa AbstractString || continue
+        path = String(f["path"])
+        if ret == key
+            push!(out, (1, path, "__rb_ret$arity", "what `$path` returns"))
+            continue
+        end
+        t = get(types, ret, nothing)
+        (t === nothing || payload_enum(t) === nothing) && continue
+        for v in get(t, "variants", Any[])
+            name = String(get(v, "name", ""))
+            vt = get(types, get(v, "type", ""), nothing)
+            (vt === nothing || !(name in ("Ok", "Err", "Some"))) && continue
+            fields = get(vt, "fields", Any[])
+            (length(fields) == 1 && get(fields[1], "type", nothing) == key) || continue
+            push!(out, (2, path, "__rb_$(lowercase(name))$arity", "the `$name` of what `$path` returns"))
+        end
+    end
+    sort!(out)
+    return [(path = o[2], helper = o[3], what = o[4]) for o in out[1:min(end, limit)]]
+end
+
+"""
+    function_expression(path) -> Union{String,Nothing}
+
+A function's path as the demangler prints it (`dep::inner::deep`,
+`<dep::Rec>::dsum`, `<dep::Rec as core::clone::Clone>::clone`), as a Rust
+expression can write it, or `nothing` where none can: a closure, or a
+destructor, which Rust does not let anything call by name.
+"""
+function function_expression(path::AbstractString)::Union{String,Nothing}
+    unnameable(path) === nothing || return nothing
+    occursin(r" as core::ops::drop::Drop>::drop$", path) && return nothing
+    return source_name(path)
 end
 
 """
@@ -432,18 +576,47 @@ line is in the library and names that type:
 - `drop`: the function that drops a value of it;
 - `owns`: whether dropping one does anything (the compiler's answer);
 - `spelling`: how the line named it;
-- `vec`: for a `Vec`, the functions `view` and `new`.
+- `vec`: for a `Vec`, the functions `view` and `new`;
+- `by_address`: for a type that was not spelled, `drop` is the exported
+  static that holds the function's address, not the function.
 
 `refused[key]` says why a wanted type has none: its plan refused it, its
 function is not in the library or has no debug info, or its spelling named
 another type.
 """
-function verify(plan::Plan, dwarf_functions::AbstractDict, types::AbstractDict, exported)
+function verify(plan::Plan, dwarf_functions::AbstractDict, types::AbstractDict, exported;
+                table::AbstractDict = Dict{String,String}(), demangled::AbstractDict = Dict{String,String}())
     glue = Dict{String,Any}()
     refused = Dict{String,String}(plan.refused)
     target(key) = (t = get(types, something(key, ""), nothing);
                    (t !== nothing && get(t, "kind", "") == "pointer") ? get(t, "target", nothing) : nothing)
     for r in plan.rows
+        if !isempty(r.call)
+            # The compiler picked the function: `table` says which (the root
+            # crate's IR), its name says whether the type is dropped, and its
+            # debug info says which type it is.
+            static = dropfn_symbol(r.n)
+            picked = get(table, static, nothing)
+            if picked === nothing || !(static in exported)
+                refused[r.key] = "its drop function's address (`$static`) is not in the library"
+                continue
+            end
+            text = String(get(demangled, picked, picked))
+            owns = occursin("__rb_drop_owned::<", text) ? true : occursin("__rb_drop_plain::<", text) ? false : nothing
+            f = get(dwarf_functions, picked, nothing)
+            params = f === nothing ? Any[] : get(f, "parameters", Any[])
+            if owns === nothing || isempty(params)
+                refused[r.key] = "the drop function the compiler picked for it was not read"
+                continue
+            end
+            is = target(params[1]["type"])
+            if is != r.key
+                refused[r.key] = "$(r.spelling) is another type" * (is === nothing ? "" : " (`$is`)")
+                continue
+            end
+            glue[r.key] = Dict{String,Any}("drop" => static, "by_address" => true, "owns" => owns, "spelling" => r.spelling)
+            continue
+        end
         sym = drop_symbol(r.n)
         if !(sym in exported)
             refused[r.key] = "its drop function `$sym` is not in the library"
