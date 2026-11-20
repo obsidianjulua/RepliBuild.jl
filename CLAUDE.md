@@ -2748,6 +2748,27 @@ DWARF-resolved destructors — **is** built.)
   JIT'd, since 2026-11-20), so an AArch64 failure is first seen on a pushed
   branch. Windows is not run: CI's Windows cells run the pkg and unit suites
   only.
+- **Handing the calling-convention rules to LLVM** (measured 2026-11-20
+  against the LLVM 23.1.5 sources and `main`). LLVM's ABI library
+  (`llvm/ABI`) is what `test_sysv_abi_oracle.jl` already diffs the SysV rules
+  against. At 23.1.5 it classifies x86-64 SysV and BPF only; on `main` AArch64
+  too (AAPCS, Darwin, Win64 kinds); nothing for x86-64 Windows on either.
+  MLIR ships the dialect's half (`mlir/ABI`: `ABITypeMapper`, and
+  `ABIRewriteContext`, "each MLIR dialect that wants ABI lowering provides a
+  concrete subclass"; installed with MLIR 23). ClangIR is in the tree and is
+  not a route: distribution clangs are built without it
+  (`-DCLANG_ENABLE_CIR=ON`), its call lowering runs on a test target at
+  23.1.5, and its `MissingFeatures.h` lists ABI argument info, exceptions and
+  thunks among 252 gaps. It also compiles source, where this project reads
+  the library that was built. A swap would make `JLCSAbiOracle.cpp` the
+  classifier and retire `SysVRecordABI.jl` and the C++ SysV rules. Three
+  things block it: the dialect still builds against LLVM 21 and 22, which
+  have no such library; Tier 3 classifies in Julia with no libJLCS, so C
+  would gain a dependency; Win64 has no upstream rules. Until then the oracle
+  is the value. Add an AArch64 oracle when the dialect can build against an
+  LLVM with `createAArch64TargetInfo`: AArch64 is verified only in CI. To
+  re-measure: `llvm/lib/ABI/Targets/` and the header of
+  `clang/lib/CIR/Dialect/Transforms/CallConvLoweringPass.cpp`.
 - Toolchain records by value that still trap (narrowed 2026-11-13; `tuple`,
   `optional` and `complex` are laid out, above): one with a virtual base, a
   struct (not a union) holding an empty record as a member, and anything
