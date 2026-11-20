@@ -138,7 +138,7 @@ if requires("Rust thunks (live)", :libJLCS, :cargo, :rustc, :nm)
     for opt in (0, 3)
         @testset "opt-level $opt" begin
             # test/*/*.toml is untracked, so the project file is written here.
-            write(_RTL_TOML, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = $opt\ninstantiate = [\"rb_fix::midpoint::<f64>\", \"rb_fix::Pair::<i32>::new\", \"rb_fix::Pair::<i32>::sum\", \"(rb_fix::into_f64 as fn(f32) -> f64)\"]\n")
+            write(_RTL_TOML, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = $opt\ninstantiate = [\"rb_fix::midpoint::<f64>\", \"rb_fix::Pair::<i32>::new\", \"rb_fix::Pair::<i32>::sum\", \"(rb_fix::into_f64 as fn(f32) -> f64)\", \"rb_fix::map_sum::<fn(f64) -> f64>\"]\n")
             lib = withenv("REPLIBUILD_JULIA_ENV" => "none") do
                 redirect_stdout(() -> RepliBuild.build(_RTL_TOML), devnull)
             end

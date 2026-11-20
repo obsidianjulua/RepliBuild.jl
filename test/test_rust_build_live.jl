@@ -34,7 +34,7 @@ _rbl_write(opt::Int) = write(_RBL_TOML, """
     opt_level = $opt
     # Generic functions exist only for the types something uses them with.
     instantiate = ["rb_fix::midpoint::<f64>", "rb_fix::Pair::<i32>::new", "rb_fix::Pair::<i32>::sum",
-                   "(rb_fix::into_f64 as fn(f32) -> f64)"]
+                   "(rb_fix::into_f64 as fn(f32) -> f64)", "rb_fix::map_sum::<fn(f64) -> f64>"]
     """)
 
 function _rbl_build()
@@ -110,8 +110,8 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
             @test haskey(fn, path)
         end
         @test length(md["functions"]) >= 40
-        @test all(f -> startswith(f["path"], "rb_fix::") || startswith(f["path"], "<rb_fix::") || f["no_mangle"],
-                  md["functions"])
+        # (A path may open with another crate's type: `<f64 as rb_fix::Scale>::size` is this crate's impl.)
+        @test all(f -> occursin("rb_fix::", f["path"]) || f["no_mangle"], md["functions"])
         @test issorted([(f["path"], f["symbol"]) for f in md["functions"]])
         @test isempty(md["skipped"])
         # What the crate instantiated of the standard library is in the library and is not its API.
@@ -347,7 +347,7 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
             @test [p["type"] for p in f["<rb_fix::Named>::rename"]["parameters"]] == ["&mut rb_fix::Named", "&str"]
             # A function that is not public is not the crate's API, and is not there.
             @test !haskey(f, "rb_fix::private_helper") && m["instances"]["not_public"] >= 1
-            @test m["instances"]["instantiate"] == 4 && m["instances"]["inline"] >= 12
+            @test m["instances"]["instantiate"] == 5 && m["instances"]["inline"] >= 12
             @test isempty(m["instances_refused"])
             # A function the library exports is reached by its name, as before.
             @test !haskey(f["rb_fix::add"], "address") && !haskey(f["rb_fix::uses_helper"], "address")
@@ -374,6 +374,53 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         deps = joinpath(_RBL_DIR, "build", "rust", "target", "debug", "deps")
         @test count(n -> startswith(n, "rb_fix-") && endswith(n, ".ll"), readdir(deps)) >= 2
         @test crate_tree == _rbl_tree(joinpath(_RBL_DIR, "crate"))
+    end
+
+    @testset "statics, trait objects and callbacks" begin
+        md3 = RepliBuild._read_json(meta_path)
+        exported = RepliBuild.Compiler._runtime_symbol_names(lib)
+        for m in (md, md3)
+            f = Dict(r["path"] => r for r in m["functions"])
+            # A `static` is the library's data: its symbol, its type, and whether it may be written.
+            st = Dict(s["path"] => s for s in m["statics"])
+            @test sort!(collect(keys(st))) == ["rb_fix::COUNTER", "rb_fix::DROPS", "rb_fix::LIMIT", "rb_fix::MOTTO", "rb_fix::ORIGIN", "rb_fix::TICKS"]
+            @test (st["rb_fix::LIMIT"]["type"], st["rb_fix::ORIGIN"]["type"], st["rb_fix::MOTTO"]["type"]) == ("u32", "rb_fix::F2", "&str")
+            @test !st["rb_fix::LIMIT"]["mutable"] && st["rb_fix::TICKS"]["mutable"] && st["rb_fix::COUNTER"]["mutable"]
+            @test !any(r -> occursin("LIMIT", r["path"]), m["functions"])
+            # A trait object: per trait, the types that implement it, each with
+            # the function that makes a reference to one into a trait object.
+            impls(d) = sort!(collect(keys(m["dyn"][d]["implementors"])))
+            @test impls("dyn rb_fix::Area") == ["rb_fix::Shape"]
+            @test impls("dyn rb_fix::Scale") == ["f64", "rb_fix::F2", "rb_fix::Named"]
+            # ...and the trait's own methods, called through one (a default method included).
+            for path in ("<dyn rb_fix::Area as rb_fix::Area>::area", "<dyn rb_fix::Scale as rb_fix::Scale>::scale",
+                         "<dyn rb_fix::Scale as rb_fix::Scale>::size", "<dyn rb_fix::Scale as rb_fix::Scale>::label")
+                @test (path, get(get(f, path, Dict()), "instance", "absent")) == (path, "dyn")
+                @test f[path]["refusal"] === nothing && f[path]["parameters"][1]["pass"] == "pair"
+            end
+            @test f["<dyn rb_fix::Scale as rb_fix::Scale>::scale"]["parameters"][1]["type"] == "&mut dyn rb_fix::Scale"
+            # A function pointer is a pointer, described apart from the signature it points at.
+            @test m["types"]["fn(i32) -> i32"]["kind"] == "pointer" && m["types"]["fn(i32) -> i32"]["pointer"] == "fn"
+            sig = m["types"][m["types"]["fn(u32, &rb_fix::Rec) -> bool"]["target"]]
+            @test sig["kind"] == "subroutine" && sig["parameters"] == ["u32", "&rb_fix::Rec"] && sig["return"] == "bool"
+            @test !get(sig, "conflict", false)
+            @test f["rb_fix::apply"]["refusal"] === nothing && f["rb_fix::apply"]["parameters"][1]["pass"] == "direct"
+            # For each kind of Rust function pointer taken: the library's own function of that signature.
+            @test sort!(collect(keys(m["callbacks"]))) == ["fn(&str) -> usize", "fn(f64) -> f64", "fn(f64, f64) -> f64", "fn(i32) -> i32",
+                                                           "fn(u32)", "fn(u32, &rb_fix::Rec) -> bool"]
+            @test !haskey(m["callbacks"], "extern \"C\" fn(f64, f64) -> f64")           # called as C calls: nothing to build
+            @test allunique(c["at"] for c in values(m["callbacks"])) && allunique(c["set"] for c in values(m["callbacks"]))
+        end
+        @test occursin("statics", out)
+        @test all(s -> s["symbol"] in exported, md3["statics"])
+        @test all(c -> c["at"] in exported && c["set"] in exported, values(md3["callbacks"]))
+        @test all(sym -> sym in exported, [s for d in values(md3["dyn"]) for s in values(d["implementors"])])
+        # The data is where the symbol says, with the value the crate gave it.
+        copy = tempname() * "." * Libdl.dlext
+        cp(lib, copy)
+        h = Libdl.dlopen(copy)
+        limit = only(s for s in md3["statics"] if s["path"] == "rb_fix::LIMIT")
+        @test unsafe_load(Ptr{UInt32}(Libdl.dlsym(h, limit["symbol"]))) == 42
     end
 
     @testset "a crate whose whole API has no symbol, and an entry that is not a function" begin

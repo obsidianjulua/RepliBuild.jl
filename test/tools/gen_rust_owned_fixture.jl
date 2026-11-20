@@ -38,7 +38,16 @@ const KEEP = ["rb_fix::add", "rb_fix::make_greeting", "rb_fix::string_len_owned"
               "<rb_fix::Tag as core::clone::Clone>::clone", "rb_fix::midpoint::<f64>", "<rb_fix::Pair<i32>>::sum",
               "<rb_fix::Guard as core::ops::drop::Drop>::drop",
               # Types no path spells, taken from the functions that return them; and one nothing returns.
-              "rb_fix::secret_take", "rb_fix::parse_byte", "rb_fix::fault_text", "rb_fix::sealed_len"]
+              "rb_fix::secret_take", "rb_fix::parse_byte", "rb_fix::fault_text", "rb_fix::sealed_len",
+              # Trait objects: taken, returned, and a trait's methods called through one.
+              "rb_fix::dyn_area", "rb_fix::dyn_size", "rb_fix::dyn_grow", "rb_fix::boxed_scale",
+              "<dyn rb_fix::Area as rb_fix::Area>::area", "<dyn rb_fix::Scale as rb_fix::Scale>::label",
+              "<dyn rb_fix::Scale as rb_fix::Scale>::scale", "<rb_fix::F2 as rb_fix::Scale>::size",
+              "<rb_fix::Named as rb_fix::Scale>::size", "<f64 as rb_fix::Scale>::size",
+              "<rb_fix::Shape as rb_fix::Area>::area", "rb_fix::f2_make",
+              # Callbacks: a Rust function pointer, a C one, one taking a record, a generic one, one not carried.
+              "rb_fix::apply", "rb_fix::apply_c", "rb_fix::each", "rb_fix::count_if", "rb_fix::map_sum::<fn(f64) -> f64>",
+              "rb_fix::text_callback"]
 
 # Every type a description names.
 function reach!(seen::Set{String}, types, key)
@@ -67,7 +76,7 @@ mktempdir() do dir
         [rust]
         manifest = "crate/Cargo.toml"
         opt_level = 3
-        instantiate = ["rb_fix::midpoint::<f64>", "rb_fix::Pair::<i32>::sum"]
+        instantiate = ["rb_fix::midpoint::<f64>", "rb_fix::Pair::<i32>::sum", "rb_fix::map_sum::<fn(f64) -> f64>"]
         """)
     lib = withenv("REPLIBUILD_JULIA_ENV" => "none", "REPLIBUILD_HOME" => mktempdir()) do
         RepliBuild.build(toml)
@@ -81,6 +90,12 @@ mktempdir() do dir
         error("a kept function has no debug info of its own: the fixture would describe another function's types")
 
     seen = Set{String}()
+    foreach(s -> reach!(seen, md["types"], s["type"]), md["statics"])
+    foreach(k -> reach!(seen, md["types"], k), keys(md["callbacks"]))
+    for d in keys(md["dyn"]), ref in ("&" * d, "&mut " * d)
+        reach!(seen, md["types"], ref)
+        foreach(t -> reach!(seen, md["types"], t), keys(md["dyn"][d]["implementors"]))
+    end
     for f in functions
         foreach(p -> reach!(seen, md["types"], get(p, "type", nothing)), f["parameters"])
         reach!(seen, md["types"], f["return"]["type"])
@@ -110,13 +125,19 @@ mktempdir() do dir
     get(by_path["rb_fix::small"], "instance", "") == "inline" || error("`small`, an inline function, was not compiled in")
     get(by_path["rb_fix::midpoint::<f64>"], "instance", "") == "instantiate" || error("`midpoint::<f64>` was not instantiated")
     haskey(by_path["rb_fix::add"], "address") && error("`add`, which the library exports, is reached by an address")
+    length(md["statics"]) >= 5 || error("the build found no statics")
+    sort!(collect(keys(md["dyn"]["dyn rb_fix::Scale"]["implementors"]))) == ["f64", "rb_fix::F2", "rb_fix::Named"] ||
+        error("the build did not find the three types that implement Scale")
+    haskey(md["callbacks"], "fn(i32) -> i32") || error("the build has no function for the callback `fn(i32) -> i32`")
+    by_path["rb_fix::apply"]["refusal"] === nothing || error("`apply`, which takes a function pointer, was refused")
 
     out = Dict{String,Any}(
         "metadata_version" => md["metadata_version"], "language" => "rust", "crate" => md["crate"],
         "library" => md["library"], "library_sha" => "0"^64,
         "toolchain" => Dict{String,Any}("rustc" => md["toolchain"]["rustc"]),
         "functions" => functions, "types" => types, "glue" => glue, "glue_refused" => refused,
-        "glue_helpers" => md["glue_helpers"], "instances" => md["instances"], "skipped" => Any[])
+        "glue_helpers" => md["glue_helpers"], "instances" => md["instances"], "statics" => md["statics"],
+        "dyn" => md["dyn"], "callbacks" => md["callbacks"], "skipped" => Any[])
     open(OUT, "w") do io
         JSON.print(io, out, 1)
     end

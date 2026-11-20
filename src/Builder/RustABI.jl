@@ -394,6 +394,28 @@ function definitions(ir_files)::Dict{String,IRDefinition}
 end
 
 """
+    statics(ir_files) -> Dict{String,Bool}
+
+The global variables the IR defines that another library could bind
+(`@name = … global …` or `… constant …`, not `internal` or `private`): a
+Rust `static` is one. The value says whether it may be written: `true` for
+`global` (a `static mut`, or a static with a cell or an atomic inside),
+`false` for `constant`.
+"""
+function statics(ir_files)::Dict{String,Bool}
+    out = Dict{String,Bool}()
+    for file in ir_files, line in eachline(file)
+        startswith(line, "@") || continue
+        m = match(r"^@([-a-zA-Z$._][-a-zA-Z$._0-9]*) = ((?:[a-z_]+(?:\([a-z_]+\))? )*)(global|constant) ", line)
+        m === nothing && continue
+        words = split(m.captures[2])
+        ("internal" in words || "private" in words) && continue
+        out[String(m.captures[1])] = m.captures[3] == "global"
+    end
+    return out
+end
+
+"""
     aliases(ir_files) -> Dict{String,String}
 
 Each symbol the IR defines as an ALIAS, and the symbol it stands for.

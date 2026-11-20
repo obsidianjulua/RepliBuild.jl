@@ -303,6 +303,44 @@ end
     @test occursin("was not read", refused["dep::Odd"]) && occursin("is not in the library", refused["dep::Gone"])
 end
 
+@testset "RustGlue: trait objects and callbacks" begin
+    md = RepliBuild._read_json(rust_fixture("owned_o3.metadata.json"))
+    # Which traits the signatures name as `dyn`, the types that implement each, and its methods:
+    # all read off the paths of the functions the build describes.
+    traits = Dict(t.trait => t for t in RG.trait_objects(md["functions"]))
+    @test sort!(collect(keys(traits))) == ["rb_fix::Area", "rb_fix::Scale"]
+    @test traits["rb_fix::Scale"].types == ["f64", "rb_fix::F2", "rb_fix::Named"] && traits["rb_fix::Scale"].methods == ["size"]
+    @test traits["rb_fix::Area"].types == ["rb_fix::Shape"] && traits["rb_fix::Area"].methods == ["area"]
+    # A trait nothing takes as `dyn` is not one, and neither is a `dyn` of two traits.
+    two = deepcopy(only(f for f in md["functions"] if f["path"] == "rb_fix::dyn_size"))
+    two["parameters"][1]["type"] = "&(dyn rb_fix::Scale + core::marker::Send)"
+    @test isempty(RG.trait_objects([two]))
+    # The kinds of Rust function pointer taken; one C calls as C is not among them.
+    @test RG.callbacks(md["functions"], md["types"]) == ["fn(&str) -> usize", "fn(f64) -> f64", "fn(i32) -> i32", "fn(u32)",
+                                                         "fn(u32, &rb_fix::Rec) -> bool"]
+
+    # Their lines. A reference made into a trait object is written by the library: the second
+    # pointer is the type's table of methods, which only the compiler has.
+    fns = [RG.FnRow(2, "dep::Circle", "coerce", "dep::Area"), RG.FnRow(3, "<dyn dep::Area as dep::Area>::area", "dyn", ""),
+           RG.FnRow(5, "u32\t&dep::Rec", "callback", "bool"), RG.FnRow(6, "", "callback", "")]
+    (text, _, at) = RG.glue_text(RG.Row[], fns)
+    ls = split(text, '\n')
+    @test ls[at[2]] == "#[no_mangle] pub unsafe extern \"C\" fn __rb_dyn_2(p: *const dep::Circle, out: *mut &'static dyn dep::Area) { out.write(&*p) }"
+    @test ls[at[3]] == "#[no_mangle] pub static __rb_fn_3: __RbAddr = __RbAddr((<dyn dep::Area as dep::Area>::area) as *const ());"
+    # A callback: a Rust function of the signature, which calls on to a C function kept in a slot.
+    cb = ls[at[5]]
+    @test occursin("fn __rb_cb_5(a1: u32, a2: &dep::Rec) -> bool { let f: extern \"C\" fn(u32, &dep::Rec) -> bool = ", cb)
+    @test occursin("f(a1, a2) }", cb) && occursin("pub extern \"C\" fn __rb_cb_set_5(p: *mut ()) -> *mut () { __RB_CB_5.swap(p, ", cb)
+    @test endswith(cb, "pub static __rb_cb_at_5: __RbAddr = __RbAddr((__rb_cb_5 as fn(u32, &dep::Rec) -> bool) as *const ());")
+    @test occursin("fn __rb_cb_6() { let f: extern \"C\" fn() = ", ls[at[6]]) && occursin("f() }", ls[at[6]])
+    @test (RG.coerce_symbol(2), RG.callback_symbol(5), RG.callback_setter(5)) == ("__rb_dyn_2", "__rb_cb_at_5", "__rb_cb_set_5")
+    mktempdir() do dir
+        ir = joinpath(dir, "root.ll")
+        write(ir, "@__rb_cb_at_5 = constant ptr @_RNvCsX_6dep_rb9___rb_cb_5, align 8\n@__rb_dropfn_2 = constant ptr @_Rdrop, align 8\n")
+        @test RG.address_table([ir]) == Dict("__rb_cb_at_5" => "_RNvCsX_6dep_rb9___rb_cb_5", "__rb_dropfn_2" => "_Rdrop")
+    end
+end
+
 @testset "RustGlue: the fixture's refusal" begin
     md = RepliBuild._read_json(rust_fixture("owned_o3.metadata.json"))
     @test collect(keys(md["glue_refused"])) == ["rb_fix::hidden::Sealed"]

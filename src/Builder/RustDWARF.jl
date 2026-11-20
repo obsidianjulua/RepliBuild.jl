@@ -323,7 +323,11 @@ function _type_key(t::_Table, die::Die)::String
     elseif tag == "subroutine_type"
         params = String[something(_type_key_of(t, c), "?") for c in die.children if c.tag == "formal_parameter"]
         ret = target()
-        key = isempty(name) ? "fn(" * join(params, ", ") * ")" * (ret === nothing ? "" : " -> " * ret) : name
+        # A signature, which a function pointer points at. rustc names the
+        # POINTER `fn(i32) -> i32` and leaves this unnamed, so it is keyed
+        # apart: under the pointer's own spelling the two would be one entry,
+        # and the pointer's layout would be lost.
+        key = "{fn} " * (isempty(name) ? "fn(" * join(params, ", ") * ")" * (ret === nothing ? "" : " -> " * ret) : name)
         return _enter!(t, die, key, Dict{String,Any}(
             "kind" => "subroutine", "name" => key, "parameters" => params, "return" => ret))
     elseif tag == "enumeration_type"
@@ -476,8 +480,32 @@ parameters carry the names; its name, linkage name and scope come from the
 declaration that definition names, wherever in the unit it is. The tree is
 built before anything is resolved, so the order of the DIEs does not matter.
 """
-function describe_functions(u::Units, wanted::AbstractSet{<:AbstractString})
+describe_functions(u::Units, wanted::AbstractSet{<:AbstractString}) = describe(u, wanted)[1:2]
+
+"""
+    describe(units, wanted, statics = Set()) -> (functions, types, variables)
+
+`describe_functions`, and for each symbol of `statics` that a variable DIE
+names (a Rust `static`): its name, the scopes around it, and its type, in
+the same table of types. `variables` is keyed by symbol.
+"""
+function describe(u::Units, wanted::AbstractSet{<:AbstractString}, statics::AbstractSet{<:AbstractString} = Set{String}())
     t = _Table(u, Dict{String,Any}(), Dict{Int,String}(), Dict{String,String}())
+    variables = Dict{String,Any}()
+    if !isempty(statics)
+        for off in sort!(collect(keys(u.by_offset)))
+            die = u.by_offset[off]
+            die.tag == "variable" || continue
+            sym = _attr(u, die, "linkage_name")
+            sym === nothing && (sym = _attr(u, die, "name"))
+            (sym === nothing || !(sym in statics) || haskey(variables, sym)) && continue
+            td = _target(u, die, "type")
+            td === nothing && (s = _target(u, die, "specification"); s === nothing || (td = _target(u, s, "type")))
+            variables[sym] = Dict{String,Any}("name" => something(_attr(u, die, "name"), ""),
+                                              "scope" => _scope(_declaration(u, die)),
+                                              "type" => td === nothing ? nothing : _type_key(t, td))
+        end
+    end
     chosen = Dict{String,Die}()
     for off in sort!(collect(keys(u.by_offset)))
         die = u.by_offset[off]
@@ -528,7 +556,7 @@ function describe_functions(u::Units, wanted::AbstractSet{<:AbstractString})
         note === nothing || (f["dwarf_note"] = note)
         functions[sym] = f
     end
-    return (functions, t.types)
+    return (functions, t.types, variables)
 end
 
 end # module RustDWARF

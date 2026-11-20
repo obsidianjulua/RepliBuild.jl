@@ -31,7 +31,7 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
     for opt in (0, 3)
         @testset "opt-level $opt" begin
             # test/*/*.toml is untracked, so the project file is written here.
-            write(_RWL_TOML, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = $opt\ninstantiate = [\"rb_fix::midpoint::<f64>\", \"rb_fix::Pair::<i32>::new\", \"rb_fix::Pair::<i32>::sum\", \"(rb_fix::into_f64 as fn(f32) -> f64)\"]\n")
+            write(_RWL_TOML, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = $opt\ninstantiate = [\"rb_fix::midpoint::<f64>\", \"rb_fix::Pair::<i32>::new\", \"rb_fix::Pair::<i32>::sum\", \"(rb_fix::into_f64 as fn(f32) -> f64)\", \"rb_fix::map_sum::<fn(f64) -> f64>\"]\n")
             lib = _rwl_quiet(() -> RepliBuild.build(_RWL_TOML))
             wrapper = _rwl_quiet(() -> RepliBuild.wrap(_RWL_TOML))
             @test wrapper == joinpath(dirname(lib), "RbFix.jl") && isfile(wrapper)
@@ -45,7 +45,7 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             # What is left: two calls the build refused, a trait object, and
             # the one type no path outside the crate names.
             # A destructor is in the library and is never called by name.
-            @test unsupported == ["Guard_Drop_drop", "cpoint_norm", "dyn_area", "located", "sealed_len"]
+            @test unsupported == ["Guard_Drop_drop", "cpoint_norm", "located", "sealed_len", "text_callback"]
             # Unoptimized, every Rust function goes through the catching frame;
             # optimized, the ones that cannot panic do not.
             tiers = Dict(r["name"] => r["tier"] for r in report)
@@ -70,7 +70,8 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
                         "a_raw_pointer_is_not_ownership", "what_the_module_says_it_owns",
                         "inline_functions", "a_panic_in_an_inline_function", "inline_methods", "derived_impls",
                         "generic_functions_for_the_types_asked_for", "a_destructor_is_not_called_by_name",
-                        "types_no_path_spells"]
+                        "types_no_path_spells", "statics", "trait_objects", "trait_objects_that_change",
+                        "callbacks", "an_error_in_a_callback"]
             for name in expected
                 @test (name, startswith(get(v, name, "no PROBE line"), "PASS") ? "PASS" : get(v, name, "no PROBE line")) ==
                       (name, "PASS")
@@ -83,7 +84,7 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
         mktempdir() do dir
             cp(joinpath(_RWL_DIR, "crate"), joinpath(dir, "crate"))
             toml = joinpath(dir, "replibuild.toml")
-            write(toml, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = 3\ninstantiate = [\"rb_fix::midpoint::<f64>\", \"rb_fix::Pair::<i32>::new\", \"rb_fix::Pair::<i32>::sum\", \"(rb_fix::into_f64 as fn(f32) -> f64)\"]\n")
+            write(toml, "[project]\nname = \"rb_fix\"\n\n[rust]\nmanifest = \"crate/Cargo.toml\"\nopt_level = 3\ninstantiate = [\"rb_fix::midpoint::<f64>\", \"rb_fix::Pair::<i32>::new\", \"rb_fix::Pair::<i32>::sum\", \"(rb_fix::into_f64 as fn(f32) -> f64)\", \"rb_fix::map_sum::<fn(f64) -> f64>\"]\n")
             home = joinpath(dir, "home")
             code = """
             using RepliBuild

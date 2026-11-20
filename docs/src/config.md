@@ -188,11 +188,17 @@ functions, `#[inline]` ones included:
   module's `OWNED` lists those types;
 - a `Result` returned is its value, or a thrown
   `RepliBuild.RustRuntime.RustError` holding the error;
-- a Rust panic arrives as a `RepliBuild.RustRuntime.RustPanic`.
+- a Rust panic arrives as a `RepliBuild.RustRuntime.RustPanic`;
+- where a function takes `&dyn Trait`, pass a value of any type that
+  implements the trait, or a `Box` of the trait object; a trait's methods are
+  functions too (`Area_area(x)`);
+- where a function takes a function (`fn(i32) -> i32`), pass a Julia
+  function;
+- a `static NAME` is `NAME()` for its value and `NAME_ptr()` for where it is.
 
-A generic function is wrapped for the types `instantiate` names. Trait
-objects are not wrapped yet. A function that is not wrapped is in the module
-as a stub that says why, and is listed in the module's `UNSUPPORTED`.
+A generic function is wrapped for the types `instantiate` names. A function
+that is not wrapped is in the module as a stub that says why, and is listed
+in the module's `UNSUPPORTED`.
 
 | Key | Default | Meaning |
 |:----|:--------|:--------|

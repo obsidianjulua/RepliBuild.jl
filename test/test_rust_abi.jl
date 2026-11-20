@@ -347,3 +347,23 @@ end
                                                                "count" => 4096, "size" => 4096))
     @test RA.shape(types, "[u8; 4096]").leaves === :many
 end
+
+@testset "Rust ABI: the statics an IR file defines" begin
+    mktempdir() do dir
+        ir = joinpath(dir, "crate.ll")
+        write(ir, """
+            @_RNvCsX_3dep5LIMIT = local_unnamed_addr constant [4 x i8] c"*\\00\\00\\00", align 4, !dbg !0
+            @_RNvCsX_3dep5TICKS = local_unnamed_addr global [8 x i8] zeroinitializer, align 8, !dbg !5
+            @_RNvCsX_3dep7COUNTER = global [8 x i8] zeroinitializer, align 8
+            @alloc_1a2b = private unnamed_addr constant [5 x i8] c"hello", align 1
+            @_RNvCsX_3dep6hidden = internal global i32 0, align 4
+            @_RNvCsX_3dep5alias = unnamed_addr alias i32 (i32), ptr @_RNvCsX_3dep3add
+            @vtable.0 = private unnamed_addr constant <{ ptr, [16 x i8] }> <{ ptr @f, [16 x i8] zeroinitializer }>, align 8
+            define i32 @_RNvCsX_3dep3add(i32 %a) unnamed_addr #0 {
+            """)
+        # What another library could bind, and whether it may be written.
+        @test RA.statics([ir]) == Dict("_RNvCsX_3dep5LIMIT" => false, "_RNvCsX_3dep5TICKS" => true, "_RNvCsX_3dep7COUNTER" => true)
+        @test isempty(RA.statics(String[]))
+    end
+end
+

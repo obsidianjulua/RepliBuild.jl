@@ -1799,9 +1799,76 @@ project file names (there is no way to offer "any `T`"); a type no function
 with a public path returns; a function of more than eight parameters is not
 used to take a type from.
 
-## 23. The walk from here
+## 23. Trait objects, callbacks and statics (built 2026-11-19)
 
-10. **Trait objects**, callbacks, statics.
+| §15 step | Where | What it does |
+|---|---|---|
+| 10a. Which traits | `RustGlue.trait_objects` | each trait a signature names as `dyn`, the types that implement it and its methods, read off the paths of the functions the build describes (`<T as Trait>::method`) |
+| 10b. A reference made a trait object | `rb_glue.rs`: `__rb_dyn_<n>(p: *const T, out: *mut &dyn Trait)` | Rust writes the two pointers; the second is the type's table of methods, which only the compiler has |
+| 10c. A trait's methods | `__rb_fn_<n>` naming `<dyn Trait as Trait>::method` | the compiler's own shim for a call through a trait object, which has a `define` line and debug info like any function |
+| 10d. Callbacks | `rb_glue.rs`: `__rb_cb_<n>`, `RustGlue.callbacks` | per kind of Rust function pointer, a Rust function of that signature that calls on to a C function |
+| 10e. Statics | `RustABI.statics`, `RustDWARF.describe`, the metadata's `statics` | the crate's exported global variables, each with its type |
+| 10f. The module | `GeneratorRust` (`_emit_traits`, the callback arm, `_emit_statics`) | what the three are in Julia |
+
+**A trait object is two pointers, and Julia writes neither.** Where a
+function takes `&dyn Trait`, the module takes a value of any type that
+implements the trait (plain data, a type that owns, a number) or a `Box` of
+the trait object. For a value, the library's `__rb_dyn_<n>` writes the
+reference into the argument's bytes; its debug info says which type and
+which trait object its line named, and that is what the metadata's `dyn`
+records. A `Box<dyn Trait>` holds the same two pointers already. `&mut dyn
+Trait` changes what it is given, so a plain Julia value is refused there
+with a message that says to pass a `Ref`.
+
+Naming `<dyn Trait as Trait>::method` in the root crate gives the trait's
+method as a function that takes a trait object: rustc compiles a shim for
+it, with a `define` line (two pointers for `self`) and a DIE. A default
+method dispatches to the type's own override. In the module it is
+`Trait_method`.
+
+**A callback is Rust calling Rust calling C.** How a Rust function pointer
+is called is the compiler's business, so Julia does not pretend to be one.
+For each kind the functions take (`fn(i32) -> i32`), one line of the root
+crate is a Rust function of exactly that signature, which the library is
+given, and which calls on to an `extern "C"` function kept in a slot. Julia
+makes its function a C function (`@cfunction`), sets the slot around the
+call (under a lock, and put back whatever happens), and passes the library
+its own function. An error in the Julia function is kept and thrown after
+the library's function has returned; it does not unwind through Rust. An
+`extern "C" fn` parameter needs none of this and gets Julia's C function
+directly. A callback may take and return what C carries: integers, floats,
+`bool`, `char`, a fieldless enum and thin pointers; a record by reference
+arrives as a pointer to one. A generic `F: Fn(f64) -> f64` is a callback
+once `instantiate` names it for a function pointer
+(`geo::map_sum::<fn(f64) -> f64>`).
+
+The bug this found: rustc names a function POINTER `fn(i32) -> i32` and
+leaves the signature it points at unnamed, and both were keyed by that
+spelling. One entry, marked as a conflict, and every function taking a
+callback had been refused since the build side was written. A signature is
+keyed apart now (`{fn} fn(i32) -> i32`).
+
+**A static is read where it is.** `NAME_ptr()` gives where the library has
+it and `NAME()` reads its value now, never a copy made at load: a `static
+mut` or an atomic changes, and a write through the pointer is seen by Rust
+(measured). A `const` is not in a library at all.
+
+Measured on the fixture crate at opt-level 0 and 3: all but five functions
+wrapped, and its six statics. The five left: the two calls the join
+refuses, a destructor, a function that moves a type nothing returns, and a
+callback that takes a `&str`. The ten real crates are unchanged by this step
+but for three more functions in ropey: 1,853 of 1,944, every module loads.
+Their public APIs hardly use trait objects, function pointers or statics;
+the fixture is what covers this step.
+
+Not built: a callback the library KEEPS and calls after the function that
+took it has returned (the slot is put back when that function returns); a
+callback that takes a string, a slice or a record by value; a Julia type as
+the implementor of a Rust trait; a function that RETURNS `&dyn Trait`; a
+`dyn` of more than one trait.
+
+## 24. The walk from here
+
 11. **Shipping**: AOT thunks, `discover` on a Cargo project, the doctor,
     a user guide page, Windows and AArch64.
 

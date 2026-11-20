@@ -108,6 +108,9 @@ a generic carries its arguments (`largest_f64`).
 """
 function function_name(row::AbstractDict)::String
     path = String(row["path"])
+    # A trait's method called through a trait object is the trait's: `Area_area`.
+    d = match(r"^<dyn (.+) as (.+)>::([^:<>]+)$", path)
+    d === nothing || return sanitize(_last_segment(d.captures[2])) * "_" * sanitize(d.captures[3])
     m = match(r"^<(.+)>::([^:<>]+)(?:::<(.*)>)?$", path)
     if m !== nothing
         inner = m.captures[1]
@@ -151,6 +154,9 @@ mutable struct Ctx
     refused::Dict{String,Any}    # type key => why the build has none
     helpers::Set{String}         # the root crate's fixed functions the library exports
     boxes::Dict{String,String}   # type key => the Julia name of the `Box` of it, where one is wrapped
+    dyn::Dict{String,Any}        # `dyn Trait` => its implementors, each with the function that makes a reference to one
+    dyn_names::Dict{String,String}   # `dyn Trait` => the name its helper functions carry
+    callbacks::Dict{String,Any}  # a Rust function pointer's type => the library's function of that signature, and its setter
 end
 
 function Ctx(metadata::AbstractDict)
@@ -158,7 +164,28 @@ function Ctx(metadata::AbstractDict)
     glue = Dict{String,Any}(String(k) => v for (k, v) in get(metadata, "glue", Dict{String,Any}()))
     ctx = Ctx(types, _type_names(types, glue), Dict{String,T}(), glue,
               Dict{String,Any}(String(k) => v for (k, v) in get(metadata, "glue_refused", Dict{String,Any}())),
-              Set{String}(String(h) for h in get(metadata, "glue_helpers", Any[])), Dict{String,String}())
+              Set{String}(String(h) for h in get(metadata, "glue_helpers", Any[])), Dict{String,String}(),
+              Dict{String,Any}(String(k) => v for (k, v) in get(metadata, "dyn", Dict{String,Any}())), Dict{String,String}(),
+              Dict{String,Any}(String(k) => v for (k, v) in get(metadata, "callbacks", Dict{String,Any}())))
+    # A trait object is known when something implements its trait, or when a
+    # `Box` of it is a value this holds: either can be passed where one is taken.
+    known = Set{String}(keys(ctx.dyn))
+    for key in keys(glue)
+        m = match(r"^alloc::boxed::Box<(dyn [^,>]+)", key)
+        (m !== nothing && _drops(ctx, key) && haskey(ctx.names, key)) && push!(known, String(m.captures[1]))
+    end
+    used = Set{String}()
+    for d in sort!(collect(known))
+        base = sanitize(_last_segment(replace(d, r"^dyn " => "")))
+        name = base
+        k = 2
+        while name in used
+            name = base * "_" * string(k)
+            k += 1
+        end
+        push!(used, name)
+        ctx.dyn_names[d] = name
+    end
     for key in sort!(collect(keys(glue)))
         t = get(types, key, nothing)
         (t !== nothing && get(t, "kind", "") == "pointer" && get(t, "pointer", "") == "box" &&
@@ -245,6 +272,15 @@ function _classify(ctx::Ctx, key::String)::T
             return T(:owned, ctx.names[key], something(size, RustABI.POINTER_BYTES), key,
                      (drop = String(ctx.glue[key]["drop"]), box = target))
         end
+        if pk == "fn"
+            # A function pointer: what it points at is a signature.
+            sig = get(ctx.types, something(target, ""), nothing)
+            c = startswith(key, "extern \"C\" fn(")
+            if sig !== nothing && get(sig, "kind", "") == "subroutine" && (c || startswith(key, "fn("))
+                return T(:callback, "", something(size, RustABI.POINTER_BYTES), key,
+                         (params = Any[x for x in get(sig, "parameters", Any[])], ret = get(sig, "return", nothing), c = c))
+            end
+        end
         jl = ""
         if target isa AbstractString
             tt = classify(ctx, target)
@@ -273,7 +309,7 @@ function _classify(ctx::Ctx, key::String)::T
         if !isempty(fat) && !_borrowed(key)
             # A fat pointer that owns what it points at: `Box<[T]>`, `Box<dyn Trait>`.
             owned && return T(:owned, ctx.names[key], size, key, (drop = String(ctx.glue[key]["drop"]), box = nothing))
-            return fat == "dyn" ? T(:dyn, "", size, key, nothing) :
+            return fat == "dyn" ? T(:dyn, "", size, key, (trait = "", mutable = false)) :
                    T(:unknown, "", -1, key, "a `$key` owns what it points at, and " * _no_drop(ctx, key))
         end
         if fat == "slice"
@@ -293,7 +329,7 @@ function _classify(ctx::Ctx, key::String)::T
                 return T(:slice, et.jl, size, key, (ptr_off, len_off, startswith(key, "&mut")))
             return T(:unknown, "", -1, key, "a slice of `$(something(elem, "?"))` is not one this wraps yet")
         elseif fat == "dyn"
-            return T(:dyn, "", size, key, nothing)
+            return T(:dyn, "", size, key, (trait = String(replace(key, r"^&(mut )?" => "")), mutable = startswith(key, "&mut ")))
         end
         if get(t, "tuple", false) === true
             elems = Tuple{Int,String}[]
@@ -787,6 +823,8 @@ function emit_function(ctx::Ctx, row::AbstractDict, name::String, index::Int)::E
     rpass = String(get(ret, "pass", ""))
 
     prelude = String[]            # statements before the call
+    enter = String[]              # statements before the call that `leave` undoes, whatever the call does
+    leave = String[]
     cleanup = String[]            # statements after a call that returned
     keep = String[]               # what GC.@preserve holds
     values = Vector{Union{Nothing,Tuple{String,String}}}(nothing, length(irp))   # per IR parameter: (Julia type, expression)
@@ -900,8 +938,79 @@ function emit_function(ctx::Ctx, row::AbstractDict, name::String, index::Int)::E
                 return unsupported("the parameter `$shown` is passed as `$pass`, which this does not carry")
             end
             push!(args, "$pname::$(julia_arg_type(ctx, p["type"]))")
+        elseif t.kind === :callback && pass == "direct"
+            # A function the library calls back. Julia's function is made a C
+            # function; what it is given and returns must be what C can carry.
+            cb = t.extra
+            cs = T[classify(ctx, k) for k in cb.params]
+            rk = classify(ctx, cb.ret)
+            ctype(c) = c.kind in (:int, :float) ? c.jl : c.kind === :bool ? "Base.Bool" : c.kind === :char ? "Base.UInt32" :
+                       c.kind === :cenum ? String(c.extra) : c.kind === :ptr ? "Base.Ptr{Base.Cvoid}" : nothing
+            bad = findfirst(c -> ctype(c) === nothing, cs)
+            bad === nothing || return unsupported("the parameter `$shown` is a callback that takes a `$(cb.params[bad])`, which a callback does not carry yet")
+            (rk.kind === :unit || ctype(rk) !== nothing) ||
+                return unsupported("the parameter `$shown` is a callback that returns a `$(cb.ret)`, which a callback does not carry yet")
+            entry = get(ctx.callbacks, String(p["type"]), nothing)
+            (cb.c || entry !== nothing) ||
+                return unsupported("the parameter `$shown` is a Rust function pointer (`$(p["type"])`), and the library has no function of that signature to be given")
+            given(c, v) = c.kind === :char ? "Base.Char($v)" : c.kind === :cenum ? "$(c.jl)($v)" :
+                          c.kind === :ptr ? "Base.Ptr{$(isempty(c.jl) ? "Base.Cvoid" : c.jl)}($v)" : v
+            back(c, v) = c.kind === :unit ? "($v; nothing)" : c.kind === :char ? "Base.UInt32(Base.Char($v))" :
+                         c.kind === :cenum ? "$(c.extra)(Base.Integer($v::$(c.jl)))" :
+                         c.kind === :ptr ? "Base.Ptr{Base.Cvoid}($v)" : "Base.convert($(ctype(c)), $v)"
+            zero(c) = c.kind === :unit ? "nothing" : c.kind === :ptr ? "Base.C_NULL" : c.kind === :bool ? "false" :
+                      c.kind === :cenum ? "$(c.extra)(0)" : c.kind === :char ? "Base.UInt32(0)" : "Base.zero($(ctype(c)))"
+            bs = ["b$j" for j in eachindex(cs)]
+            call = "$pname(" * join((given(c, b) for (c, b) in zip(cs, bs)), ", ") * ")"
+            rtype = rk.kind === :unit ? "Base.Cvoid" : ctype(rk)
+            types = "(" * join((ctype(c) for c in cs), ", ") * (length(cs) == 1 ? "," : "") * ")"
+            # An error in Julia's function must not unwind through Rust: it is
+            # kept, a zero is returned in its place, and it is thrown once the
+            # library's function has returned.
+            push!(prelude, "$(pname)_e = Base.RefValue{Base.Any}(nothing)")
+            push!(prelude, "$(pname)_w = (" * join(bs, ", ") * ") -> try")
+            push!(prelude, "        " * back(rk, call))
+            push!(prelude, "    catch _x")
+            push!(prelude, "        $(pname)_e[] === nothing && ($(pname)_e[] = _x)")
+            push!(prelude, "        " * zero(rk))
+            push!(prelude, "    end")
+            push!(prelude, "$(pname)_c = $pname isa Base.Ptr ? $pname : Base.@cfunction(\$($(pname)_w), $rtype, $types)")
+            push!(prelude, "$(pname)_f = $pname isa Base.Ptr ? Base.Ptr{Base.Cvoid}($pname) : Base.unsafe_convert(Base.Ptr{Base.Cvoid}, $(pname)_c)")
+            push!(keep, "$(pname)_c")
+            if cb.c
+                values[irs[1]] = ("Base.Ptr{Base.Cvoid}", "$(pname)_f")
+            else
+                # A Rust function pointer: the library is given its own function
+                # of this signature, which calls on to the C function set here.
+                push!(enter, "Base.lock(_RB_CALLBACKS)")
+                push!(enter, "$(pname)_o = ccall(($(_sym(entry["set"])), LIBRARY_PATH), Base.Ptr{Base.Cvoid}, (Base.Ptr{Base.Cvoid},), $(pname)_f)")
+                pushfirst!(leave, "Base.unlock(_RB_CALLBACKS)")
+                pushfirst!(leave, "ccall(($(_sym(entry["set"])), LIBRARY_PATH), Base.Ptr{Base.Cvoid}, (Base.Ptr{Base.Cvoid},), $(pname)_o)")
+                values[irs[1]] = ("Base.Ptr{Base.Cvoid}",
+                                  "Base.unsafe_load(Base.cglobal(($(_sym(entry["at"])), LIBRARY_PATH), Base.Ptr{Base.Cvoid}))")
+            end
+            push!(cleanup, "$(pname)_e[] === nothing || Base.throw($(pname)_e[])")
+            push!(args, "$pname::Base.Union{Base.Function,Base.Ptr}")
+        elseif t.kind === :dyn && pass == "pair" && haskey(ctx.dyn_names, t.extra.trait)
+            # A reference to a trait object: two pointers, which the helper for
+            # this trait writes from what it is given (a value of a type that
+            # implements the trait, or a `Box` of the trait object).
+            helper = ctx.dyn_names[t.extra.trait]
+            leaves = RustABI.shape(ctx.types, p["type"]).leaves
+            (leaves isa Vector{RustABI.Leaf} && length(leaves) == 2) ||
+                return unsupported("the two parts of the parameter `$shown` are not placed")
+            push!(prelude, "$(pname)_k = _rb_dyn_$(t.extra.mutable ? "mut_" : "")$helper($pname)")
+            push!(prelude, "$(pname)_b = " * _buffer(t.size))
+            push!(prelude, "$(pname)_p = " * _buffer_ptr(t.size, "$(pname)_b"))
+            push!(prelude, "GC.@preserve $(pname)_b $(pname)_k _rb_dyn_$(helper)!($(pname)_p, $(pname)_k)")
+            push!(keep, "$(pname)_k", "$(pname)_b")
+            for (j, leaf) in enumerate(leaves)
+                values[irs[j]] = (ir_julia(irt[j]), _load(ir_julia(irt[j]), "$(pname)_p", leaf.offset))
+            end
+            push!(args, pname)
         else
-            return unsupported(t.kind === :dyn ? "the parameter `$shown` is a trait object, which is not wrapped yet" :
+            return unsupported(t.kind === :dyn ? "the parameter `$shown` is a trait object (`$(p["type"])`), and the build " *
+                                                 "knows no type that implements its trait" :
                                "the parameter `$shown` (`$(p["type"])`) is passed in a way this does not carry yet")
         end
     end
@@ -953,12 +1062,15 @@ function emit_function(ctx::Ctx, row::AbstractDict, name::String, index::Int)::E
     println(io, "Rust: `$path`", get(row, "own_debug_info", true) === false ?
                 " (merged with another function by the compiler: the types shown are that function's)" : "",
             get(row, "instance", "") == "inline" ? " (an inline function: the library has it because the build named it)" :
-            get(row, "instance", "") == "instantiate" ? " (compiled for these types because `[rust] instantiate` asks for it)" : "")
+            get(row, "instance", "") == "instantiate" ? " (compiled for these types because `[rust] instantiate` asks for it)" :
+            get(row, "instance", "") == "dyn" ? " (the trait's method, called on a trait object)" : "")
     println(io, "\"\"\"")
     println(io, "function $name(", join(args, ", "), ")")
     for s in prelude
         println(io, "    ", s)
     end
+    outer = io
+    io = IOBuffer()               # the call itself, which `enter` and `leave` go around
     vals = [values[i] for i in start:length(irp)]
     # The result, then what a returned call leaves to tidy (an object made for this call alone).
     function finish(indent, value)
@@ -1004,6 +1116,18 @@ function emit_function(ctx::Ctx, row::AbstractDict, name::String, index::Int)::E
         println(io, "        RepliBuild.RustRuntime.invoke(_rb_library(), RepliBuild.RustRuntime.thunk(_THUNKS[$index], _rb_library(), ",
                 repr(String(row["symbol"])), "), $guarded, _slots, _ret_p)")
         finish("        ", result)
+        println(io, "    end")
+    end
+    call_text = String(take!(io))
+    io = outer
+    if isempty(enter)
+        print(io, call_text)
+    else
+        foreach(l -> println(io, "    ", l), enter)
+        println(io, "    try")
+        foreach(l -> println(io, "    ", l), split(chomp(call_text), '\n'))
+        println(io, "    finally")
+        foreach(l -> println(io, "        ", l), leave)
         println(io, "    end")
     end
     println(io, "end")
@@ -1330,6 +1454,118 @@ end
 # =============================================================================
 
 """
+    _emit_traits(ctx) -> String
+
+Per trait object the functions take: what a reference to one is made from.
+`_rb_dyn_<Trait>(x)` gives what must stay alive across the call, and
+`_rb_dyn_<Trait>!(p, k)` writes the reference (two pointers) at `p`. A `Box`
+of the trait object is one already; for a value of a type that implements
+the trait, the library's own function writes it, since the second pointer
+is the type's table of methods, which only the compiler has.
+"""
+function _emit_traits(ctx::Ctx)::String
+    io = IOBuffer()
+    word(p, off) = _load("Base.Ptr{Base.Cvoid}", p, off)
+    for d in sort!(collect(keys(ctx.dyn_names)))
+        h = ctx.dyn_names[d]
+        ref = get(ctx.types, "&" * d, get(ctx.types, "&mut " * d, nothing))
+        ref === nothing && continue
+        at = Dict(String(f["name"]) => Int(f["offset"]) for f in ref["fields"])
+        (haskey(at, "pointer") && haskey(at, "vtable")) || continue
+        println(io, "# `$d`: what a reference to one is made from.")
+        println(io, "_rb_dyn_$h(x::Base.Tuple{Base.Ptr,Base.Ptr}) = x")
+        println(io, "_rb_dyn_$(h)!(p::Base.Ptr{Base.Cvoid}, k::Base.Tuple{Base.Ptr,Base.Ptr}) = (",
+                _store("Base.Ptr{Base.Cvoid}", "p", at["pointer"], "Base.Ptr{Base.Cvoid}(k[1])"), "; ",
+                _store("Base.Ptr{Base.Cvoid}", "p", at["vtable"], "Base.Ptr{Base.Cvoid}(k[2])"), "; nothing)")
+        plain = String[]
+        # A `Box` of the trait object holds the same two pointers.
+        for key in sort!(collect(keys(ctx.names)))
+            startswith(key, "alloc::boxed::Box<" * d) || continue
+            c = classify(ctx, key)
+            c.kind === :owned || continue
+            bt = Dict(String(f["name"]) => Int(f["offset"]) for f in get(ctx.types[key], "fields", Any[]))
+            (haskey(bt, "pointer") && haskey(bt, "vtable")) || continue
+            println(io, "_rb_dyn_$h(x::$(c.jl)) = x")
+            println(io, "function _rb_dyn_$(h)!(p::Base.Ptr{Base.Cvoid}, k::$(c.jl))")
+            println(io, "    _q = _rb_address(k)")
+            println(io, "    ", _store("Base.Ptr{Base.Cvoid}", "p", at["pointer"], word("_q", bt["pointer"])))
+            println(io, "    ", _store("Base.Ptr{Base.Cvoid}", "p", at["vtable"], word("_q", bt["vtable"])))
+            println(io, "    return nothing")
+            println(io, "end")
+        end
+        # A value of a type that implements the trait: the library writes the reference.
+        impls = get(get(ctx.dyn, d, Dict{String,Any}()), "implementors", Dict{String,Any}())
+        for key in sort!(collect(keys(impls)))
+            c = classify(ctx, key)
+            write = "ccall(($(_sym(impls[key])), LIBRARY_PATH), Base.Cvoid, (Base.Ptr{Base.Cvoid}, Base.Ptr{Base.Cvoid}), _rb_address(k), p)"
+            if c.kind in (:owned, :string, :vec)
+                name = c.kind === :owned ? c.jl : c.extra.name
+                println(io, "_rb_dyn_$h(x::$name) = x")
+                println(io, "_rb_dyn_$(h)!(p::Base.Ptr{Base.Cvoid}, k::$name) = ($write; nothing)")
+            elseif c.kind in (:blob, :int, :float) && (c.kind !== :blob || unmovable(ctx, key) === nothing)
+                println(io, "_rb_dyn_$h(x::$(c.jl)) = Base.RefValue{$(c.jl)}(x)")
+                println(io, "_rb_dyn_$h(x::Base.RefValue{$(c.jl)}) = x")
+                println(io, "_rb_dyn_$(h)!(p::Base.Ptr{Base.Cvoid}, k::Base.RefValue{$(c.jl)}) = ($write; nothing)")
+                push!(plain, c.jl)
+            end
+        end
+        # A mutable reference changes what it is given: a plain value would be changed in a copy.
+        println(io, "_rb_dyn_mut_$h(x) = _rb_dyn_$h(x)")
+        for jl in plain
+            println(io, "_rb_dyn_mut_$h(x::$jl) = Base.error(\"a `&mut $d` changes the value it is given: pass a `Ref` of the $(replace(jl, "Base." => ""))\")")
+        end
+        println(io)
+    end
+    return String(take!(io))
+end
+
+"""
+    _emit_statics(ctx, statics, taken) -> (text, listed)
+
+The crate's `static` items: for each, `<NAME>_ptr()` gives where it is in the
+library, and `<NAME>()` reads its value now, where the value is one this can
+read without taking it. `listed` pairs each Julia name with the Rust path.
+A static is never copied into the module: a Rust `static` may change (a
+`static mut`, an atomic), so it is read each time it is asked for.
+"""
+function _emit_statics(ctx::Ctx, statics, taken::Set{String})
+    io = IOBuffer()
+    listed = Tuple{String,String}[]
+    for s in statics
+        base = sanitize(String(s["name"]))
+        name = base
+        k = 1
+        while name in taken || (name * "_ptr") in taken || _reserved(name)
+            name = base * "_static" * (k == 1 ? "" : "_" * string(k))
+            k += 1
+        end
+        push!(taken, name, name * "_ptr")
+        t = classify(ctx, s["type"])
+        elt = t.kind in (:int, :float, :blob, :cenum) ? t.jl : "Base.Cvoid"
+        path = String(s["path"])
+        may = s["mutable"] === true ? " It may change: it is read where it is, each time." : ""
+        println(io, "\"\"\"")
+        println(io, "    $(name)_ptr()")
+        println(io)
+        println(io, "Where the Rust static `$path` (`$(s["type"])`) is in the library.$may")
+        println(io, "\"\"\"")
+        println(io, "$(name)_ptr() = Base.cglobal(($(_sym(s["symbol"])), LIBRARY_PATH), $elt)")
+        read = decode(ctx, s["type"], "_p", 0; take = false)
+        if read !== nothing
+            println(io, "\"\"\"")
+            println(io, "    $name()")
+            println(io)
+            println(io, "The value of the Rust static `$path` (`$(s["type"])`), read now.")
+            println(io, "\"\"\"")
+            println(io, "$name() = (let _p = Base.Ptr{Base.Cvoid}($(name)_ptr()); $read end)")
+        end
+        println(io)
+        push!(listed, (name, path))
+    end
+    return (String(take!(io)), listed)
+end
+
+"""
     generate(metadata; module_name, library_path, generator = "") -> (text, report)
 
 The wrapper module for a Rust library, from its build's metadata (parsed).
@@ -1407,6 +1643,9 @@ function generate(metadata::AbstractDict; module_name::AbstractString, library_p
     println(io, "    return _LIBRARY[] = RepliBuild.RustRuntime.Library(LIBRARY_PATH)")
     println(io, "end")
     println(io, "const _THUNKS = [Base.RefValue{Base.Ptr{Base.Cvoid}}(Base.C_NULL) for _ in 1:$(length(rows))]")
+    println(io, "# One call at a time gives the library a Julia function to call back: what the library's")
+    println(io, "# function of that signature calls on to is set around the call.")
+    println(io, "const _RB_CALLBACKS = Base.ReentrantLock()")
     println(io)
     println(io, "function __init__()")
     println(io, "    _LIBRARY[] = nothing")
@@ -1428,10 +1667,23 @@ function generate(metadata::AbstractDict; module_name::AbstractString, library_p
         println(io)
         print(io, ownership)
     end
+    traits = _emit_traits(ctx)
+    if !isempty(traits)
+        println(io, "# ── Trait objects ────────────────────────────────────────────────────────")
+        println(io)
+        print(io, traits)
+    end
     println(io, "# ── Functions ────────────────────────────────────────────────────────────")
     println(io)
     for e in emitted
         println(io, e.text)
+    end
+    (statics_text, statics_listed) = _emit_statics(ctx, get(metadata, "statics", Any[]),
+                                                   union(taken, type_names, Set([String(module_name)])))
+    if !isempty(statics_listed)
+        println(io, "# ── Statics ──────────────────────────────────────────────────────────────")
+        println(io)
+        print(io, statics_text)
     end
     println(io, "# ── What is in this module ───────────────────────────────────────────────")
     println(io)
@@ -1453,6 +1705,13 @@ function generate(metadata::AbstractDict; module_name::AbstractString, library_p
     println(io, "const OWNED = Base.Dict{Base.Symbol,Base.String}(")
     for key in sort!(collect(keys(ctx.names)); by = k -> ctx.names[k])
         classify(ctx, key).kind in (:owned, :string, :vec) && println(io, "    $(_sym(ctx.names[key])) => $(repr(String(key))),")
+    end
+    println(io, ")")
+    println(io)
+    println(io, "\"Each `static` of the crate in this module, and the Rust path it is.\"")
+    println(io, "const STATICS = Base.Dict{Base.Symbol,Base.String}(")
+    for (name, path) in statics_listed
+        println(io, "    $(_sym(name)) => $(repr(path)),")
     end
     println(io, ")")
     println(io)

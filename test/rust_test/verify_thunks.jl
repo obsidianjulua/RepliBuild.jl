@@ -103,9 +103,11 @@ end
 case("trait_object") do
     areas = map((0, 1)) do k
         b = call("rb_fix::make_area", UInt32(k))
-        at(call("rb_fix::dyn_area", at(b, Ptr{Cvoid}, 0), at(b, Ptr{Cvoid}, 8)), Float64, 0)
+        # The trait's own method, through the trait object: the compiler's shim, which has no symbol.
+        through = at(call("<dyn rb_fix::Area as rb_fix::Area>::area", at(b, Ptr{Cvoid}, 0), at(b, Ptr{Cvoid}, 8)), Float64, 0)
+        (at(call("rb_fix::dyn_area", at(b, Ptr{Cvoid}, 0), at(b, Ptr{Cvoid}, 8)), Float64, 0), through)
     end
-    areas == (3.0, 6.0)
+    areas == ((3.0, 3.0), (6.0, 6.0))
 end
 
 # --- scalars `ccall` has no type for ------------------------------------------

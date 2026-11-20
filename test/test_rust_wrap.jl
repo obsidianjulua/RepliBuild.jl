@@ -213,6 +213,7 @@ end
     reasons = Dict(r["name"] => r["reason"] for r in report if r["tier"] == "unsupported")
     reasons_all = copy(reasons)
     delete!(reasons, "Guard_Drop_drop")
+    delete!(reasons, "text_callback")
     # Beside a destructor, the one function left out takes the one type nothing can name or get.
     @test collect(keys(reasons)) == ["sealed_len"]
     @test occursin("moves a `rb_fix::hidden::Sealed`, which may own memory", reasons["sealed_len"]) &&
@@ -336,6 +337,49 @@ end
     @test occursin(r"ccall\(\(:_R\w+3add, LIBRARY_PATH\), ", body(text, "add"))
     # A destructor is in the library, and nothing may call it by name.
     @test occursin("Rust does not let a destructor be called directly", reasons_all["Guard_Drop_drop"])
+
+    # A `static` is read where it is, each time it is asked for; one that may change says so.
+    @test occursin("LIMIT_ptr() = Base.cglobal((:", text) && occursin(", LIBRARY_PATH), Base.UInt32)", text)
+    @test occursin("LIMIT() = (let _p = Base.Ptr{Base.Cvoid}(LIMIT_ptr()); Base.unsafe_load(Base.Ptr{Base.UInt32}(_p)) end)", text)
+    @test occursin("MOTTO() = (let _p = Base.Ptr{Base.Cvoid}(MOTTO_ptr()); Base.unsafe_string(", text)
+    @test occursin("Where the Rust static `rb_fix::TICKS` (`u64`) is in the library. It may change", text)
+    @test occursin(":LIMIT => \"rb_fix::LIMIT\"", text) && occursin("const STATICS = ", text)
+
+    # A reference to a trait object is two pointers, written by the helper for its trait from what it
+    # is given: a value of a type that implements the trait (the library writes it), or a `Box` of one.
+    size = body(text, "dyn_size")
+    @test occursin("function dyn_size(a1)", size) && occursin("a1_k = _rb_dyn_Scale(a1)", size)
+    @test occursin("_rb_dyn_Scale!(a1_p, a1_k)", size)
+    @test occursin("a1_k = _rb_dyn_mut_Scale(a1)", body(text, "dyn_grow"))
+    for (key, jl) in (("rb_fix::F2", "Base.RefValue{F2}"), ("rb_fix::Named", "Named"), ("f64", "Base.RefValue{Base.Float64}"))
+        sym = md["dyn"]["dyn rb_fix::Scale"]["implementors"][key]
+        @test occursin("_rb_dyn_Scale!(p::Base.Ptr{Base.Cvoid}, k::$jl) = (ccall((:$sym, LIBRARY_PATH), ", text)
+    end
+    @test occursin("_rb_dyn_Scale(x::F2) = Base.RefValue{F2}(x)", text) && occursin("_rb_dyn_Scale(x::Box_dyn_Scale) = x", text)
+    # A mutable reference changes what it is given: a plain value is refused, a `Ref` or an owner is not.
+    @test occursin("_rb_dyn_mut_Scale(x::F2) = Base.error(", text) && !occursin("_rb_dyn_mut_Scale(x::Named) = Base.error(", text)
+    # A trait's method called through a trait object is the trait's, and takes what a trait object is made from.
+    @test occursin("function Scale_label(a1)", body(text, "Scale_label")) && occursin("function Area_area(a1)", body(text, "Area_area"))
+    @test occursin("(the trait's method, called on a trait object)", text)
+
+    # A callback. Julia's function is made a C function; an error in it is kept and thrown after
+    # the call. A Rust function pointer is the library's own function of that signature, which
+    # calls on to it: what that calls is set around the call, and put back whatever happens.
+    apply = body(text, "apply")
+    cb = md["callbacks"]["fn(i32) -> i32"]
+    @test occursin("function apply(a1::Base.Union{Base.Function,Base.Ptr}, a2::Base.Integer)", apply)
+    @test occursin("a1_c = a1 isa Base.Ptr ? a1 : Base.@cfunction(\$(a1_w), Base.Int32, (Base.Int32,))", apply)
+    @test occursin("a1_o = ccall((:$(cb["set"]), LIBRARY_PATH), Base.Ptr{Base.Cvoid}, (Base.Ptr{Base.Cvoid},), a1_f)", apply)
+    @test occursin("Base.unsafe_load(Base.cglobal((:$(cb["at"]), LIBRARY_PATH), Base.Ptr{Base.Cvoid}))", apply)
+    @test occursin("    try\n", apply) && occursin("    finally\n        ccall((:$(cb["set"]), LIBRARY_PATH), Base.Ptr{Base.Cvoid}, (Base.Ptr{Base.Cvoid},), a1_o)\n        Base.unlock(_RB_CALLBACKS)\n    end\n", apply)
+    @test occursin("a1_e[] === nothing || Base.throw(a1_e[])", apply) && occursin("Base.lock(_RB_CALLBACKS)", apply)
+    # A C function pointer is called as C calls: Julia's is passed as it is, with nothing set.
+    c = body(text, "apply_c")
+    @test occursin("Base.@cfunction(\$(a1_w), Base.Float64, (Base.Float64, Base.Float64))", c) && !occursin("_RB_CALLBACKS", c) && !occursin("finally", c)
+    # What the callback is given is what the library passes: a record by reference is a pointer to one.
+    @test occursin("a2(b1, Base.Ptr{Rec}(b2))", body(text, "count_if")) && occursin("Base.Bool, (Base.UInt32, Base.Ptr{Base.Cvoid})", body(text, "count_if"))
+    @test occursin("Base.Cvoid, (Base.UInt32,))", body(text, "each"))
+    @test occursin("is a callback that takes a `&str`", reasons_all["text_callback"])
 
     # Two functions with the same code keep their own types in this build.
     @test occursin("function flip(a1::Side)", body(text, "flip")) && occursin("function flag(a1::Base.Bool)", body(text, "flag"))

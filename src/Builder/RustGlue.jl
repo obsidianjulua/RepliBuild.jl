@@ -89,8 +89,19 @@ Row(n, key, spelling, vec) = Row(n, key, spelling, vec, "")
 """
 One function's line: its number (`__rb_fn_<n>`), the Rust expression that
 names it, where it came from (`"inline"`: the build found it in the crate;
-`"instantiate"`: `[rust] instantiate` asked for it), and for a found one the
-symbol it was found under, which the line's function must turn out to be.
+`"instantiate"`: `[rust] instantiate` asked for it; `"dyn"`: a trait's method
+called through a trait object), and for a found one the symbol it was found
+under, which the line's function must turn out to be.
+
+A `"coerce"` row is the other thing a trait object needs: the function
+`__rb_dyn_<n>` that makes a reference to a value of one type into a reference
+to a trait object. Its `expr` is the type's spelling and its `symbol` the
+trait's.
+
+A `"callback"` row is one kind of function pointer a function takes
+(`fn(i32) -> i32`): a Rust function of that signature that calls on to a C
+function, so Julia can be what is called. Its `expr` is the parameter
+types' spellings, tab-separated, and its `symbol` the return type's.
 """
 struct FnRow
     n::Int
@@ -118,6 +129,9 @@ Plan() = Plan(String[], Row[], Dict{String,String}())
 
 drop_symbol(n::Integer) = "__rb_drop_$n"
 dropfn_symbol(n::Integer) = "__rb_dropfn_$n"
+coerce_symbol(n::Integer) = "__rb_dyn_$n"
+callback_symbol(n::Integer) = "__rb_cb_at_$n"
+callback_setter(n::Integer) = "__rb_cb_set_$n"
 fn_symbol(n::Integer) = "__rb_fn_$n"
 
 "How many parameters a function may have for its return type to be taken from it (the root crate has one helper per count)."
@@ -433,7 +447,30 @@ function glue_text(rows::Vector{Row}, fns::Vector{FnRow})
     # build it here, and the static holds its address.
     for f in fns
         n += 1
-        println(io, "#[no_mangle] pub static $(fn_symbol(f.n)): __RbAddr = __RbAddr(($(f.expr)) as *const ());")
+        if f.source == "callback"
+            # A function pointer of the Rust kind cannot be made outside Rust:
+            # how it is called is the compiler's own business. So the function
+            # the library is given is THIS one, compiled with that signature,
+            # and it calls on to a C function kept in a slot, which Julia sets
+            # around the call. Rust calls Rust; Rust calls C; nothing is guessed.
+            ps = isempty(f.expr) ? String[] : String.(split(f.expr, '\t'))
+            typed = join(("a$i: $p" for (i, p) in enumerate(ps)), ", ")
+            ret = isempty(f.symbol) ? "" : " -> $(f.symbol)"
+            sig = "fn(" * join(ps, ", ") * ")" * ret
+            println(io, "static __RB_CB_$(f.n): core::sync::atomic::AtomicPtr<()> = core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()); ",
+                    "fn __rb_cb_$(f.n)($typed)$ret { let f: extern \"C\" $sig = unsafe { core::mem::transmute(",
+                    "__RB_CB_$(f.n).load(core::sync::atomic::Ordering::SeqCst)) }; f(", join(("a$i" for i in eachindex(ps)), ", "), ") } ",
+                    "#[no_mangle] pub extern \"C\" fn $(callback_setter(f.n))(p: *mut ()) -> *mut () { ",
+                    "__RB_CB_$(f.n).swap(p, core::sync::atomic::Ordering::SeqCst) } ",
+                    "#[no_mangle] pub static $(callback_symbol(f.n)): __RbAddr = __RbAddr((__rb_cb_$(f.n) as $sig) as *const ());")
+        elseif f.source == "coerce"
+            # A reference to a value, written as a reference to a trait object: the
+            # compiler supplies the table of the type's methods, which nothing else can.
+            println(io, "#[no_mangle] pub unsafe extern \"C\" fn $(coerce_symbol(f.n))(p: *const $(f.expr), ",
+                    "out: *mut &'static dyn $(f.symbol)) { out.write(&*p) }")
+        else
+            println(io, "#[no_mangle] pub static $(fn_symbol(f.n)): __RbAddr = __RbAddr(($(f.expr)) as *const ());")
+        end
         fn_lines[f.n] = n
     end
     return (String(take!(io)), lines, fn_lines)
@@ -449,8 +486,8 @@ named by a Rust expression; this is the compiler's word for what it named.
 function address_table(ir_files)::Dict{String,String}
     out = Dict{String,String}()
     for file in ir_files, line in eachline(file)
-        (startswith(line, "@__rb_fn_") || startswith(line, "@__rb_dropfn_")) || continue
-        m = match(r"^@(__rb_(?:fn|dropfn)_\d+) = .*\bconstant ptr @([-a-zA-Z$._][-a-zA-Z$._0-9]*)", line)
+        (startswith(line, "@__rb_fn_") || startswith(line, "@__rb_dropfn_") || startswith(line, "@__rb_cb_at_")) || continue
+        m = match(r"^@(__rb_(?:fn|dropfn|cb_at)_\d+) = .*\bconstant ptr @([-a-zA-Z$._][-a-zA-Z$._0-9]*)", line)
         m === nothing || (out[String(m.captures[1])] = String(m.captures[2]))
     end
     return out
@@ -493,6 +530,69 @@ function positions(functions, types::AbstractDict, key::AbstractString; limit::I
     end
     sort!(out)
     return [(path = o[2], helper = o[3], what = o[4]) for o in out[1:min(end, limit)]]
+end
+
+"""
+    callbacks(functions, types) -> Vector{String}
+
+The kinds of Rust function pointer the functions take as a parameter
+(`fn(i32) -> i32`, by its type key), sorted. An `extern "C" fn` is not one:
+it is called as C calls, and needs nothing from the build.
+"""
+function callbacks(functions, types::AbstractDict)::Vector{String}
+    out = Set{String}()
+    for f in functions
+        f["refusal"] === nothing || continue
+        for p in f["parameters"]
+            k = get(p, "type", nothing)
+            k isa AbstractString || continue
+            t = get(types, k, nothing)
+            (t !== nothing && get(t, "kind", "") == "pointer" && get(t, "pointer", "") == "fn" && startswith(k, "fn(")) || continue
+            push!(out, String(k))
+        end
+    end
+    return sort!(collect(out))
+end
+
+"""
+    trait_objects(functions) -> Vector
+
+What the functions' signatures need of trait objects: for each trait `D`
+that some parameter or return names as `dyn D`, the types that implement it
+and its methods, both read off the paths of the functions the build
+describes (`<T as D>::method`). Each entry is `(trait, types, methods)`,
+sorted. A `dyn` of more than one trait (`dyn A + Send`) is left alone.
+"""
+function trait_objects(functions)
+    wanted = Set{String}()
+    for f in functions
+        f["refusal"] === nothing || continue
+        keys = Any[get(p, "type", nothing) for p in f["parameters"]]
+        push!(keys, get(f["return"], "type", nothing))
+        for k in keys
+            k isa AbstractString || continue
+            for m in eachmatch(r"\bdyn ([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)(?![A-Za-z0-9_:]| \+)", k)
+                push!(wanted, String(m.captures[1]))
+            end
+        end
+    end
+    out = Any[]
+    for d in sort!(collect(wanted))
+        types = Set{String}()
+        methods = Set{String}()
+        for f in functions
+            path = String(f["path"])
+            (startswith(path, "<") && !startswith(path, "<dyn ")) || continue
+            i = findlast(" as $d>::", path)
+            i === nothing && continue
+            rest = path[last(i)+1:end]
+            occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", rest) || continue
+            push!(methods, rest)
+            push!(types, path[2:first(i)-1])
+        end
+        push!(out, (trait = d, types = sort!(collect(types)), methods = sort!(collect(methods))))
+    end
+    return out
 end
 
 """

@@ -27,8 +27,9 @@ A **Rust front end is in progress** (branch work since 2026-11-19): `build`,
 `#[inline]` ones included, and generic ones for the types `[rust]
 instantiate` names, through plain `ccall`s and generated thunks
 (`RustThunks`, the dialect's `jlcs.native_call`), ownership included
-(`String`, `Vec`, `Box`, records that hold them, `Result`); trait objects
-are not built. It wraps plain Rust, never `extern "C"`; design
+(`String`, `Vec`, `Box`, records that hold them, `Result`), with trait
+objects, callbacks and statics. What is left is shipping (AOT thunks,
+`discover`, the doctor, Windows and AArch64). It wraps plain Rust, never `extern "C"`; design
 and measurements are `docs/updates/RUST_FRONT_END.md`, the rules are under
 "Rust front end" below.
 
@@ -2036,6 +2037,39 @@ outward-facing, so ask first.
   two is "is this type dropped"; the picked function's DIE names `T`, which
   is checked. Such a `glue` entry has `by_address`. Spelling is tried first
   (it also gives a `Vec` its two functions).
+- **A function pointer and the signature it points at are two types**
+  (`RustDWARF`: the pointer is `fn(i32) -> i32`, its target `{fn} fn(i32) ->
+  i32`). rustc names the pointer and leaves the signature unnamed; keyed
+  alike they were one entry marked `conflict`, and every function taking a
+  callback was refused from the first build side on (found 2026-11-19).
+  A key built from a spelling must not be one rustc also uses as a name.
+- **A Rust function pointer is never made outside Rust.** How one is called
+  is the compiler's business. Per kind taken (`RustGlue.callbacks`), one
+  line of `rb_glue.rs` is a Rust function of that signature (the library is
+  given THAT, through `__rb_cb_at_<n>`), which calls on to an `extern "C"`
+  function in a slot (`__rb_cb_set_<n>`). Julia makes its function a C
+  function, sets the slot around the call under `_RB_CALLBACKS` and puts it
+  back in a `finally`. An error in the Julia function is kept and thrown
+  after the call returns: it must not unwind through Rust. An `extern "C"
+  fn` parameter takes Julia's C function directly. A callback carries only
+  what C does (`emit_function`'s callback arm); anything else is a stub with
+  the type named. The slot holds for the length of the call: a callback the
+  library keeps is not built.
+- **A reference to a trait object is written by the library**
+  (`__rb_dyn_<n>(p: *const T, out: *mut &dyn Trait)`, one per implementing
+  type): the second pointer is the type's table of methods, which only the
+  compiler has. Which traits, types and methods comes from the paths of the
+  functions the build describes (`RustGlue.trait_objects`: `<T as
+  Trait>::method`), and the function's DIE says what its line named
+  (metadata `dyn`). A trait's method through a trait object is the
+  compiler's shim, named `<dyn Trait as Trait>::method` like any function
+  with no symbol (`instance: "dyn"`, Julia name `Trait_method`). `&mut dyn`
+  refuses a plain Julia value (`_rb_dyn_mut_<Trait>`): the change would be
+  made to a copy.
+- **A static is read where it is, each time** (`_emit_statics`: `NAME()`,
+  `NAME_ptr()`): never copied into the module, since a `static mut` or an
+  atomic changes. The statics are the crate IR's exported globals
+  (`RustABI.statics`) that a variable DIE describes.
 - **A destructor is never offered as a function** (`<T as
   core::ops::drop::Drop>::drop`): Rust refuses a direct call of one, and a
   value dropped that way would be dropped again by its owner.
@@ -2584,9 +2618,11 @@ read the generator output first. (User-facing C++ RAII — `Managed<T>` finalize
 DWARF-resolved destructors — **is** built.)
 
 - **Rust, what is left** (2026-11-19; `docs/updates/RUST_FRONT_END.md`
-  §23): trait objects (a `Box<dyn Trait>` is held and dropped, and cannot be
-  passed as `&dyn Trait` yet), callbacks, statics. A generic function is
-  wrapped only for the types `[rust] instantiate` names. Of ownership:
+  §24): shipping, below. A generic function is wrapped only for the types
+  `[rust] instantiate` names. Of trait objects and callbacks: a callback
+  the library keeps and calls later, a callback that takes a string, a
+  slice or a record by value, a Julia type implementing a Rust trait, a
+  function that returns `&dyn Trait`, a `dyn` of two traits. Of ownership:
   building an owning record or an enum with data from Julia (only `String`
   and `Vec` are built), `Box::new` from a Julia value, a type nothing with
   a public path returns, a slice of what is not plain data, a value aligned

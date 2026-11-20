@@ -267,6 +267,52 @@ case("types_no_path_spells") do
     (held, faults, M.parse_byte("9"), haskey(M.OWNED, :Secret), haskey(M.OWNED, :Fault)) ==
         ((true, UInt(3), true, UInt(3), false), (0x07, true, true, "bad: 300", "empty", :Bad, :Empty), 0x09, true, true)
 end
+# --- statics, trait objects, callbacks ------------------------------------------
+# A `static` is read where it is, each time: one that may change is seen changed.
+case("statics") do
+    before = M.TICKS()
+    ticked = M.tick()
+    unsafe_store!(M.TICKS_ptr(), 100)
+    (M.LIMIT(), M.ORIGIN().x, M.ORIGIN().y, M.MOTTO(), ticked == before + 1, M.TICKS(), M.tick(), unsafe_load(M.LIMIT_ptr()),
+     M.STATICS[:LIMIT], haskey(M.STATICS, :COUNTER), isdefined(M, :COUNTER_ptr)) ==
+        (UInt32(42), 1.5, 2.5, "plain Rust", true, UInt64(100), UInt64(101), UInt32(42), "rb_fix::LIMIT", true, true)
+end
+# Where `&dyn Trait` is taken: a value of any type that implements the trait (plain data, a type
+# that owns, a number), or a `Box` of the trait object. A trait's method is called through one.
+case("trait_objects") do
+    f = M.f2_make(1.0, 2.0); n = M.named("ada", 10); b = M.boxed_scale(2.0)
+    wrong = raised(() -> M.dyn_area(3))
+    (M.dyn_area(M.rect(2.0, 3.0)), M.dyn_area(M.make_area(0)), M.Area_area(M.make_area(1)), M.Area_area(M.unit_circle()),
+     M.dyn_size(f), M.dyn_size(n), M.dyn_size(2.5), M.dyn_size(b), M.Scale_size(b),
+     M.Scale_label(f), M.Scale_label(n), wrong isa MethodError, RT.isowned(n) && RT.isowned(b)) ==
+        (6.0, 3.0, 6.0, 3.0, 3.0, 10.0, 2.5, 4.0, 4.0, "size 3", "ada of size 10", true, true)
+end
+# `&mut dyn Trait` changes what it is given: a `Ref`, an owning object or a `Box`, never a plain value.
+case("trait_objects_that_change") do
+    r = Ref(M.f2_make(1.0, 2.0)); n = M.named("ada", 10); b = M.boxed_scale(2.0); x = Ref(1.5)
+    grown = (M.dyn_grow(r, 2.0), r[].x, M.dyn_grow(n, 3.0), n.id, M.dyn_grow(b, 0.5), M.dyn_size(b), M.dyn_grow(x, 2.0), x[])
+    M.Scale_scale(r, 10.0)
+    e = raised(() -> M.dyn_grow(M.f2_make(1.0, 2.0), 2.0))
+    (grown, r[].y, e isa ErrorException && occursin("pass a `Ref`", e.msg)) ==
+        ((6.0, 2.0, 30.0, UInt32(30), 2.0, 2.0, 3.0, 3.0), 40.0, true)
+end
+# The library calls a Julia function: any function, with what it closes over.
+case("callbacks") do
+    seen = Float64[]
+    folded = M.fold([1.0, 2.0, 3.0], 10.0, (a, b) -> (push!(seen, b); a + b))
+    visited = UInt32[]
+    M.each(4, i -> push!(visited, i))
+    (M.apply(x -> x * 2, 20), M.apply_c((a, b) -> a + b, 1.5, 2.0), folded, seen, visited,
+     M.count_if(10, (i, rec) -> unsafe_load(rec).d % 2 == 0 && i < 7), M.map_sum_fn_f64_f64([1.0, 2.0, 3.0], x -> x^2),
+     M.apply(x -> M.apply(y -> y * 3, x), 2), occursin("takes a `&str`", M.UNSUPPORTED[:text_callback])) ==
+        (Int32(41), 7.0, 16.0, [1.0, 2.0, 3.0], UInt32[0, 1, 2, 3], UInt32(4), 14.0, Int32(8), true)
+end
+# An error in the Julia function does not unwind through Rust: it is thrown when the library's function has returned.
+case("an_error_in_a_callback") do
+    e = raised(() -> M.apply(x -> error("julia says no"), 1))
+    t = raised(() -> M.fold([1.0, 2.0], 0.0, (a, b) -> "not a number"))
+    (e isa ErrorException && e.msg == "julia says no", t !== nothing, M.apply(x -> x, 5), M.fold([1.0, 2.0], 0.0, +)) == (true, true, Int32(6), 3.0)
+end
 case("a_destructor_is_not_called_by_name") do
     e = raised(() -> M.Guard_Drop_drop(M.guard(1)))
     (e isa ErrorException, occursin("destructor", M.UNSUPPORTED[:Guard_Drop_drop])) == (true, true)

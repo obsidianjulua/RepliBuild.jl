@@ -241,3 +241,69 @@ end
     row = RepliBuild.RustABI.join_function("_RNvCsX_1m5other", def, fns["_RNvCsX_1m5other"], types)
     @test row["refusal"] !== nothing && occursin("layout", row["refusal"])
 end
+
+@testset "Rust DWARF: a function pointer, its signature, and a static" begin
+    # rustc names the POINTER `fn(i32) -> i32` and leaves the signature it
+    # points at unnamed. Keyed alike, the two were one entry marked as a
+    # conflict, and every function taking a callback was refused.
+    dump = """
+         <0><b>: Abbrev Number: 1 (DW_TAG_compile_unit)
+            <c>   DW_AT_name        : lib.rs
+         <1><20>: Abbrev Number: 2 (DW_TAG_namespace)
+            <21>   DW_AT_name        : dep
+         <2><30>: Abbrev Number: 3 (DW_TAG_subprogram)
+            <31>   DW_AT_low_pc      : 0x1000
+            <32>   DW_AT_linkage_name: _RNvCsX_3dep5apply
+            <33>   DW_AT_name        : apply
+            <34>   DW_AT_type        : <0x90>
+         <3><40>: Abbrev Number: 4 (DW_TAG_formal_parameter)
+            <41>   DW_AT_name        : f
+            <42>   DW_AT_type        : <0x70>
+         <3><48>: Abbrev Number: 4 (DW_TAG_formal_parameter)
+            <49>   DW_AT_name        : x
+            <4a>   DW_AT_type        : <0x90>
+         <3><4f>: Abbrev Number: 0
+         <2><50>: Abbrev Number: 5 (DW_TAG_variable)
+            <51>   DW_AT_name        : LIMIT
+            <52>   DW_AT_type        : <0x98>
+            <53>   DW_AT_external    : 1
+            <54>   DW_AT_linkage_name: _RNvCsX_3dep5LIMIT
+         <2><58>: Abbrev Number: 5 (DW_TAG_variable)
+            <59>   DW_AT_name        : OTHER
+            <5a>   DW_AT_type        : <0x98>
+            <5b>   DW_AT_linkage_name: _RNvCsX_3dep5OTHER
+         <2><5f>: Abbrev Number: 0
+         <1><70>: Abbrev Number: 6 (DW_TAG_pointer_type)
+            <71>   DW_AT_type        : <0x80>
+            <72>   DW_AT_name        : fn(i32) -> i32
+         <1><80>: Abbrev Number: 7 (DW_TAG_subroutine_type)
+            <81>   DW_AT_type        : <0x90>
+         <2><88>: Abbrev Number: 8 (DW_TAG_formal_parameter)
+            <89>   DW_AT_type        : <0x90>
+         <2><8f>: Abbrev Number: 0
+         <1><90>: Abbrev Number: 9 (DW_TAG_base_type)
+            <91>   DW_AT_name        : i32
+            <92>   DW_AT_encoding    : 5	(signed)
+            <93>   DW_AT_byte_size   : 4
+         <1><98>: Abbrev Number: 9 (DW_TAG_base_type)
+            <99>   DW_AT_name        : u32
+            <9a>   DW_AT_encoding    : 7	(unsigned)
+            <9b>   DW_AT_byte_size   : 4
+         <1><9f>: Abbrev Number: 0
+        """
+    wanted = Set(["_RNvCsX_3dep5apply"])
+    statics = Set(["_RNvCsX_3dep5LIMIT"])
+    units = RDW.read_units(eachsplit(dump, '\n'), union(wanted, statics))
+    (fns, types, vars) = RDW.describe(units, wanted, statics)
+    @test [p["type"] for p in fns["_RNvCsX_3dep5apply"]["parameters"]] == ["fn(i32) -> i32", "i32"]
+    ptr = types["fn(i32) -> i32"]
+    @test ptr["kind"] == "pointer" && ptr["pointer"] == "fn" && ptr["target"] == "{fn} fn(i32) -> i32"
+    sig = types[ptr["target"]]
+    @test sig["kind"] == "subroutine" && sig["parameters"] == ["i32"] && sig["return"] == "i32"
+    @test !any(t -> get(t, "conflict", false) === true, values(types))
+    # A static: its name, where it is declared, and its type; only the ones asked for.
+    @test vars == Dict("_RNvCsX_3dep5LIMIT" => Dict{String,Any}("name" => "LIMIT", "scope" => ["dep"], "type" => "u32"))
+    # Asking for functions alone is what it was: the same functions, and no type only a static reaches.
+    (alone, their_types) = RDW.describe_functions(units, wanted)
+    @test alone == fns && all(k -> their_types[k] == types[k], keys(their_types)) && !haskey(their_types, "u32")
+end

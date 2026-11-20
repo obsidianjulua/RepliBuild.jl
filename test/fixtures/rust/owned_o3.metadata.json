@@ -1,11 +1,377 @@
 {
+ "callbacks": {
+  "fn(&str) -> usize": {
+   "at": "__rb_cb_at_28",
+   "set": "__rb_cb_set_28"
+  },
+  "fn(f64) -> f64": {
+   "at": "__rb_cb_at_29",
+   "set": "__rb_cb_set_29"
+  },
+  "fn(f64, f64) -> f64": {
+   "at": "__rb_cb_at_30",
+   "set": "__rb_cb_set_30"
+  },
+  "fn(i32) -> i32": {
+   "at": "__rb_cb_at_31",
+   "set": "__rb_cb_set_31"
+  },
+  "fn(u32)": {
+   "at": "__rb_cb_at_32",
+   "set": "__rb_cb_set_32"
+  },
+  "fn(u32, &rb_fix::Rec) -> bool": {
+   "at": "__rb_cb_at_33",
+   "set": "__rb_cb_set_33"
+  }
+ },
  "crate": {
-  "disambiguator": "lhJMa7RpzKa",
+  "disambiguator": "5qUwa0Ls1Or",
   "name": "rb_fix",
   "package": "rb-fix",
   "root": "rb_fix_rb"
  },
+ "dyn": {
+  "dyn rb_fix::Area": {
+   "implementors": {
+    "rb_fix::Shape": "__rb_dyn_21"
+   }
+  },
+  "dyn rb_fix::Scale": {
+   "implementors": {
+    "f64": "__rb_dyn_25",
+    "rb_fix::F2": "__rb_dyn_26",
+    "rb_fix::Named": "__rb_dyn_27"
+   }
+  }
+ },
  "functions": [
+  {
+   "address": "__rb_fn_20",
+   "generic": false,
+   "instance": "dyn",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "nonnull"
+      ],
+      "name": "%_1.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%_1.1",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "area<dyn rb_fix::Area>",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1,
+      2
+     ],
+     "name": "arg1",
+     "pass": "pair",
+     "type": "&dyn rb_fix::Area"
+    }
+   ],
+   "path": "<dyn rb_fix::Area as rb_fix::Area>::area",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix",
+    "Area"
+   ],
+   "symbol": "_RNSNvYDNtCs5qUwa0Ls1Or_6rb_fix4AreaEL_B5_4area5reifyCs9kEQ1LknPfg_9rb_fix_rb"
+  },
+  {
+   "address": "__rb_fn_22",
+   "generic": false,
+   "instance": "dyn",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "dead_on_unwind",
+       "noalias",
+       "noundef",
+       "writable",
+       "sret([24 x i8])",
+       "align 8",
+       "captures(address)",
+       "dereferenceable(24)"
+      ],
+      "name": "%_0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef",
+       "nonnull"
+      ],
+      "name": "%_1.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(48)"
+      ],
+      "name": "%_1.1",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "label<dyn rb_fix::Scale>",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      2,
+      3
+     ],
+     "name": "arg1",
+     "pass": "pair",
+     "type": "&dyn rb_fix::Scale"
+    }
+   ],
+   "path": "<dyn rb_fix::Scale as rb_fix::Scale>::label",
+   "refusal": null,
+   "return": {
+    "ir": [
+     1
+    ],
+    "pass": "indirect",
+    "type": "alloc::string::String"
+   },
+   "scope": [
+    "rb_fix",
+    "Scale"
+   ],
+   "symbol": "_RNSNvYDNtCs5qUwa0Ls1Or_6rb_fix5ScaleEL_B5_5label5reifyCs9kEQ1LknPfg_9rb_fix_rb"
+  },
+  {
+   "address": "__rb_fn_23",
+   "generic": false,
+   "instance": "dyn",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "nonnull"
+      ],
+      "name": "%_1.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(48)"
+      ],
+      "name": "%_1.1",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%_2",
+      "type": "double"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "scale<dyn rb_fix::Scale>",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1,
+      2
+     ],
+     "name": "arg1",
+     "pass": "pair",
+     "type": "&mut dyn rb_fix::Scale"
+    },
+    {
+     "ir": [
+      3
+     ],
+     "name": "arg2",
+     "pass": "direct",
+     "type": "f64"
+    }
+   ],
+   "path": "<dyn rb_fix::Scale as rb_fix::Scale>::scale",
+   "refusal": null,
+   "return": {
+    "pass": "ignore",
+    "type": null
+   },
+   "scope": [
+    "rb_fix",
+    "Scale"
+   ],
+   "symbol": "_RNSNvYDNtCs5qUwa0Ls1Or_6rb_fix5ScaleEL_B5_5scale5reifyCs9kEQ1LknPfg_9rb_fix_rb"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(8)"
+      ],
+      "name": "%self",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "size",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "self",
+     "pass": "direct",
+     "type": "&f64"
+    }
+   ],
+   "path": "<f64 as rb_fix::Scale>::size",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix",
+    "{impl#5}"
+   ],
+   "symbol": "_RNvXs3_Cs5qUwa0Ls1Or_6rb_fixdNtB5_5Scale4size"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(16)"
+      ],
+      "name": "%self",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "size",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "self",
+     "pass": "direct",
+     "type": "&rb_fix::F2"
+    }
+   ],
+   "path": "<rb_fix::F2 as rb_fix::Scale>::size",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix",
+    "{impl#3}"
+   ],
+   "symbol": "_RNvXs1_Cs5qUwa0Ls1Or_6rb_fixNtB5_2F2NtB5_5Scale4size"
+  },
   {
    "generic": false,
    "ir": {
@@ -55,7 +421,60 @@
     "rb_fix",
     "{impl#0}"
    ],
-   "symbol": "_RNvXCslhJMa7RpzKa_6rb_fixNtB2_5GuardNtNtNtCs4NRVxsYgnAr_4core3ops4drop4Drop4drop"
+   "symbol": "_RNvXCs5qUwa0Ls1Or_6rb_fixNtB2_5GuardNtNtNtCs4NRVxsYgnAr_4core3ops4drop4Drop4drop"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%self",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "size",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "self",
+     "pass": "direct",
+     "type": "&rb_fix::Named"
+    }
+   ],
+   "path": "<rb_fix::Named as rb_fix::Scale>::size",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix",
+    "{impl#4}"
+   ],
+   "symbol": "_RNvXs2_Cs5qUwa0Ls1Or_6rb_fixNtB5_5NamedNtB5_5Scale4size"
   },
   {
    "address": "__rb_fn_11",
@@ -134,10 +553,10 @@
     "rb_fix",
     "Named"
    ],
-   "symbol": "_RNvMs2_CslhJMa7RpzKa_6rb_fixNtB5_5Named6rename"
+   "symbol": "_RNvMs5_Cs5qUwa0Ls1Or_6rb_fixNtB5_5Named6rename"
   },
   {
-   "address": "__rb_fn_16",
+   "address": "__rb_fn_18",
    "generic": false,
    "instance": "instantiate",
    "ir": {
@@ -189,7 +608,60 @@
     "rb_fix",
     "Pair<i32>"
    ],
-   "symbol": "_RNvMs3_CslhJMa7RpzKa_6rb_fixINtB5_4PairlE3sumCs6gPu7gxnMUK_9rb_fix_rb"
+   "symbol": "_RNvMs6_Cs5qUwa0Ls1Or_6rb_fixINtB5_4PairlE3sumCs9kEQ1LknPfg_9rb_fix_rb"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(24)"
+      ],
+      "name": "%self",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "area",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "self",
+     "pass": "direct",
+     "type": "&rb_fix::Shape"
+    }
+   ],
+   "path": "<rb_fix::Shape as rb_fix::Area>::area",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix",
+    "{impl#2}"
+   ],
+   "symbol": "_RNvXs0_Cs5qUwa0Ls1Or_6rb_fixNtB5_5ShapeNtB5_4Area4area"
   },
   {
    "address": "__rb_fn_12",
@@ -258,9 +730,9 @@
    },
    "scope": [
     "rb_fix",
-    "{impl#6}"
+    "{impl#9}"
    ],
-   "symbol": "_RNvXs4_CslhJMa7RpzKa_6rb_fixNtB5_3TagNtNtCs4NRVxsYgnAr_4core5clone5Clone5clone"
+   "symbol": "_RNvXs7_Cs5qUwa0Ls1Or_6rb_fixNtB5_3TagNtNtCs4NRVxsYgnAr_4core5clone5Clone5clone"
   },
   {
    "generic": false,
@@ -322,7 +794,152 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix3add"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix3add"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(none)"
+      ],
+      "name": "%f",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%x",
+      "type": "i32"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "apply",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "f",
+     "pass": "direct",
+     "type": "fn(i32) -> i32"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "x",
+     "pass": "direct",
+     "type": "i32"
+    }
+   ],
+   "path": "rb_fix::apply",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "i32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5apply"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(none)"
+      ],
+      "name": "%f",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%a",
+      "type": "double"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%b",
+      "type": "double"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "apply_c",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "f",
+     "pass": "direct",
+     "type": "extern \"C\" fn(f64, f64) -> f64"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "a",
+     "pass": "direct",
+     "type": "f64"
+    },
+    {
+     "ir": [
+      3
+     ],
+     "name": "b",
+     "pass": "direct",
+     "type": "f64"
+    }
+   ],
+   "path": "rb_fix::apply_c",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix7apply_c"
   },
   {
    "generic": false,
@@ -374,7 +991,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5box_d"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5box_d"
   },
   {
    "generic": false,
@@ -424,7 +1041,52 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5boxed"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5boxed"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%k",
+      "type": "double"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [],
+     "type": "{ ptr, ptr }"
+    }
+   },
+   "name": "boxed_scale",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "k",
+     "pass": "direct",
+     "type": "f64"
+    }
+   ],
+   "path": "rb_fix::boxed_scale",
+   "refusal": null,
+   "return": {
+    "pass": "pair",
+    "type": "alloc::boxed::Box<dyn rb_fix::Scale, alloc::alloc::Global>"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix11boxed_scale"
   },
   {
    "generic": false,
@@ -488,7 +1150,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7bytes16"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix7bytes16"
   },
   {
    "generic": false,
@@ -542,7 +1204,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix11bytes16_sum"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix11bytes16_sum"
   },
   {
    "generic": false,
@@ -590,7 +1252,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5check"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5check"
   },
   {
    "generic": false,
@@ -653,7 +1315,72 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7compare"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix7compare"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%n",
+      "type": "i32"
+     },
+     {
+      "attrs": [
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(none)"
+      ],
+      "name": "%0",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i32"
+    }
+   },
+   "name": "count_if",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "n",
+     "pass": "direct",
+     "type": "u32"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "f",
+     "pass": "direct",
+     "type": "fn(u32, &rb_fix::Rec) -> bool"
+    }
+   ],
+   "path": "rb_fix::count_if",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "u32"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix8count_if"
   },
   {
    "address": "__rb_fn_5",
@@ -717,7 +1444,328 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix6divide"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix6divide"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "nonnull"
+      ],
+      "name": "%a.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(32)"
+      ],
+      "name": "%a.1",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "dyn_area",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1,
+      2
+     ],
+     "name": "a",
+     "pass": "pair",
+     "type": "&dyn rb_fix::Area"
+    }
+   ],
+   "path": "rb_fix::dyn_area",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix8dyn_area"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "nonnull"
+      ],
+      "name": "%s.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(48)"
+      ],
+      "name": "%s.1",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%k",
+      "type": "double"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "dyn_grow",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1,
+      2
+     ],
+     "name": "s",
+     "pass": "pair",
+     "type": "&mut dyn rb_fix::Scale"
+    },
+    {
+     "ir": [
+      3
+     ],
+     "name": "k",
+     "pass": "direct",
+     "type": "f64"
+    }
+   ],
+   "path": "rb_fix::dyn_grow",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix8dyn_grow"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "nonnull"
+      ],
+      "name": "%s.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "readonly",
+       "align 8",
+       "captures(none)",
+       "dereferenceable(48)"
+      ],
+      "name": "%s.1",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "dyn_size",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1,
+      2
+     ],
+     "name": "s",
+     "pass": "pair",
+     "type": "&dyn rb_fix::Scale"
+    }
+   ],
+   "path": "rb_fix::dyn_size",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix8dyn_size"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%n",
+      "type": "i32"
+     },
+     {
+      "attrs": [
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(none)"
+      ],
+      "name": "%f",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "void"
+    }
+   },
+   "name": "each",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "n",
+     "pass": "direct",
+     "type": "u32"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "f",
+     "pass": "direct",
+     "type": "fn(u32)"
+    }
+   ],
+   "path": "rb_fix::each",
+   "refusal": null,
+   "return": {
+    "pass": "ignore",
+    "type": null
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix4each"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%x",
+      "type": "double"
+     },
+     {
+      "attrs": [
+       "noundef"
+      ],
+      "name": "%y",
+      "type": "double"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [],
+     "type": "{ double, double }"
+    }
+   },
+   "name": "f2_make",
+   "no_mangle": false,
+   "nounwind": true,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "x",
+     "pass": "direct",
+     "type": "f64"
+    },
+    {
+     "ir": [
+      2
+     ],
+     "name": "y",
+     "pass": "direct",
+     "type": "f64"
+    }
+   ],
+   "path": "rb_fix::f2_make",
+   "refusal": null,
+   "return": {
+    "pass": "pair",
+    "type": "rb_fix::F2"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix7f2_make"
   },
   {
    "generic": false,
@@ -785,7 +1833,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10fault_text"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix10fault_text"
   },
   {
    "generic": false,
@@ -875,7 +1923,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9find_word"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix9find_word"
   },
   {
    "generic": false,
@@ -924,7 +1972,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix4flag"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix4flag"
   },
   {
    "generic": false,
@@ -973,7 +2021,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix4flip"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix4flip"
   },
   {
    "generic": false,
@@ -1037,7 +2085,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix4grid"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix4grid"
   },
   {
    "generic": false,
@@ -1085,7 +2133,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5guard"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5guard"
   },
   {
    "generic": false,
@@ -1133,7 +2181,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix13guard_release"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix13guard_release"
   },
   {
    "generic": false,
@@ -1202,7 +2250,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10join_words"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix10join_words"
   },
   {
    "generic": false,
@@ -1251,7 +2299,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10level_next"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix10level_next"
   },
   {
    "generic": false,
@@ -1296,7 +2344,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9make_area"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix9make_area"
   },
   {
    "generic": false,
@@ -1371,10 +2419,91 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix13make_greeting"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix13make_greeting"
   },
   {
-   "address": "__rb_fn_15",
+   "address": "__rb_fn_19",
+   "generic": true,
+   "instance": "instantiate",
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noalias",
+       "noundef",
+       "nonnull",
+       "readonly",
+       "align 8",
+       "captures(none)"
+      ],
+      "name": "%xs.0",
+      "type": "ptr"
+     },
+     {
+      "attrs": [
+       "noundef",
+       "range(i64 0, 1152921504606846976)"
+      ],
+      "name": "%xs.1",
+      "type": "i64"
+     },
+     {
+      "attrs": [
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(none)"
+      ],
+      "name": "%0",
+      "type": "ptr"
+     }
+    ],
+    "personality": "rust_eh_personality",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "double"
+    }
+   },
+   "name": "map_sum<fn(f64) -> f64>",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1,
+      2
+     ],
+     "name": "xs",
+     "pass": "pair",
+     "type": "&[f64]"
+    },
+    {
+     "ir": [
+      3
+     ],
+     "name": "f",
+     "pass": "direct",
+     "type": "fn(f64) -> f64"
+    }
+   ],
+   "path": "rb_fix::map_sum::<fn(f64) -> f64>",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "f64"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RINvCs5qUwa0Ls1Or_6rb_fix7map_sumFdEdECs9kEQ1LknPfg_9rb_fix_rb"
+  },
+  {
+   "address": "__rb_fn_17",
    "generic": true,
    "instance": "instantiate",
    "ir": {
@@ -1435,7 +2564,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RINvCslhJMa7RpzKa_6rb_fix8midpointdECs6gPu7gxnMUK_9rb_fix_rb"
+   "symbol": "_RINvCs5qUwa0Ls1Or_6rb_fix8midpointdECs9kEQ1LknPfg_9rb_fix_rb"
   },
   {
    "generic": false,
@@ -1510,7 +2639,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix12name_and_len"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix12name_and_len"
   },
   {
    "generic": false,
@@ -1600,7 +2729,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5named"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5named"
   },
   {
    "generic": false,
@@ -1670,7 +2799,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix15named_into_name"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix15named_into_name"
   },
   {
    "generic": false,
@@ -1723,7 +2852,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9named_len"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix9named_len"
   },
   {
    "generic": false,
@@ -1772,7 +2901,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7opt_box"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix7opt_box"
   },
   {
    "generic": false,
@@ -1820,7 +2949,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9opt_bytes"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix9opt_bytes"
   },
   {
    "generic": false,
@@ -1869,7 +2998,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix13ordering_sign"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix13ordering_sign"
   },
   {
    "generic": false,
@@ -1944,7 +3073,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10parse_byte"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix10parse_byte"
   },
   {
    "generic": false,
@@ -2018,7 +3147,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9parse_int"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix9parse_int"
   },
   {
    "generic": false,
@@ -2070,7 +3199,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix11rec_sum_ref"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix11rec_sum_ref"
   },
   {
    "generic": false,
@@ -2133,7 +3262,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix4recs"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix4recs"
   },
   {
    "generic": false,
@@ -2194,7 +3323,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10recs_total"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix10recs_total"
   },
   {
    "generic": false,
@@ -2248,7 +3377,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10sealed_len"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix10sealed_len"
   },
   {
    "generic": false,
@@ -2295,7 +3424,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix6secret"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix6secret"
   },
   {
    "generic": false,
@@ -2348,7 +3477,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix10secret_len"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix10secret_len"
   },
   {
    "generic": false,
@@ -2402,7 +3531,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix11secret_take"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix11secret_take"
   },
   {
    "generic": false,
@@ -2451,7 +3580,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5shout"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5shout"
   },
   {
    "generic": false,
@@ -2503,7 +3632,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix6slot_d"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix6slot_d"
   },
   {
    "generic": false,
@@ -2552,7 +3681,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9slot_make"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix9slot_make"
   },
   {
    "generic": false,
@@ -2602,7 +3731,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix9slot_take"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix9slot_take"
   },
   {
    "address": "__rb_fn_4",
@@ -2651,7 +3780,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5small"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5small"
   },
   {
    "generic": false,
@@ -2714,7 +3843,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7squares"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix7squares"
   },
   {
    "generic": false,
@@ -2768,7 +3897,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix16string_len_owned"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix16string_len_owned"
   },
   {
    "generic": false,
@@ -2821,7 +3950,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix14string_ref_len"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix14string_ref_len"
   },
   {
    "address": "__rb_fn_7",
@@ -2883,7 +4012,57 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix8sum_diff"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix8sum_diff"
+  },
+  {
+   "generic": false,
+   "ir": {
+    "cc": "",
+    "parameters": [
+     {
+      "attrs": [
+       "noundef",
+       "nonnull",
+       "readonly",
+       "captures(none)"
+      ],
+      "name": "%f",
+      "type": "ptr"
+     }
+    ],
+    "personality": "",
+    "return": {
+     "attrs": [
+      "noundef"
+     ],
+     "type": "i64"
+    }
+   },
+   "name": "text_callback",
+   "no_mangle": false,
+   "nounwind": false,
+   "own_debug_info": true,
+   "owner": null,
+   "parameters": [
+    {
+     "ir": [
+      1
+     ],
+     "name": "f",
+     "pass": "direct",
+     "type": "fn(&str) -> usize"
+    }
+   ],
+   "path": "rb_fix::text_callback",
+   "refusal": null,
+   "return": {
+    "pass": "direct",
+    "type": "usize"
+   },
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix13text_callback"
   },
   {
    "generic": false,
@@ -2973,7 +4152,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5token"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5token"
   },
   {
    "generic": false,
@@ -3025,7 +4204,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix8token_id"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix8token_id"
   },
   {
    "generic": false,
@@ -3076,7 +4255,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7unbox_d"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix7unbox_d"
   },
   {
    "generic": false,
@@ -3140,7 +4319,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix8vec_push"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix8vec_push"
   },
   {
    "generic": false,
@@ -3193,7 +4372,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix7vec_sum"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix7vec_sum"
   },
   {
    "generic": false,
@@ -3252,7 +4431,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix4view"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix4view"
   },
   {
    "generic": false,
@@ -3310,7 +4489,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix8view_len"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix8view_len"
   },
   {
    "generic": false,
@@ -3385,7 +4564,7 @@
    "scope": [
     "rb_fix"
    ],
-   "symbol": "_RNvCslhJMa7RpzKa_6rb_fix5words"
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5words"
   }
  ],
  "glue": {
@@ -3394,123 +4573,138 @@
    "owns": true,
    "spelling": "alloc::boxed::Box<dyn rb_fix::Area>"
   },
-  "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>": {
+  "alloc::boxed::Box<dyn rb_fix::Scale, alloc::alloc::Global>": {
    "drop": "__rb_drop_2",
+   "owns": true,
+   "spelling": "alloc::boxed::Box<dyn rb_fix::Scale>"
+  },
+  "alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>": {
+   "drop": "__rb_drop_3",
    "owns": true,
    "spelling": "alloc::boxed::Box<rb_fix::Rec>"
   },
   "alloc::string::String": {
-   "drop": "__rb_drop_3",
+   "drop": "__rb_drop_4",
    "owns": true,
    "spelling": "alloc::string::String"
   },
   "alloc::vec::Vec<alloc::string::String, alloc::alloc::Global>": {
-   "drop": "__rb_drop_4",
-   "owns": true,
-   "spelling": "alloc::vec::Vec<alloc::string::String>",
-   "vec": {
-    "new": "__rb_vec_new_4",
-    "view": "__rb_vec_view_4"
-   }
-  },
-  "alloc::vec::Vec<f64, alloc::alloc::Global>": {
    "drop": "__rb_drop_5",
    "owns": true,
-   "spelling": "alloc::vec::Vec<f64>",
+   "spelling": "alloc::vec::Vec<alloc::string::String>",
    "vec": {
     "new": "__rb_vec_new_5",
     "view": "__rb_vec_view_5"
    }
   },
-  "alloc::vec::Vec<rb_fix::Rec, alloc::alloc::Global>": {
+  "alloc::vec::Vec<f64, alloc::alloc::Global>": {
    "drop": "__rb_drop_6",
    "owns": true,
-   "spelling": "alloc::vec::Vec<rb_fix::Rec>",
+   "spelling": "alloc::vec::Vec<f64>",
    "vec": {
     "new": "__rb_vec_new_6",
     "view": "__rb_vec_view_6"
    }
   },
+  "alloc::vec::Vec<rb_fix::Rec, alloc::alloc::Global>": {
+   "drop": "__rb_drop_7",
+   "owns": true,
+   "spelling": "alloc::vec::Vec<rb_fix::Rec>",
+   "vec": {
+    "new": "__rb_vec_new_7",
+    "view": "__rb_vec_view_7"
+   }
+  },
   "core::option::Option<[u8; 6]>": {
-   "drop": "__rb_drop_8",
+   "drop": "__rb_drop_9",
    "owns": false,
    "spelling": "core::option::Option<[u8; 6]>"
   },
   "core::option::Option<alloc::boxed::Box<rb_fix::Rec, alloc::alloc::Global>>": {
-   "drop": "__rb_drop_9",
+   "drop": "__rb_drop_10",
    "owns": true,
    "spelling": "core::option::Option<alloc::boxed::Box<rb_fix::Rec>>"
   },
   "core::option::Option<alloc::string::String>": {
-   "drop": "__rb_drop_10",
+   "drop": "__rb_drop_11",
    "owns": true,
    "spelling": "core::option::Option<alloc::string::String>"
   },
   "core::result::Result<(), ()>": {
-   "drop": "__rb_drop_12",
+   "drop": "__rb_drop_13",
    "owns": false,
    "spelling": "core::result::Result<(), ()>"
   },
   "core::result::Result<i32, alloc::string::String>": {
-   "drop": "__rb_drop_13",
+   "drop": "__rb_drop_14",
    "owns": true,
    "spelling": "core::result::Result<i32, alloc::string::String>"
   },
   "core::result::Result<u8, rb_fix::hidden::Fault>": {
    "by_address": true,
-   "drop": "__rb_dropfn_14",
+   "drop": "__rb_dropfn_15",
    "owns": true,
    "spelling": "what `rb_fix::parse_byte` returns"
   },
-  "rb_fix::Guard": {
+  "rb_fix::F2": {
    "drop": "__rb_drop_18",
+   "owns": false,
+   "spelling": "rb_fix::F2"
+  },
+  "rb_fix::Guard": {
+   "drop": "__rb_drop_19",
    "owns": true,
    "spelling": "rb_fix::Guard"
   },
   "rb_fix::Named": {
-   "drop": "__rb_drop_19",
+   "drop": "__rb_drop_20",
    "owns": true,
    "spelling": "rb_fix::Named"
   },
   "rb_fix::Pair<i32>": {
-   "drop": "__rb_drop_21",
+   "drop": "__rb_drop_22",
    "owns": false,
    "spelling": "rb_fix::Pair<i32>"
   },
   "rb_fix::Rec": {
-   "drop": "__rb_drop_22",
+   "drop": "__rb_drop_23",
    "owns": false,
    "spelling": "rb_fix::Rec"
   },
-  "rb_fix::Slot": {
+  "rb_fix::Shape": {
    "drop": "__rb_drop_24",
+   "owns": false,
+   "spelling": "rb_fix::Shape"
+  },
+  "rb_fix::Slot": {
+   "drop": "__rb_drop_25",
    "owns": true,
    "spelling": "rb_fix::Slot"
   },
   "rb_fix::Tag": {
-   "drop": "__rb_drop_25",
+   "drop": "__rb_drop_26",
    "owns": true,
    "spelling": "rb_fix::Tag"
   },
   "rb_fix::View": {
-   "drop": "__rb_drop_27",
+   "drop": "__rb_drop_28",
    "owns": false,
    "spelling": "rb_fix::View"
   },
   "rb_fix::hidden::Fault": {
    "by_address": true,
-   "drop": "__rb_dropfn_28",
+   "drop": "__rb_dropfn_29",
    "owns": true,
    "spelling": "the `Err` of what `rb_fix::parse_byte` returns"
   },
   "rb_fix::hidden::Secret": {
    "by_address": true,
-   "drop": "__rb_dropfn_30",
+   "drop": "__rb_dropfn_31",
    "owns": true,
    "spelling": "what `rb_fix::secret` returns"
   },
   "rb_fix::inner::Token": {
-   "drop": "__rb_drop_31",
+   "drop": "__rb_drop_32",
    "owns": true,
    "spelling": "rb_fix::Token"
   }
@@ -3523,15 +4717,77 @@
   "rb_fix::hidden::Sealed": "no path names `rb_fix::hidden::Sealed` from outside the crate (module `hidden` is private), and no function with a public path returns one"
  },
  "instances": {
-  "inline": 13,
-  "instantiate": 2,
+  "inline": 15,
+  "instantiate": 3,
   "not_public": 1
  },
  "language": "rust",
  "library": "librb_fix.so",
  "library_sha": "0000000000000000000000000000000000000000000000000000000000000000",
- "metadata_version": "rust-3",
+ "metadata_version": "rust-4",
  "skipped": [],
+ "statics": [
+  {
+   "mutable": true,
+   "name": "COUNTER",
+   "path": "rb_fix::COUNTER",
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix7COUNTER",
+   "type": "core::sync::atomic::Atomic<u64>"
+  },
+  {
+   "mutable": true,
+   "name": "DROPS",
+   "path": "rb_fix::DROPS",
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5DROPS",
+   "type": "core::sync::atomic::Atomic<u64>"
+  },
+  {
+   "mutable": false,
+   "name": "LIMIT",
+   "path": "rb_fix::LIMIT",
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5LIMIT",
+   "type": "u32"
+  },
+  {
+   "mutable": false,
+   "name": "MOTTO",
+   "path": "rb_fix::MOTTO",
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5MOTTO",
+   "type": "&str"
+  },
+  {
+   "mutable": false,
+   "name": "ORIGIN",
+   "path": "rb_fix::ORIGIN",
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix6ORIGIN",
+   "type": "rb_fix::F2"
+  },
+  {
+   "mutable": true,
+   "name": "TICKS",
+   "path": "rb_fix::TICKS",
+   "scope": [
+    "rb_fix"
+   ],
+   "symbol": "_RNvCs5qUwa0Ls1Or_6rb_fix5TICKS",
+   "type": "u64"
+  }
+ ],
  "toolchain": {
   "rustc": "1.97.1"
  },
@@ -3587,12 +4843,70 @@
    "size": 8,
    "target": "[usize; 4]"
   },
+  "&[usize; 6]": {
+   "kind": "pointer",
+   "name": "&[usize; 6]",
+   "pointer": "ref",
+   "size": 8,
+   "target": "[usize; 6]"
+  },
   "&alloc::string::String": {
    "kind": "pointer",
    "name": "&alloc::string::String",
    "pointer": "ref",
    "size": 8,
    "target": "alloc::string::String"
+  },
+  "&dyn rb_fix::Area": {
+   "align": 8,
+   "fat": "dyn",
+   "fields": [
+    {
+     "align": 8,
+     "name": "pointer",
+     "offset": 0,
+     "type": "*dyn rb_fix::Area"
+    },
+    {
+     "align": 8,
+     "name": "vtable",
+     "offset": 8,
+     "type": "&[usize; 4]"
+    }
+   ],
+   "kind": "struct",
+   "name": "&dyn rb_fix::Area",
+   "scope": [],
+   "size": 16
+  },
+  "&dyn rb_fix::Scale": {
+   "align": 8,
+   "fat": "dyn",
+   "fields": [
+    {
+     "align": 8,
+     "name": "pointer",
+     "offset": 0,
+     "type": "*dyn rb_fix::Scale"
+    },
+    {
+     "align": 8,
+     "name": "vtable",
+     "offset": 8,
+     "type": "&[usize; 6]"
+    }
+   ],
+   "kind": "struct",
+   "name": "&dyn rb_fix::Scale",
+   "scope": [],
+   "size": 16
+  },
+  "&f64": {
+   "kind": "pointer",
+   "name": "&f64",
+   "pointer": "ref",
+   "size": 8,
+   "target": "f64"
   },
   "&mut alloc::string::String": {
    "kind": "pointer",
@@ -3608,6 +4922,28 @@
    "size": 8,
    "target": "alloc::vec::Vec<f64, alloc::alloc::Global>"
   },
+  "&mut dyn rb_fix::Scale": {
+   "align": 8,
+   "fat": "dyn",
+   "fields": [
+    {
+     "align": 8,
+     "name": "pointer",
+     "offset": 0,
+     "type": "*dyn rb_fix::Scale"
+    },
+    {
+     "align": 8,
+     "name": "vtable",
+     "offset": 8,
+     "type": "&[usize; 6]"
+    }
+   ],
+   "kind": "struct",
+   "name": "&mut dyn rb_fix::Scale",
+   "scope": [],
+   "size": 16
+  },
   "&mut rb_fix::Guard": {
    "kind": "pointer",
    "name": "&mut rb_fix::Guard",
@@ -3621,6 +4957,13 @@
    "pointer": "mut_ref",
    "size": 8,
    "target": "rb_fix::Named"
+  },
+  "&rb_fix::F2": {
+   "kind": "pointer",
+   "name": "&rb_fix::F2",
+   "pointer": "ref",
+   "size": 8,
+   "target": "rb_fix::F2"
   },
   "&rb_fix::Named": {
    "kind": "pointer",
@@ -3642,6 +4985,13 @@
    "pointer": "ref",
    "size": 8,
    "target": "rb_fix::Rec"
+  },
+  "&rb_fix::Shape": {
+   "kind": "pointer",
+   "name": "&rb_fix::Shape",
+   "pointer": "ref",
+   "size": 8,
+   "target": "rb_fix::Shape"
   },
   "&rb_fix::Slot": {
    "kind": "pointer",
@@ -3771,6 +5121,13 @@
    "size": 8,
    "target": "dyn rb_fix::Area"
   },
+  "*dyn rb_fix::Scale": {
+   "kind": "pointer",
+   "name": "*dyn rb_fix::Scale",
+   "pointer": "other",
+   "size": 8,
+   "target": "dyn rb_fix::Scale"
+  },
   "*f64": {
    "kind": "pointer",
    "name": "*f64",
@@ -3827,6 +5184,13 @@
    "name": "[usize; 4]",
    "size": 32
   },
+  "[usize; 6]": {
+   "count": 6,
+   "element": "usize",
+   "kind": "array",
+   "name": "[usize; 6]",
+   "size": 48
+  },
   "alloc::alloc::Global": {
    "align": 1,
    "fields": [],
@@ -3857,6 +5221,28 @@
    ],
    "kind": "struct",
    "name": "alloc::boxed::Box<dyn rb_fix::Area, alloc::alloc::Global>",
+   "scope": [],
+   "size": 16
+  },
+  "alloc::boxed::Box<dyn rb_fix::Scale, alloc::alloc::Global>": {
+   "align": 8,
+   "fat": "dyn",
+   "fields": [
+    {
+     "align": 8,
+     "name": "pointer",
+     "offset": 0,
+     "type": "*dyn rb_fix::Scale"
+    },
+    {
+     "align": 8,
+     "name": "vtable",
+     "offset": 8,
+     "type": "&[usize; 6]"
+    }
+   ],
+   "kind": "struct",
+   "name": "alloc::boxed::Box<dyn rb_fix::Scale, alloc::alloc::Global>",
    "scope": [],
    "size": 16
   },
@@ -4198,6 +5584,30 @@
    "kind": "base",
    "name": "bool",
    "size": 1
+  },
+  "core::cell::UnsafeCell<core::sync::atomic::private::Align8<u64>>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "value",
+     "offset": 0,
+     "type": "core::sync::atomic::private::Align8<u64>"
+    }
+   ],
+   "kind": "struct",
+   "name": "UnsafeCell<core::sync::atomic::private::Align8<u64>>",
+   "params": [
+    {
+     "name": "T",
+     "type": "core::sync::atomic::private::Align8<u64>"
+    }
+   ],
+   "scope": [
+    "core",
+    "cell"
+   ],
+   "size": 8
   },
   "core::cmp::Ordering": {
    "align": 1,
@@ -4864,6 +6274,57 @@
    ],
    "size": 24
   },
+  "core::sync::atomic::Atomic<u64>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "v",
+     "offset": 0,
+     "type": "core::cell::UnsafeCell<core::sync::atomic::private::Align8<u64>>"
+    }
+   ],
+   "kind": "struct",
+   "name": "Atomic<u64>",
+   "params": [
+    {
+     "name": "T",
+     "type": "u64"
+    }
+   ],
+   "scope": [
+    "core",
+    "sync",
+    "atomic"
+   ],
+   "size": 8
+  },
+  "core::sync::atomic::private::Align8<u64>": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 0,
+     "type": "u64"
+    }
+   ],
+   "kind": "struct",
+   "name": "Align8<u64>",
+   "params": [
+    {
+     "name": "T",
+     "type": "u64"
+    }
+   ],
+   "scope": [
+    "core",
+    "sync",
+    "atomic",
+    "private"
+   ],
+   "size": 8
+  },
   "dyn rb_fix::Area": {
    "align": 1,
    "fields": [],
@@ -4871,6 +6332,21 @@
    "name": "dyn rb_fix::Area",
    "scope": [],
    "size": 0
+  },
+  "dyn rb_fix::Scale": {
+   "align": 1,
+   "fields": [],
+   "kind": "struct",
+   "name": "dyn rb_fix::Scale",
+   "scope": [],
+   "size": 0
+  },
+  "extern \"C\" fn(f64, f64) -> f64": {
+   "kind": "pointer",
+   "name": "extern \"C\" fn(f64, f64) -> f64",
+   "pointer": "fn",
+   "size": 8,
+   "target": "{fn} fn(f64, f64) -> f64"
   },
   "f32": {
    "encoding": "float",
@@ -4884,6 +6360,48 @@
    "name": "f64",
    "size": 8
   },
+  "fn(&str) -> usize": {
+   "kind": "pointer",
+   "name": "fn(&str) -> usize",
+   "pointer": "fn",
+   "size": 8,
+   "target": "{fn} fn(&str) -> usize"
+  },
+  "fn(f64) -> f64": {
+   "kind": "pointer",
+   "name": "fn(f64) -> f64",
+   "pointer": "fn",
+   "size": 8,
+   "target": "{fn} fn(f64) -> f64"
+  },
+  "fn(f64, f64) -> f64": {
+   "kind": "pointer",
+   "name": "fn(f64, f64) -> f64",
+   "pointer": "fn",
+   "size": 8,
+   "target": "{fn} fn(f64, f64) -> f64"
+  },
+  "fn(i32) -> i32": {
+   "kind": "pointer",
+   "name": "fn(i32) -> i32",
+   "pointer": "fn",
+   "size": 8,
+   "target": "{fn} fn(i32) -> i32"
+  },
+  "fn(u32)": {
+   "kind": "pointer",
+   "name": "fn(u32)",
+   "pointer": "fn",
+   "size": 8,
+   "target": "{fn} fn(u32)"
+  },
+  "fn(u32, &rb_fix::Rec) -> bool": {
+   "kind": "pointer",
+   "name": "fn(u32, &rb_fix::Rec) -> bool",
+   "pointer": "fn",
+   "size": 8,
+   "target": "{fn} fn(u32, &rb_fix::Rec) -> bool"
+  },
   "i32": {
    "encoding": "signed",
    "kind": "base",
@@ -4895,6 +6413,29 @@
    "kind": "base",
    "name": "i8",
    "size": 1
+  },
+  "rb_fix::F2": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "x",
+     "offset": 0,
+     "type": "f64"
+    },
+    {
+     "align": 8,
+     "name": "y",
+     "offset": 8,
+     "type": "f64"
+    }
+   ],
+   "kind": "struct",
+   "name": "F2",
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 16
   },
   "rb_fix::Guard": {
    "align": 4,
@@ -5023,6 +6564,98 @@
     "rb_fix"
    ],
    "size": 16
+  },
+  "rb_fix::Shape": {
+   "align": 8,
+   "discriminant": {
+    "align": 8,
+    "offset": 0,
+    "size": 8,
+    "type": "u64"
+   },
+   "fields": [],
+   "kind": "enum",
+   "name": "Shape",
+   "scope": [
+    "rb_fix"
+   ],
+   "size": 24,
+   "variants": [
+    {
+     "default": false,
+     "discr_value": 0,
+     "name": "Circle",
+     "offset": 0,
+     "type": "rb_fix::Shape::Circle"
+    },
+    {
+     "default": false,
+     "discr_value": 1,
+     "name": "Rect",
+     "offset": 0,
+     "type": "rb_fix::Shape::Rect"
+    },
+    {
+     "default": false,
+     "discr_value": 2,
+     "name": "Empty",
+     "offset": 0,
+     "type": "rb_fix::Shape::Empty"
+    }
+   ]
+  },
+  "rb_fix::Shape::Circle": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "__0",
+     "offset": 8,
+     "type": "f64"
+    }
+   ],
+   "kind": "struct",
+   "name": "Circle",
+   "scope": [
+    "rb_fix",
+    "Shape"
+   ],
+   "size": 24
+  },
+  "rb_fix::Shape::Empty": {
+   "align": 8,
+   "fields": [],
+   "kind": "struct",
+   "name": "Empty",
+   "scope": [
+    "rb_fix",
+    "Shape"
+   ],
+   "size": 24
+  },
+  "rb_fix::Shape::Rect": {
+   "align": 8,
+   "fields": [
+    {
+     "align": 8,
+     "name": "w",
+     "offset": 8,
+     "type": "f64"
+    },
+    {
+     "align": 8,
+     "name": "h",
+     "offset": 16,
+     "type": "f64"
+    }
+   ],
+   "kind": "struct",
+   "name": "Rect",
+   "scope": [
+    "rb_fix",
+    "Shape"
+   ],
+   "size": 24
   },
   "rb_fix::Side": {
    "align": 1,
@@ -5302,6 +6935,56 @@
    "kind": "base",
    "name": "usize",
    "size": 8
+  },
+  "{fn} fn(&str) -> usize": {
+   "kind": "subroutine",
+   "name": "{fn} fn(&str) -> usize",
+   "parameters": [
+    "&str"
+   ],
+   "return": "usize"
+  },
+  "{fn} fn(f64) -> f64": {
+   "kind": "subroutine",
+   "name": "{fn} fn(f64) -> f64",
+   "parameters": [
+    "f64"
+   ],
+   "return": "f64"
+  },
+  "{fn} fn(f64, f64) -> f64": {
+   "kind": "subroutine",
+   "name": "{fn} fn(f64, f64) -> f64",
+   "parameters": [
+    "f64",
+    "f64"
+   ],
+   "return": "f64"
+  },
+  "{fn} fn(i32) -> i32": {
+   "kind": "subroutine",
+   "name": "{fn} fn(i32) -> i32",
+   "parameters": [
+    "i32"
+   ],
+   "return": "i32"
+  },
+  "{fn} fn(u32)": {
+   "kind": "subroutine",
+   "name": "{fn} fn(u32)",
+   "parameters": [
+    "u32"
+   ],
+   "return": null
+  },
+  "{fn} fn(u32, &rb_fix::Rec) -> bool": {
+   "kind": "subroutine",
+   "name": "{fn} fn(u32, &rb_fix::Rec) -> bool",
+   "parameters": [
+    "u32",
+    "&rb_fix::Rec"
+   ],
+   "return": "bool"
   }
  }
 }

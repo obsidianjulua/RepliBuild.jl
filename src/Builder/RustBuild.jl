@@ -178,7 +178,7 @@ _located(config::RepliBuildConfig) =
                config.rust.instantiate)
 
 "The shape of a Rust project's `compilation_metadata.json`. Bump it with any change to what a row means."
-const METADATA_VERSION = "rust-3"
+const METADATA_VERSION = "rust-4"
 
 # =============================================================================
 # The toolchain
@@ -705,12 +705,29 @@ function _plan_glue!(rc::RustConfig, crate::Crate, need::Vector{String}, fn_need
     # A found function's path, as an expression could write it once its paths are chosen.
     exprs = Dict{String,String}()
     for f in fn_need
-        f.source == "inline" || continue
+        f.source in ("inline", "dyn") || continue
         e = RustGlue.function_expression(f.path)
         e === nothing ? (fn_refused[f.key] = "it has no name a Rust expression can write") : (exprs[f.key] = e)
     end
+    # A type and a trait, for a reference to one made into a trait object.
+    coerce = [(f.key, RustGlue.source_name(f.path), String(f.trait)) for f in fn_need
+              if f.source == "coerce" && RustGlue.unnameable(f.path) === nothing]
+    # A function pointer's parameter and return types, each spelled on its own.
+    parts = Dict{String,Any}()
+    for f in fn_need
+        f.source == "callback" || continue
+        sig = get(types, something(get(get(types, f.key, Dict()), "target", nothing), ""), nothing)
+        (sig === nothing || get(sig, "kind", "") != "subroutine") && continue
+        ps = Any[p for p in get(sig, "parameters", Any[])]
+        ret = get(sig, "return", nothing)
+        (all(p -> p isa AbstractString && RustGlue.unnameable(p) === nothing, ps) &&
+         (ret === nothing || RustGlue.unnameable(ret) === nothing)) || continue
+        parts[f.key] = (params = String[RustGlue.source_name(p) for p in ps], ret = ret === nothing ? "" : RustGlue.source_name(ret))
+    end
     texts = vcat([names[k] for k in sort!(collect(keys(names)))], [exprs[k] for k in sort!(collect(keys(exprs)))],
-                 [p.expr for k in sort!(collect(keys(from))) for p in from[k]])
+                 [p.expr for k in sort!(collect(keys(from))) for p in from[k]],
+                 [c[2] for c in coerce], [c[3] for c in coerce],
+                 [x for k in sort!(collect(keys(parts))) for x in vcat(parts[k].params, parts[k].ret)])
     all_paths = sort!(unique!(reduce(vcat, [RustGlue.paths(t) for t in texts]; init = String[])))
     chosen = Dict{String,String}()
     unresolved = Dict{String,String}()
@@ -756,10 +773,23 @@ function _plan_glue!(rc::RustConfig, crate::Crate, need::Vector{String}, fn_need
     end
     fns = RustGlue.FnRow[]
     for (i, f) in enumerate(fn_need)
-        if f.source == "inline"
+        if f.source in ("inline", "dyn")
             haskey(exprs, f.key) || continue
             e = RustGlue.spell(exprs[f.key], chosen)
-            e === nothing ? (fn_refused[f.key] = "no public path names it") : push!(fns, RustGlue.FnRow(i, e, "inline", f.key))
+            e === nothing ? (fn_refused[f.key] = "no public path names it") :
+                            push!(fns, RustGlue.FnRow(i, e, String(f.source), f.source == "inline" ? f.key : ""))
+        elseif f.source == "callback"
+            haskey(parts, f.key) || continue
+            ps = [RustGlue.spell(p, chosen) for p in parts[f.key].params]
+            ret = isempty(parts[f.key].ret) ? "" : RustGlue.spell(parts[f.key].ret, chosen)
+            (any(isnothing, ps) || ret === nothing) ? (fn_refused[f.key] = "no public path names one of its types") :
+                                                      push!(fns, RustGlue.FnRow(i, join(ps, '\t'), "callback", ret))
+        elseif f.source == "coerce"
+            RustGlue.unnameable(f.path) === nothing || continue
+            t = RustGlue.spell(RustGlue.source_name(f.path), chosen)
+            d = RustGlue.spell(String(f.trait), chosen)
+            (t === nothing || d === nothing) ? (fn_refused[f.key] = "no public path names it") :
+                                               push!(fns, RustGlue.FnRow(i, t, "coerce", d))
         else
             push!(fns, RustGlue.FnRow(i, f.key, "instantiate", ""))
         end
@@ -786,7 +816,8 @@ function _plan_glue!(rc::RustConfig, crate::Crate, need::Vector{String}, fn_need
             refused[r.key] = "the line that drops it does not compile: $(bad[line_of[r.n]])"
         end
         for f in dropped_fns
-            fn_refused[f.symbol] = "the line that names it does not compile: $(bad[fn_line_of[f.n]])"
+            fn_refused[f.source == "inline" ? f.symbol : "$(f.source)|$(f.expr)|$(f.symbol)"] =
+                "the line that names it does not compile: $(bad[fn_line_of[f.n]])"
         end
         rows = RustGlue.Row[r for r in rows if !haskey(bad, line_of[r.n])]
         fns = RustGlue.FnRow[f for f in fns if !haskey(bad, fn_line_of[f.n])]
@@ -1112,7 +1143,8 @@ function build_rust_project(config::RepliBuildConfig; generator::AbstractString 
 
     metadata = extract_metadata(config, crate, tc, library, [ir]; plan, allow_empty = true)
     need = RustGlue.wanted(metadata["functions"], metadata["types"])
-    fn_need = _functions_wanted(rc, crate, tc, metadata; keep_merged = keep_merged[])
+    found = _functions_wanted(rc, crate, tc, metadata; keep_merged = keep_merged[])
+    fn_need = vcat(found, _trait_objects_wanted(metadata))
     if need != plan.wanted || String[f.source * "|" * f.key for f in fn_need] != plan.wanted_fns
         # What this build's functions move, and the functions the library
         # has no symbol for, are not what `rb_glue.rs` was written for (on a
@@ -1128,12 +1160,14 @@ function build_rust_project(config::RepliBuildConfig; generator::AbstractString 
             cp(artifact.library, library)
             metadata = extract_metadata(config, crate, tc, library, [artifact.ir]; plan, allow_empty = true)
             again = RustGlue.wanted(metadata["functions"], metadata["types"])
+            fns_again = vcat(found, _trait_objects_wanted(metadata))
             # Again when the functions compiled in move types that were not
-            # asked about, or when there are now functions a type with no
-            # spelling could be taken from.
+            # asked about, name trait objects that were not known of, or are
+            # functions a type with no spelling could be taken from.
             more = Set{String}(String(f["symbol"]) for f in metadata["functions"]) != had
-            (again == need && !(more && !isempty(metadata["glue_refused"]))) && break
+            (again == need && length(fns_again) == length(fn_need) && !(more && !isempty(metadata["glue_refused"]))) && break
             need = again
+            fn_need = fns_again
         end
         key = _metadata_key(artifact.library, [artifact.ir], tc, crate, generator, rc.instantiate)
     end
@@ -1159,8 +1193,29 @@ function _functions_wanted(rc::RustConfig, crate::Crate, tc::Toolchain, metadata
         found = String[]
     end
     paths = _demangle(found)
-    out = [(source = "inline", key = s, path = get(paths, s, s)) for s in found]
-    append!(out, [(source = "instantiate", key = e, path = e) for e in rc.instantiate])
+    out = Any[(source = "inline", key = s, path = get(paths, s, s), trait = "") for s in found]
+    append!(out, [(source = "instantiate", key = e, path = e, trait = "") for e in rc.instantiate])
+    return out
+end
+
+# What the functions' trait objects need: each trait's methods, called
+# through a trait object, and for each type that implements it the function
+# that makes a reference to one into a reference to a trait object.
+function _trait_objects_wanted(metadata::AbstractDict)
+    out = Any[]
+    for t in RustGlue.trait_objects(metadata["functions"])
+        for m in t.methods
+            push!(out, (source = "dyn", key = "$(t.trait)|$m", path = "<dyn $(t.trait) as $(t.trait)>::$m", trait = t.trait))
+        end
+        for ty in t.types
+            push!(out, (source = "coerce", key = "$ty|$(t.trait)", path = ty, trait = t.trait))
+        end
+    end
+    # Each kind of function pointer a function takes: a Rust function of that
+    # signature for the library to be given, which calls on to Julia's.
+    for k in RustGlue.callbacks(metadata["functions"], metadata["types"])
+        push!(out, (source = "callback", key = k, path = k, trait = ""))
+    end
     return out
 end
 
@@ -1245,6 +1300,15 @@ Everything `compilation_metadata.json` holds for a Rust library.
   (`instance`: `"inline"`, found in the crate, or `"instantiate"`, asked for
   in the TOML): the root crate compiled it, and the exported static named
   by `address` holds where it is. `instances` counts them.
+- `dyn`: per trait object (`dyn rb_fix::Area`), `implementors`: for each type
+  that implements the trait, the function that makes a reference to a value
+  of it into a reference to the trait object.
+- `callbacks`: per kind of Rust function pointer a function takes
+  (`fn(i32) -> i32`), `at`: the static holding the address of the Rust
+  function of that signature the library is to be given, and `set`: the
+  function that sets the C function it calls on to.
+- `statics`: the crate's `static` items the library exports, each with its
+  symbol, path, type, and whether it may be written (`mutable`).
 - `skipped`: exported definitions that were left out, each with its reason.
 
 An empty surface is an error, as it is for a C library
@@ -1268,7 +1332,7 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
     fn_refused = Dict{String,String}(plan.fn_refused)
     table = Dict{String,String}()
     picked = String[]                    # the drop functions the compiler chose for types that were not spelled
-    if !isempty(plan.fns) || any(r -> !isempty(r.call), plan.rows)
+    if !isempty(plan.fns) || any(r -> !isempty(r.call), plan.rows)      # (callbacks are among `plan.fns`)
         root_ir = joinpath(dirname(ir_files[1]), root_name(crate) * ".ll")
         isfile(root_ir) || error("rustc wrote no IR file $root_ir for the root crate `$(root_name(crate))`")
         table = RustGlue.address_table([root_ir])
@@ -1281,6 +1345,7 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
         named = _demangle(unique!(vcat(collect(values(table)), String[f.symbol for f in plan.fns if !isempty(f.symbol)])))
         taken = Set{String}(symbols)
         for f in plan.fns
+            f.source in ("coerce", "callback") && continue
             label = f.source == "inline" ? f.symbol : f.expr
             address = RustGlue.fn_symbol(f.n)
             sym = get(table, address, nothing)
@@ -1306,14 +1371,35 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
         error(_no_surface_message(crate, Dict{String,Any}("skipped" => skipped)))
     # An alias has its target's code, and often no DIE of its own.
     target = Dict(sym => RustABI.alias_target(sym, defs, aliases) for sym in symbols)
+    # The crate's statics: global variables of its IR that the library exports.
+    globals = RustABI.statics(ir_files)
+    static_symbols = String[]
+    for sym in sort!(collect(keys(globals)))
+        sym in exported || continue
+        r = RustABI.v0_root(sym)
+        ((r !== nothing && r.crate == crate.name && r.namespace == 'v') || !startswith(sym, "_R")) && push!(static_symbols, sym)
+    end
     wanted = union(Set{String}(symbols), Set{String}(values(target)),
                    Set{String}(RustGlue.drop_symbol(r.n) for r in plan.rows),
-                   Set{String}(String(i.symbol) for i in instances), Set{String}(picked))
-    (dwarf_functions, types) = _with_dump_lines(library) do lines
-        units = RustDWARF.read_units(lines, wanted)
-        RustDWARF.describe_functions(units, wanted)
+                   Set{String}(String(i.symbol) for i in instances), Set{String}(picked),
+                   Set{String}(RustGlue.coerce_symbol(f.n) for f in plan.fns if f.source == "coerce"),
+                   Set{String}(table[RustGlue.callback_symbol(f.n)] for f in plan.fns
+                               if f.source == "callback" && haskey(table, RustGlue.callback_symbol(f.n))))
+    (dwarf_functions, types, dwarf_statics) = _with_dump_lines(library) do lines
+        units = RustDWARF.read_units(lines, union(wanted, Set{String}(static_symbols)))
+        RustDWARF.describe(units, wanted, Set{String}(static_symbols))
     end
-    paths = _demangle(vcat(symbols, String[String(r["symbol"]) for r in skipped], String[String(i.symbol) for i in instances]))
+    paths = _demangle(vcat(symbols, String[String(r["symbol"]) for r in skipped], String[String(i.symbol) for i in instances],
+                           static_symbols))
+    # A static the DWARF does not describe has no type to read it by, and is left out.
+    statics = Dict{String,Any}[]
+    for sym in static_symbols
+        v = get(dwarf_statics, sym, nothing)
+        (v === nothing || v["type"] === nothing) && continue
+        push!(statics, Dict{String,Any}("symbol" => sym, "path" => get(paths, sym, sym), "name" => v["name"],
+                                        "scope" => v["scope"], "type" => v["type"], "mutable" => globals[sym]))
+    end
+    sort!(statics; by = r -> (r["path"], r["symbol"]))
     for r in skipped
         r["path"] = get(paths, r["symbol"], r["symbol"])
     end
@@ -1342,7 +1428,8 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
     for inst in instances
         own = get(dwarf_functions, inst.symbol, nothing)
         row = RustABI.join_function(inst.symbol, inst.def, own, types)
-        row["path"] = get(paths, inst.symbol, inst.symbol)
+        # A method called through a trait object is a shim the compiler wrote for the trait's own method.
+        row["path"] = replace(get(paths, inst.symbol, inst.symbol), r"::\{shim:[^}]*\}$" => "")
         row["own_debug_info"] = own !== nothing
         # Not a name the loader binds: the function is reached through the
         # exported static that holds its address.
@@ -1351,6 +1438,41 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
         push!(functions, row)
     end
     sort!(functions; by = r -> (r["path"], r["symbol"]))
+    # Trait objects: per `dyn Trait`, the function that makes a reference to
+    # each implementing type into one. The function's own debug info says
+    # which type and which trait object its line named.
+    dyn = Dict{String,Any}()
+    pointee(key) = (t = get(types, something(key, ""), nothing);
+                    (t !== nothing && get(t, "kind", "") == "pointer") ? get(t, "target", nothing) : nothing)
+    for f in plan.fns
+        f.source == "coerce" || continue
+        sym = RustGlue.coerce_symbol(f.n)
+        d = get(dwarf_functions, sym, nothing)
+        (sym in exported && d !== nothing && length(d["parameters"]) == 2) || continue
+        of = pointee(d["parameters"][1]["type"])
+        fat = pointee(d["parameters"][2]["type"])
+        (of isa AbstractString && fat isa AbstractString && startswith(fat, "&dyn ")) || continue
+        entry = get!(dyn, String(fat[2:end]), Dict{String,Any}("implementors" => Dict{String,Any}()))
+        entry["implementors"][String(of)] = sym
+    end
+    # Callbacks: per kind of function pointer, the Rust function of that
+    # signature the library is given, and the function that sets what it
+    # calls on to. Its debug info says the signature its line was given.
+    callbacks = Dict{String,Any}()
+    wanted_callbacks = RustGlue.callbacks(functions, types)
+    for f in plan.fns
+        f.source == "callback" || continue
+        at = RustGlue.callback_symbol(f.n)
+        set = RustGlue.callback_setter(f.n)
+        d = get(dwarf_functions, get(table, at, ""), nothing)
+        (at in exported && set in exported && d !== nothing) || continue
+        for key in wanted_callbacks
+            sig = get(types, something(get(types[key], "target", nothing), ""), nothing)
+            sig === nothing && continue
+            (Any[p["type"] for p in d["parameters"]] == Any[p for p in sig["parameters"]] && d["return"] == sig["return"]) || continue
+            haskey(callbacks, key) || (callbacks[key] = Dict{String,Any}("at" => at, "set" => set))
+        end
+    end
     (glue, glue_refused) = RustGlue.verify(plan, dwarf_functions, types, exported; table, demangled = _demangle(picked))
     first_symbol = isempty(symbols) ? (isempty(instances) ? "" : String(instances[1].symbol)) : symbols[1]
     root = RustABI.v0_root(first_symbol)
@@ -1368,6 +1490,9 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
         "glue" => glue,
         "glue_refused" => glue_refused,
         "glue_helpers" => String[h for h in RustGlue.STRING_HELPERS if h in exported],
+        "statics" => statics,
+        "dyn" => dyn,
+        "callbacks" => callbacks,
         "instances" => Dict{String,Any}(
             "inline" => count(i -> i.source == "inline", instances),
             "instantiate" => count(i -> i.source == "instantiate", instances),
@@ -1394,8 +1519,9 @@ so a reason shared by many functions is one line.
 function report(io::IO, metadata::AbstractDict)
     functions = metadata["functions"]
     refused = [f for f in functions if f["refusal"] !== nothing]
+    nstatics = length(get(metadata, "statics", Any[]))
     println(io, "  rust: $(length(functions)) functions, $(length(functions) - length(refused)) callable, " *
-                "$(length(metadata["types"])) types")
+                "$(length(metadata["types"])) types", nstatics == 0 ? "" : ", $nstatics statics")
     inst = get(metadata, "instances", Dict{String,Any}())
     if get(inst, "inline", 0) + get(inst, "instantiate", 0) + get(inst, "not_public", 0) > 0
         println(io, "  no symbol of their own: $(inst["inline"]) inline functions and $(inst["instantiate"]) asked for in ",

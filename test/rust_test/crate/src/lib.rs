@@ -157,6 +157,23 @@ impl Acc {
 pub trait Area { fn area(&self) -> f64; }
 impl Area for Shape { fn area(&self) -> f64 { area(self) } }
 pub fn dyn_area(a: &dyn Area) -> f64 { a.area() }
+// A trait with a method that changes its value, one with a default, and three
+// kinds of type that implement it: plain data, a type that owns, and a number.
+pub trait Scale {
+    fn scale(&mut self, k: f64);
+    fn size(&self) -> f64;
+    fn label(&self) -> String { format!("size {}", self.size()) }
+}
+impl Scale for F2 { fn scale(&mut self, k: f64) { self.x *= k; self.y *= k; } fn size(&self) -> f64 { self.x + self.y } }
+impl Scale for Named {
+    fn scale(&mut self, k: f64) { self.id = (self.id as f64 * k) as u32; }
+    fn size(&self) -> f64 { self.id as f64 }
+    fn label(&self) -> String { format!("{} of size {}", self.name, self.id) }
+}
+impl Scale for f64 { fn scale(&mut self, k: f64) { *self *= k; } fn size(&self) -> f64 { *self } }
+pub fn dyn_size(s: &dyn Scale) -> f64 { s.size() }
+pub fn dyn_grow(s: &mut dyn Scale, k: f64) -> f64 { s.scale(k); s.size() }
+pub fn boxed_scale(k: f64) -> Box<dyn Scale> { Box::new(F2 { x: k, y: k }) }
 pub fn make_area(k: u32) -> Box<dyn Area> {
     if k == 0 { Box::new(unit_circle()) } else { Box::new(rect(2.0, 3.0)) }
 }
@@ -201,10 +218,28 @@ pub fn midpoint<T: Copy + core::ops::Add<Output = T> + core::ops::Div<Output = T
 }
 pub fn into_f64(x: impl Into<f64>) -> f64 { x.into() }
 
+// --- functions the library calls back ----------------------------------------------
+pub fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) + 1 }
+pub fn apply_c(f: extern "C" fn(f64, f64) -> f64, a: f64, b: f64) -> f64 { f(a, b) * 2.0 }
+pub fn fold(xs: &[f64], init: f64, f: fn(f64, f64) -> f64) -> f64 { xs.iter().fold(init, |a, &b| f(a, b)) }
+pub fn count_if(n: u32, f: fn(u32, &Rec) -> bool) -> u32 {
+    (0..n).filter(|&i| f(i, &rec_make(1, 2.0, 3, i))).count() as u32
+}
+pub fn each(n: u32, f: fn(u32)) { for i in 0..n { f(i) } }
+pub fn map_sum<F: Fn(f64) -> f64>(xs: &[f64], f: F) -> f64 { xs.iter().map(|&x| f(x)).sum() }
+pub fn text_callback(f: fn(&str) -> usize) -> usize { f("four") }
+
 // --- a panic, a static, and a caller-location parameter DWARF does not list ----------
 pub fn checked_div(a: i32, b: i32) -> i32 { if b == 0 { panic!("division by zero in rb_fix") } a / b }
 pub static COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn count() -> u64 { COUNTER.fetch_add(1, Ordering::SeqCst) }
+// Statics: a number, a record, a string, and one that may be written.
+pub static LIMIT: u32 = 42;
+pub static ORIGIN: F2 = F2 { x: 1.5, y: 2.5 };
+pub static MOTTO: &str = "plain Rust";
+pub static mut TICKS: u64 = 3;
+#[allow(static_mut_refs)]
+pub fn tick() -> u64 { unsafe { TICKS += 1; TICKS } }
 #[track_caller]
 pub fn located(x: i32) -> u32 { x as u32 + std::panic::Location::caller().line() }
 
