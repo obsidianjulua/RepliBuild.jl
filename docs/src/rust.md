@@ -9,8 +9,8 @@ crate's name, and the few things only you can decide (how optimized, which
 features, which types a generic function is wanted for).
 
 !!! note "Where this runs"
-    Rust crates are wrapped on **Linux x86-64**. Linux AArch64 and Windows
-    have not been run yet.
+    Rust crates are wrapped on **Linux**, x86-64 and AArch64. Windows has not
+    been run yet.
 
 ## What you need
 

@@ -2739,10 +2739,10 @@ DWARF-resolved destructors — **is** built.)
   borrowing from another does not outlive it, and that a value is dropped
   on the thread that made it (a finalizer runs where the collector does).
   Linux x86-64 is measured on the dev box. Linux AArch64 runs only in CI
-  (tier2-linux's arm cell, first run 2026-11-20: the build and thunk tests
-  passed there, compiled and JIT'd, and the wrapper's probes all but the two
-  callback ones, reworked since). Windows is not run: CI's Windows cells run
-  the pkg and unit suites only.
+  (tier2-linux's arm cell: the three live tests pass there, compiled and
+  JIT'd, since 2026-11-20), so an AArch64 failure is first seen on a pushed
+  branch. Windows is not run: CI's Windows cells run the pkg and unit suites
+  only.
 - Toolchain records by value that still trap (narrowed 2026-11-13; `tuple`,
   `optional` and `complex` are laid out, above): one with a virtual base, a
   struct (not a union) holding an empty record as a member, and anything

@@ -2011,9 +2011,13 @@ the wrapper holds for the length of the call (§23's slot, one level up).
 Two Rust function pointers of one kind in one call are refused: the library
 has one function of that signature to be given.
 
-Not built, and not run: Linux AArch64 and Windows (no Rust target for either
-is on the dev box; nothing here is x86-64's alone by design, and nothing has
-shown it); object files written by libJLCS itself, so that compiling thunks
+With callbacks reworked, CI's arm64 cell passes the three live tests whole
+(the run PR 132 merged on, 2026-11-20). AArch64 is verified there and only
+there: no Rust target for it is on the dev box.
+
+Not built, and not run: Windows (CI's Windows cells run the pkg and unit
+suites, so the Rust front end has never built a crate there); object files
+written by libJLCS itself, so that compiling thunks
 needs no `llc`; `show` for a Rust record (it prints as its bytes); the
 registry's own toolchain check for a Rust project is skipped, and `build`'s
 is what runs.

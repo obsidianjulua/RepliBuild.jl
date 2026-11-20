@@ -179,7 +179,7 @@ Present: the project is a Rust crate, and cargo builds it.
 folder that holds a `Cargo.toml`.
 
 `build`, `wrap` and `use` work on a Rust crate's public functions,
-`#[inline]` ones included, on Linux x86-64 (AArch64 and Windows are not run
+`#[inline]` ones included, on Linux (x86-64 and AArch64; Windows is not run
 yet):
 
 - numbers, `bool`, `char`, strings and slices in; records, tuples, enums and
