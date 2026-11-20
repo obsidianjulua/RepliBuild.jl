@@ -1,0 +1,47 @@
+define i8 @_RNvCs1hrDFCe5rCe_4lean10level_next(i8 %l) unnamed_addr #0 !dbg !16 {
+define { i16, i16 } @_RNvCs1hrDFCe5rCe_4lean10two16_swap(i16 %t.0, i16 %t.1) unnamed_addr #0 !dbg !30 {
+define i32 @_RNvCs1hrDFCe5rCe_4lean11checked_div(i32 %a, i32 %b) unnamed_addr #0 !dbg !42 {
+define double @_RNvCs1hrDFCe5rCe_4lean11rec_sum_ref(ptr align 8 %r) unnamed_addr #0 !dbg !55 {
+define void @_RNvCs1hrDFCe5rCe_4lean11unit_circle(ptr sret([24 x i8]) align 8 %_0) unnamed_addr #0 !dbg !75 {
+define void @_RNvCs1hrDFCe5rCe_4lean1z(i32 %a) unnamed_addr #0 !dbg !97 {
+define i32 @_RNvCs1hrDFCe5rCe_4lean3add(i32 %a, i32 %b) unnamed_addr #0 !dbg !108 {
+define double @_RNvCs1hrDFCe5rCe_4lean4area(ptr align 8 %s) unnamed_addr #0 !dbg !116 {
+define zeroext i1 @_RNvCs1hrDFCe5rCe_4lean4flag(i1 zeroext %b) unnamed_addr #0 !dbg !141 {
+define { i32, double } @_RNvCs1hrDFCe5rCe_4lean4pair(i32 %a, double %b) unnamed_addr #0 !dbg !150 {
+define void @_RNvCs1hrDFCe5rCe_4lean4rect(ptr sret([24 x i8]) align 8 %_0, double %w, double %h) unnamed_addr #0 !dbg !165 {
+define i128 @_RNvCs1hrDFCe5rCe_4lean4wide(i128 %x) unnamed_addr #0 !dbg !175 {
+define { ptr, i64 } @_RNvCs1hrDFCe5rCe_4lean5hello() unnamed_addr #0 !dbg !197 {
+define { i32, i32 } @_RNvCs1hrDFCe5rCe_4lean5maybe(i32 %x) unnamed_addr #0 !dbg !207 {
+define i24 @_RNvCs1hrDFCe5rCe_4lean6b3_rot(i24 %0) unnamed_addr #0 !dbg !233 {
+define double @_RNvCs1hrDFCe5rCe_4lean6f2_dot(double %a.0, double %a.1, double %b.0, double %b.1) unnamed_addr #0 !dbg !249 {
+define { double, double } @_RNvCs1hrDFCe5rCe_4lean7f2_make(double %x, double %y) unnamed_addr #0 !dbg !264 {
+define i32 @_RNvCs1hrDFCe5rCe_4lean7located(i32 %x, ptr align 8 %0) unnamed_addr #0 !dbg !273 {
+define double @_RNvCs1hrDFCe5rCe_4lean7rec_sum(ptr align 8 %r) unnamed_addr #0 !dbg !307 {
+define i64 @_RNvCs1hrDFCe5rCe_4lean7str_len(ptr %s.0, i64 %s.1) unnamed_addr #0 !dbg !318 {
+define double @_RNvCs1hrDFCe5rCe_4lean8dyn_area(ptr %a.0, ptr align 8 %a.1) unnamed_addr #0 !dbg !326 {
+define void @_RNvCs1hrDFCe5rCe_4lean8rec_make(ptr sret([16 x i8]) align 8 %_0, i8 %a, double %b, i16 %c, i32 %d) unnamed_addr #0 !dbg !345 {
+define i32 @_RNvCs1hrDFCe5rCe_4lean9char_code(i32 %c) unnamed_addr #0 !dbg !359 {
+define i32 @_RNvCs1hrDFCe5rCe_4lean9opt_ref_d(ptr align 8 %0) unnamed_addr #0 !dbg !367 {
+define double @_RNvCs1hrDFCe5rCe_4lean9slice_sum(ptr align 8 %xs.0, i64 %xs.1) unnamed_addr #0 !dbg !396 {
+define { double, i32 } @_RNvMCs1hrDFCe5rCe_4leanNtB2_3Acc3new() unnamed_addr #0 !dbg !423 {
+define double @_RNvMCs1hrDFCe5rCe_4leanNtB2_3Acc4mean(ptr align 8 %self) unnamed_addr #0 !dbg !432 {
+define void @_RNvMCs1hrDFCe5rCe_4leanNtB2_3Acc4push(ptr align 8 %self, double %x) unnamed_addr #0 !dbg !446 {
+define internal i64 @_RNvMNtCs4NRVxsYgnAr_4core3stre3lenCs1hrDFCe5rCe_4lean(ptr %self.0, i64 %self.1) unnamed_addr #1 !dbg !459 {
+define internal { ptr, ptr } @_RNvMs4_NtCs4NRVxsYgnAr_4core3fmtNtB5_9Arguments8from_strCs1hrDFCe5rCe_4lean(ptr %s.0, i64 %s.1) unnamed_addr #1 !dbg !478 {
+define internal i32 @_RNvMs4_NtNtCs4NRVxsYgnAr_4core5panic8locationNtB5_8Location4lineCs1hrDFCe5rCe_4lean(ptr align 8 %self) unnamed_addr #1 !dbg !591 {
+define internal align 8 ptr @_RNvMs4_NtNtCs4NRVxsYgnAr_4core5panic8locationNtB5_8Location6callerCs1hrDFCe5rCe_4lean(ptr align 8 %0) unnamed_addr #1 !dbg !601 {
+define internal double @_RNvXs2Z_NtNtCs4NRVxsYgnAr_4core3ops5arithdINtB6_3MulRdE3mulCs1hrDFCe5rCe_4lean(double %self, ptr align 8 %other, ptr align 8 %0) unnamed_addr #1 !dbg !607 {
+define internal double @_RNvXs30_NtNtCs4NRVxsYgnAr_4core3ops5arithRdNtB6_3Mul3mulCs1hrDFCe5rCe_4lean(ptr align 8 %self, ptr align 8 %other, ptr align 8 %0) unnamed_addr #1 !dbg !628 {
+define double @_RNvXs_Cs1hrDFCe5rCe_4leanNtB4_5ShapeNtB4_4Area4area(ptr align 8 %self) unnamed_addr #0 !dbg !643 {
+define i32 @c_add(i32 %a, i32 %b) unnamed_addr #2 personality ptr @rust_eh_personality !dbg !650 {
+define double @cpoint_norm({ double, double } %0) unnamed_addr #2 !dbg !659 {
+attributes #0 = { nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #1 = { inlinehint nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #2 = { nounwind nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #3 = { cold noinline noreturn nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #4 = { nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none) }
+attributes #5 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+attributes #6 = { cold minsize noinline noreturn nonlazybind optsize uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #7 = { cold minsize noinline noreturn nounwind nonlazybind optsize uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+attributes #8 = { noreturn }
+attributes #9 = { cold noreturn nounwind }

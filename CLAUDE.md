@@ -22,6 +22,19 @@ Ingest and llmcall are John's features with julia dont use them clancker.
 | 2 | MLIR thunks via the JLCS dialect (`libJLCS.so`) | C++ methods, by-value aggregates, packed structs, unions, virtual dispatch, EH |
 | 3 | `ccall` | Everything else; the default for C |
 
+A **Rust front end is in progress** (branch work since 2026-11-19): `build`,
+`wrap` and `use` work on a `[rust]` project for a crate's public functions,
+`#[inline]` ones included, and generic ones for the types `[rust]
+instantiate` names, through plain `ccall`s and generated thunks
+(`RustThunks`, the dialect's `jlcs.native_call`), ownership included
+(`String`, `Vec`, `Box`, records that hold them, `Result`), with trait
+objects, callbacks and statics; `wrap` compiles the thunks ahead of time,
+`discover` writes the project file for a folder with a `Cargo.toml`, and the
+doctor reports cargo and rustc. Measured on Linux x86-64, and on Linux
+AArch64 in CI only; Windows is not run. It wraps plain Rust, never `extern "C"`; design
+and measurements are `docs/updates/RUST_FRONT_END.md`, the rules are under
+"Rust front end" below.
+
 Positioning: a hands-on dev tool for wrapping libraries **from source**, not a
 JLL/BinaryBuilder replacement. DWARF from the real compile is the source of truth —
 RepliBuild operates on what Clang already resolved, not on a source AST.
@@ -55,6 +68,7 @@ toml = RepliBuild.discover("path/to/project")   # scan, write replibuild.toml
 RepliBuild.build(toml)                          # clang → IR → .so + DWARF metadata
 RepliBuild.wrap(toml)                           # generate julia/<Name>.jl
 RepliBuild.discover("path", build=true, wrap=true)   # all three
+RepliBuild.discover("path/to/crate")            # a Cargo.toml and no replibuild.toml: a [rust] project
 
 RepliBuild.clean(toml); RepliBuild.info(toml)
 RepliBuild.scaffold_package("LuaWrapper"); RepliBuild.check_environment()
@@ -112,6 +126,19 @@ skill drives adding a package.
   force re-extraction. That keeps the clone and the per-file IR cache.
 - **To date a fix into an artifact, grep the artifact for the fix's signature**, never
   the mtime.
+- **`packages/rustlibm` is the Rust reference package** (2026-11-19): the
+  `libm` crate from its pinned commit, `[rust] dependency`, in `index.toml`.
+  `use("rustlibm")` wraps the 114 functions the library exports and the 116
+  `#[inline]` ones the build finds in the crate (104 plain calls, 126
+  through thunks compiled ahead of time); its `test_deep.jl` checks them
+  against Julia's own math through the generated module. John's Hub is the starter every user's own Hub
+  begins from, so an in-progress package belongs there.
+- **`packages/rustsemver` is the Rust package for values Rust owns**
+  (2026-11-19): the `semver` crate from its pinned commit. A parsed
+  `Version` is an object that owns Rust memory, a failed parse is a thrown
+  `RustError`, and its `test_deep.jl` leaves 20,000 of them to Julia's
+  collector. It is the package to re-run when ownership or the per-type
+  drop functions change.
 - **Consumer compensation is a feature request.** A workaround hand-rolled in several
   Hub consumers is evidence of a missing generator feature. When a policy moves into
   the generator, grep the consumers for the workaround.
@@ -396,7 +423,14 @@ If you are asked to work on it:
   statement, a thunk convention, a C API signature), together with
   `src/mlir/VERSION` (the binary's own version, a new major), a rebuilt and
   republished artifact and `Artifacts.toml`: a published library of the old
-  number is refused from that commit on. `deps/jlcs_jll/README.md` has the
+  number is refused from that commit on. **An ABI bump is published from its
+  own branch, before the merge** (2026-11-20): the pkg suite's Linux cells
+  have no local build and load the published library, so the branch's CI is
+  red until its `Artifacts.toml` names a release of the new number. Build
+  the tarballs from the branch, publish them under a new tag
+  (`jlcs-v<VERSION>`), and commit the regenerated `Artifacts.toml` to the
+  branch; `main` keeps the release its own file names, so neither waits on
+  the other. `deps/jlcs_jll/README.md` has the
   publishing and Yggdrasil steps; `yggdrasil/build_tarballs.jl` is the same
   build as the local recipe from a pinned commit. (`test_jlcs_abi_version.jl`,
   devtests `test_jlcs_abi_live.jl`.)
@@ -452,6 +486,27 @@ If you are asked to work on it:
   wrapped before it, so a type an earlier library owns is imported, never
   emitted again (`Wrapper/TypeImports.jl`; the invariant under Generators).
   (`test_graph_mode.jl`, devtests `test_graph_mode_live.jl`.)
+- `Builder/RustBuild.jl`, `RustABI.jl`, `RustDWARF.jl` — the Rust front end's
+  build side. `RustBuild.build_rust_project` writes a ROOT crate under
+  `[paths] build` (`extern crate <name>;`, a `dylib`, the wrapped crate a path
+  dependency), has cargo and rustc compile AND link it (the profile stated
+  whole), then writes `compilation_metadata.json` with `"language": "rust"`:
+  one row per function (`RustABI.join_function`), the types they reach
+  (`RustDWARF`), and per type that crosses by value the compiler's answer to
+  "must this be dropped" with the function that drops it (`RustGlue`, the
+  metadata's `glue`). `RustABI`, `RustDWARF` and `RustGlue` are text in,
+  tables out, and run no tool. `IRGen/RustThunks.jl` turns the rows into thunks (one
+  `jlcs.native_call` each), JITs them (`load`), compiles them into a library
+  of their own (`aot_library`, which `wrap` runs) and calls one (`call_raw`).
+  `RustBuild.discover_project` is `discover` for a Cargo folder.
+  `Wrapper/Rust/GeneratorRust.jl` is `wrap`: the Julia module, from the
+  metadata alone. `RustRuntime.jl` is what that module calls: `Library`,
+  `invoke`, `RustPanic`.
+  (`test_rust_abi.jl`, `test_rust_dwarf.jl`, `test_rust_config.jl`,
+  `test_rust_thunks.jl`, `test_rust_wrap.jl`, `test_rust_glue.jl`,
+  `test_rust_discover.jl`, `test_doctor_rust.jl`, devtests
+  `test_rust_build_live.jl`, `test_rust_thunks_live.jl`,
+  `test_rust_wrap_live.jl`.)
 - `Builder/PackageRegistry.jl` — `~/.replibuild/` registry. **A project builds
   where it lives.** An entry points at the project's own TOML; `register` builds
   and wraps in place, vendors the output to `builds/<hash_config>/` (immutable:
@@ -1909,6 +1964,355 @@ beside it that `path =` does not name is stale and lacks recent versions. 3.3.2
 is a permanent hole there. Registration is manual and
 outward-facing, so ask first.
 
+### Rust front end (in progress)
+
+- **A Rust project never enters the C/C++ pipeline.** `compile_project`, the
+  generators and ~30 sites in `Compiler.jl` take any language that is not C
+  for C++ (`language == :c ? a : b`). `[rust]` selects the front end
+  (`config.rust`, like `config.graph`), `build` branches on it, and
+  `compile_project` and `wrap_library` refuse a Rust config. Anything that
+  copies a `RepliBuildConfig` carries `config.rust`: `resolve_dependencies`
+  runs before the branch.
+- **rustc's ABI is read, never predicted.** The call is the function's
+  `define` line in the IR of THAT build (`RustABI.definitions`), read as text;
+  rustc's IR is never loaded into an LLVM. DWARF says what each parameter is,
+  and `join_function` matches the two: every option (`ignore`, `direct`,
+  `pair`, `cast`, `indirect`) is checked against the IR types it would take,
+  and a function whose IR parameters are not all accounted for in exactly ONE
+  way is a refusal with its reason, never a guess. A new way rustc passes
+  something goes into `_options` and the return arm together.
+- **`ccall` is right for a Rust function only where every IR type is a scalar
+  or a pointer.** A two-scalar return (`{ i32, i32 }`: `Option<i32>`) is wrong
+  through `ccall` and right through a thunk that states the define line; on
+  SysV some pairs come out right by coincidence, which is not evidence. A
+  hidden return pointer is the first argument on x86-64 only (AArch64: x8).
+  A Rust panic through `jlcs.try_call` segfaults: the catching frame must be
+  Rust's (`catch_unwind`), outside a thunk that makes a plain call.
+- **The surface is exported ∩ defined in the crate's IR ∩ the crate's own.**
+  "The crate's own" is the root of the v0 mangled path (`RustABI.v0_root`,
+  which parses the name: an `impl` block's path is not in the demangled
+  text), or a name rustc did not mangle. Never the crate's name appearing in
+  a symbol: an instantiation of `core`'s generic carries it as a suffix. A
+  Rust library exports the standard library (1,743 symbols for 17 functions)
+  and its DWARF holds std's too.
+- **A function the optimizer merged into another stays a function of its
+  own** (`RustBuild.MERGED_FUNCTION_FLAGS`, two LLVM options through
+  rustc's stable `-C llvm-args`). Above opt-level 1 LLVM keeps one of two
+  functions with the same code; rustc's default leaves the other as an IR
+  ALIAS, with no `define` line and no DIE, so its Rust types are nowhere
+  (`flip(Side)` came out typed as `flag(bool)`, and `string_ref_len(&String)`
+  as taking a `Secret`). With the options the other is a function that jumps
+  to the kept one, with its own `define` line and debug info. They are
+  LLVM's options: an LLVM without them refuses to start
+  (`_unknown_llvm_argument`), and the build then runs without them. So the
+  alias path stays (`RustABI.aliases`, row key `alias_of`,
+  `own_debug_info: false`: the call is right and the types are the
+  TARGET's), and a generator must not present such a row's types as the
+  function's own. A one-byte value that is only 0 or 1 (a `bool`, a
+  two-variant enum, `Result<(), E>`) is `i1` in the call.
+- **An optimized build keeps incremental compilation on.** Above opt-level 0
+  rustc gives a small `pub fn` no symbol unless incremental is on (4 of 17
+  kept one at opt-level 3; 17 of 17 with it). `cargo_args` states the whole
+  profile (`codegen-units=1`, so exactly one `<crate>-<hash>.ll`); changing
+  one setting there needs the surface re-measured. **The profile is not the
+  last word on a setting, so what the build depends on is pinned where
+  nothing overrides it**: `CARGO_INCREMENTAL` and `CARGO_BUILD_INCREMENTAL`
+  override every profile and are removed from cargo's environment (`_cargo`;
+  GitHub's runners set `CARGO_INCREMENTAL=0`, and every optimized build in CI
+  lost a third of its symbols, 2026-11-20), and `build.incremental` in a
+  configuration file does too, so it is stated on the command line. Before
+  relying on a cargo setting, ask what overrides it.
+- **Where rustc writes a crate's files is cargo's business, and it is read
+  from the names cargo reports** (`_output_dirs`, `root_ir`, `_crate_ir`).
+  Through cargo 1.99 every crate's files were in `target/debug/deps/`; from
+  1.100 each unit has `target/debug/build/<package>/<hash>/out/`, and the
+  build, which looked for the root crate's IR beside the wrapped crate's,
+  failed on its first line with a new cargo. A hashed file name cargo reports
+  (the `.rlib`, or the `.rmeta` beside the unhashed copy it makes for the
+  user) gives the directory and the hash; the root crate's IR is beside the
+  file the reported library is a copy of, since a profile directory keeps
+  one unit per set of flags. Never join `deps` to a path.
+  (`test_rust_config.jl`.)
+- **The Rust toolchain is the user's and moves under the tests.** CI uses
+  the runner image's Rust (`tier2-linux.yml` prints it), which is newer than
+  a dev box's. Run the three live Rust tests on the newest stable as well as
+  the installed one before calling a Rust change done:
+  `RUSTUP_TOOLCHAIN=<version> CARGO_INCREMENTAL=0 julia --project=.
+  test/test_rust_<build|thunks|wrap>_live.jl` (`rustup toolchain install
+  <version> --profile minimal` puts one beside the default). An `#[inline]` function
+  has no symbol at any level: the library has it only because the build
+  names it in the root crate (below).
+- **A TOML entry only for what no compile of the same code can say** (John,
+  2026-11-19, "same with c and cpp"). So `[rust] instantiate` exists, for a
+  generic function nobody instantiated: nothing in a compile of the crate
+  says which type a user wants. And nothing else about a crate has an entry:
+  its `#[inline]` functions are the compiler's to list, and are found
+  (`RustBuild.unexported_functions`: a second compile of the wrapped crate
+  alone with `-C link-dead-code`, into the same target directory, linked
+  into nothing; the normal build stays up to date). Before proposing a
+  `[rust]` key, ask whether a compile could answer.
+- **A function with no symbol is NAMED in the root crate, and that is all**
+  (`rb_glue.rs`: `pub static __rb_fn_<n>: __RbAddr = __RbAddr((<expr>) as
+  *const ());`). rustc then compiles it there; the root crate's IR
+  (`deps/<root>.ll`) says which function each static points at
+  (`RustGlue.address_table`), and its `define` line and DIE are read like
+  any function's. Never state such a function's signature in generated
+  Rust. Its metadata row has `address` (the static) and `instance`
+  (`"inline"` or `"instantiate"`), and **it is called by address, never by
+  name**: the module reads the static with `cglobal` and hands the value to
+  a plain call or to the function's thunk (`RustThunks.callee_addresses` is
+  the same answer for `call_raw`). Anything that takes a row's `symbol`
+  for a name the loader binds must ask for `address` first.
+- **A found function's path is spelled like a type's** (`function_expression`,
+  then the probe's chosen paths), and one with no public path is not the
+  crate's API: it is left out without a word, and only counted
+  (`instances.not_public`). An `instantiate` entry that does not compile is
+  the project file's own line: a build error with the compiler's message.
+- **A type no path spells is taken from a function that returns it**
+  (`RustGlue.positions`, `__rb_dropfn_<n>`): a `const fn` given the function
+  has the compiler pick `__rb_drop_owned::<T>` or `__rb_drop_plain::<T>` for
+  its return type, or for the `Ok`, `Err` or `Some` inside it. Which of the
+  two is "is this type dropped"; the picked function's DIE names `T`, which
+  is checked. Such a `glue` entry has `by_address`. Spelling is tried first
+  (it also gives a `Vec` its two functions).
+- **A function pointer and the signature it points at are two types**
+  (`RustDWARF`: the pointer is `fn(i32) -> i32`, its target `{fn} fn(i32) ->
+  i32`). rustc names the pointer and leaves the signature unnamed; keyed
+  alike they were one entry marked `conflict`, and every function taking a
+  callback was refused from the first build side on (found 2026-11-19).
+  A key built from a spelling must not be one rustc also uses as a name.
+- **A Rust function pointer is never made outside Rust.** How one is called
+  is the compiler's business. Per kind taken (`RustGlue.callbacks`), one
+  line of `rb_glue.rs` is a Rust function of that signature (the library is
+  given THAT, through `__rb_cb_at_<n>`), which calls on to an `extern "C"`
+  function in a slot (`__rb_cb_set_<n>`). The C function is a plain function
+  of the module, one per kind (`_rb_cb_<k>`, the "Callbacks" section), which
+  calls the Julia function the wrapper holds in `_RB_CB_F_<k>` for the length
+  of the call: the holder and the slot are set under `_RB_CALLBACKS` and put
+  back in a `finally`. **Never `@cfunction(\$f, …)`**: a closure is made a C
+  function only on some platforms, and on AArch64 every callback failed with
+  "closures are not supported on this platform" (first AArch64 run,
+  2026-11-20; `test_rust_wrap.jl` refuses one in a module's text). An error
+  in the Julia function is kept and thrown
+  after the call returns: it must not unwind through Rust. An `extern "C"
+  fn` parameter takes Julia's C function directly. A callback carries only
+  what C does (`emit_function`'s callback arm); anything else is a stub with
+  the type named. The slot holds for the length of the call: a callback the
+  library keeps is not built.
+- **A reference to a trait object is written by the library**
+  (`__rb_dyn_<n>(p: *const T, out: *mut &dyn Trait)`, one per implementing
+  type): the second pointer is the type's table of methods, which only the
+  compiler has. Which traits, types and methods comes from the paths of the
+  functions the build describes (`RustGlue.trait_objects`: `<T as
+  Trait>::method`), and the function's DIE says what its line named
+  (metadata `dyn`). A trait's method through a trait object is the
+  compiler's shim, named `<dyn Trait as Trait>::method` like any function
+  with no symbol (`instance: "dyn"`, Julia name `Trait_method`). `&mut dyn`
+  refuses a plain Julia value (`_rb_dyn_mut_<Trait>`): the change would be
+  made to a copy.
+- **A static is read where it is, each time** (`_emit_statics`: `NAME()`,
+  `NAME_ptr()`): never copied into the module, since a `static mut` or an
+  atomic changes. The statics are the crate IR's exported globals
+  (`RustABI.statics`) that a variable DIE describes.
+- **A destructor is never offered as a function** (`<T as
+  core::ops::drop::Drop>::drop`): Rust refuses a direct call of one, and a
+  value dropped that way would be dropped again by its owner.
+- **What the project file asks for is part of the metadata key**
+  (`_metadata_key`'s `asked`): `instantiate` changes the library only once
+  a build acts on it, so a key of the library and IR alone served the old
+  metadata for a changed list.
+- **The library is a generated root crate; the wrapped crate is its
+  dependency** (`root_files`, `<[paths] build>/rust/root`). A `#![no_std]`
+  crate cannot be the end of a link (libm: "`#[panic_handler]` function
+  required"), a pinned checkout must not be written into (the lock file is
+  the root's, seeded from the crate's), and the Rust RepliBuild must supply
+  itself (the catching frame, the drop functions) needs a crate to live in.
+  Consequences
+  to keep: the flags reach EVERY crate through `CARGO_ENCODED_RUSTFLAGS`
+  (`rustflags`; what follows `--` reaches the root alone), with
+  `--cap-lints=warn`, because a crate that denies its own warnings stops
+  building when rustc grows one and cargo does not cap a path dependency;
+  the crate's IR is `deps/<crate>-<hash>.ll`, named from the `.rlib` cargo
+  reports for the crate's own manifest (`find_artifacts`); cargo runs from
+  the crate's directory, where rustup reads `rust-toolchain.toml`.
+  (devtests `test_rust_build_live.jl`, the `nostd` fixture.)
+- **`[rust] dependency` is the Hub's shape**: the manifest is relative to a
+  `[dependencies]` checkout (`RustBuild.manifest_path`,
+  `ConfigurationManager._checkout_relative`, shared with `[graph]`), and
+  everything in `RustBuild` takes the located config (`_located`), never
+  `config.rust.manifest`.
+- **`jlcs.native_call` is the Rust front end's op and nobody else's.** It
+  lowers to exactly the call it states: operand and result types as given,
+  `arg_attrs` (one dictionary per operand, the LLVM dialect's names) copied
+  to the call site and the declaration, no `CallShape`. With no `callee`
+  attribute the first operand is the function's address and the call goes
+  through it (`arg_attrs` is then one dictionary per ARGUMENT, which the
+  address is not): the form `RustThunks` emits. Anything added to its
+  lowering is a second ABI rule. The C and C++ generators must never emit it
+  (`test_jlcs_invariants.jl` §E), and a new op must be in the conversion
+  target's illegal list, or a failed lowering pattern is not a failed pass.
+- **A Rust thunk is `void thunk(void **args, void *ret)`** (`RustThunks`):
+  one slot per IR parameter holding a pointer to that parameter's value (a
+  `ptr` parameter is stored as a pointer, no exceptions), the hidden return
+  pointer left out because it is `ret` itself, a returned pair stored at the
+  offsets DWARF gives its two scalars, a `bool` a byte in storage. Only the
+  attributes that change how an argument is passed go on the op (`_arg_attrs`:
+  zeroext, signext, inreg, sret, byval, and `align` with those two).
+- **A thunk names no function: its last slot is the function's ADDRESS**
+  (itself, not a pointer to it), and the thunk calls through it. So a thunk
+  module declares nothing and has nothing for a loader or a JIT to resolve
+  (ORC waits forever on a symbol it cannot find; there is none to find), the
+  same text is JIT'd or compiled ahead of time, and a function the library
+  exports and one it has no symbol for are called the same way. Never put a
+  callee's name back into a thunk: the ahead-of-time library is linked
+  against nothing and would not load. What the slots hold is a named
+  convention (`RustThunks.CONVENTION`, `rust-thunk-2`): the module passes it
+  to `RustRuntime.Library`, and a module written for another (or for none: a
+  wrapper from before this) is refused there, before any call, since its
+  slots would be read wrong. Change what a slot holds and the name changes
+  with it.
+- **`wrap` compiles the thunks, and there is no key for it**
+  (`GeneratorRust.compile_thunks`, `RustThunks.aot_library`,
+  `lib<name>_thunks.<ext>` beside the library). Which functions call through
+  a thunk is the generator's answer, so the stage runs on a first
+  generation's report and the text naming the library is a second one, with
+  the same calls. The library depends on NOTHING, by design: it is linked
+  `-nostdlib` with the C bucket's clang and linker, so a thunk must stay
+  loads, stores and one call (anything that makes LLVM ask the C runtime for
+  a function would be an undefined symbol; `test_rust_thunks_live.jl` reads
+  `NEEDED` and the undefined symbols). A stage that writes no library
+  (no libJLCS, no `llc`: `MLIRNative.emit_object` starts it) is a JIT
+  wrapper and never a failed wrap; an older thunks library is removed first.
+  The module bakes the file's hash, and `RustRuntime` uses the file only
+  when it is that file, else the JIT.
+- **A Rust value crosses as its bytes** (`GeneratorRust`). A record, tuple
+  or enum with data is a Julia struct of `_rb_bytes` with a property per
+  field at its DWARF offset; a by-value argument is encoded into a byte
+  buffer and the call's IR arguments are read from that buffer where the
+  join says (`pass`, and the leaves' offsets for a pair). Never a Julia
+  struct of fields: the compiler reorders fields and fills niches. The
+  generator's own calls into Base are qualified (`Base.convert`): a crate's
+  function names fill the module (`test_rust_wrap.jl` holds the list).
+- **A Rust function is a plain `ccall` only when every type of its `define`
+  line is a scalar or a pointer AND it is `nounwind`** (`emit_function`'s
+  `plain`); else its thunk, and inside the catching frame when it is not
+  `nounwind` (`RustRuntime.invoke`, `guarded`). A panic through a bare
+  `ccall` or an unguarded thunk ends the process. One bit (`i1`) and a
+  hidden return pointer are the thunk's, never a `ccall`'s.
+- **Only Rust ends a Rust panic.** The root crate carries `__rb_catch` and
+  `__rb_panic_message` (`RustBuild._CATCH_FRAME`): RepliBuild's own
+  functions, so `extern "C"` and unmangled, and never part of the surface
+  (the surface is the WRAPPED crate's IR). Its panic hook records a panic
+  only inside `__rb_catch` and passes any other on to the previous hook.
+- **Whether a type is dropped is the compiler's answer, never its shape's**
+  (`RustGlue`, the metadata's `glue`). A record of one integer is dropped
+  when its author wrote `impl Drop` (the fixture's `Guard`), and a record
+  with a raw pointer is plain data when they did not (`View`). The root
+  crate has one generated line per type that crosses by value
+  (`rb_glue.rs`): `__rb_drop_<n>(p: *mut T, _owns: *const [u8;
+  needs_drop::<T>() as usize])`. The build reads that function's DWARF for
+  which type `p` points at (a spelling that named another type is refused)
+  and for the array's length (1: dropped, 0: plain). `GeneratorRust.owns` is
+  only the fallback for a type with no answer (`unmovable`): such a type is
+  moved only when its shape shows nothing it could own, and a function that
+  would move one that may is a stub with its reason in `UNSUPPORTED`.
+  Nothing is left out silently.
+- **One row of `rb_glue.rs` is one line, and no two rows have the same
+  code.** A compile error names its line (cargo runs with
+  `--message-format=json`; `RustGlue.error_lines`), the row is dropped and
+  the rest built again (`_plan_glue!`). Each drop function returns its own
+  number for a null pointer: functions with identical code are merged and
+  the merged one loses the DIE this is read from (measured before the
+  constant: 3 of 14 had none). Keep a new per-type function either unique
+  or unread.
+- **A type is spelled by a path that resolves, found by a probe compile.**
+  DWARF names a type where it is DEFINED (`rb_fix::inner::Token`); source
+  can name it only where it is public (`rb_fix::Token`). Every candidate
+  (`RustGlue.candidates`: the path, then with less of its middle) is one
+  `use` line; rustc reports all the lines that do not resolve in one pass.
+  The trailing `alloc::alloc::Global` is cut (`source_name`): it cannot be
+  named in stable Rust. A type with no path has no line and says why
+  (`glue_refused`). Never write a type into Rust source from its DWARF name
+  directly.
+- **A `String`'s and a `Vec`'s layout is never spelled in Julia.** The root
+  crate reads and builds them with the standard library's own functions
+  (`__rb_string_view`, `__rb_string_new`, per `Vec` type `__rb_vec_view_<n>`
+  and `__rb_vec_new_<n>`). A `Vec`'s buffer is a pointer to bytes in DWARF;
+  its element type is the type's first template parameter (`params`,
+  `RustGlue.vec_element`).
+- **A value has one holder** (`GeneratorRust.decode`'s `take`). Taken (a
+  return): a `String` or a readable `Vec` is copied and Rust's dropped there;
+  anything else that is dropped becomes the Julia object that holds its
+  bytes, with `RustRuntime.drop!` as its finalizer. Not taken (a field, an
+  element): copied when it can be, and NOT READ when it owns something that
+  cannot be, since a second holder would drop it again. Written by value
+  (`encode`), an owning object is moved: `_rb_take!` empties it, and its
+  address or a second move is then an error. A blob copy of a type the
+  compiler did not call plain is never made for the same reason.
+- **A fieldless enum is stored as the integer its DWARF names**
+  (`_enum_base`, `underlying`): `core::cmp::Ordering` is a signed byte and
+  `Less` is -1, and `@enum` checks its values when the module loads, so an
+  unsigned enum of it made every module reaching an `Ord` impl fail to
+  LOAD. A wrapper that parses has not been shown to load: `test_rust_wrap.jl`
+  evaluates the types section, and a survey of real crates must load each
+  module (`.claude/rust-probe-2026-11-19/survey_wrap.jl` in the working
+  checkout, hand-run, network).
+- **`Option` and `Result` are read by the discriminant DWARF gives**, niche
+  values included (`_option`'s `:niche`, `_result`): a value that may not
+  fit `Int64` arrives as a decimal string, and `_discr_literal` writes it as
+  a literal of the discriminant's width. A returned `Result` is its `Ok`
+  value or a thrown `RustError` of its `Err`; anywhere else it is a value
+  like any enum.
+- **`rb_glue.rs` belongs to one compiler, crate and feature set**
+  (`rb_glue.json`, `_glue_identity`, the file's hash): a file that does not
+  match its record is replaced by an empty one before any compile, and a
+  build that fails with lines in the file (of either kind: a type's or a
+  function's) is tried once more without them, so a crate that changed
+  under its lines still builds.
+- **A wrapper JITs nothing at load.** `RustRuntime.Library` opens the
+  library and, when there is one, its thunks library; a thunk session is
+  created only at the first call of a thunk that library does not have, and
+  never while Julia is generating output. A wrapper of plain calls needs no
+  libJLCS, and neither does one with its thunks library (devtests
+  `test_rust_wrap_live.jl` asserts libJLCS is never loaded in that child).
+- **The doctor's Rust probes are optional, and a Rust project is asked only
+  about them** (`EnvironmentDoctor.rust_ready`: cargo, rustc, a `c++filt`
+  that reads one of rustc's v0 names, the DWARF and symbol readers). `build`
+  decides which question to ask from the project file
+  (`ConfigurationManager.is_rust_toml`) before it loads the configuration;
+  a status with no probes (the registry's cache) is not ready, so the
+  registry skips its own check for a Rust project and `build`'s runs.
+  (`test_doctor_rust.jl`.)
+- **`discover` asks cargo and scans nothing** (`RustBuild.discover_project`):
+  a folder with a `Cargo.toml` and NO replibuild.toml is a crate, and the
+  file written is its name and `[rust]`. An existing `[rust]` project is
+  kept byte for byte, with `force` too (the scan is for C and C++ sources).
+  cargo answers for the whole workspace from any member's manifest, so
+  `discovered_crate` takes the manifest's own package first, lets only the
+  workspace ROOT stand for its members, and refuses several library crates
+  with the file to write. (`test_rust_discover.jl`.)
+- **The registry hashes a Rust project's own inputs** (`hash_config`'s rust
+  branch: `RustBuild.input_files`, `source_identity`, `toolchain_identity`):
+  `[compile] source_files` is C and C++ and would miss every `.rs`.
+  `PackageRegistry` is included after the Rust modules for this, so
+  `RustBuild` takes the generator fingerprint from its caller.
+- **The dialect's ABI version is 3 (2 with `native_call`, 3 with its address
+  form); the published libJLCS artifact is version 1** and is refused. Until it is rebuilt and republished
+  (`deps/jlcs_jll/README.md`, outward-facing, ask first), Tier 2 on this
+  branch needs a local `src/mlir/build`.
+- **`RustDWARF` builds a unit's DIE tree only when the unit names a wanted
+  symbol**, and resolves after the tree is built, so DIE order cannot matter.
+  Types are keyed by SCOPED name (`core::option::Option<i32>::Some`); two
+  layouts under one key are marked `conflict` and have no shape. A constant
+  that may not fit `Int64` (a niche discriminant) is carried as a decimal
+  string; `_number` answers `nothing` for a location expression.
+- `rust_metadata.key` gates re-extraction (library, IR, toolchain, generator
+  fingerprint) and is removed before one. `_generator_fingerprint` does not
+  see the contents of UNTRACKED files: while a new `src/` file is untracked,
+  delete the key to re-extract.
+- `src/` parses JSON in two places only: `_read_json` (a file) and
+  `_parse_json` (text a tool printed). `test_json_mmap_hygiene.jl` holds both.
+
 ## Debugging Tier 2 thunks
 
 Start here for any ABI question: register state is observable.
@@ -2009,6 +2413,21 @@ Start here for any ABI question: register state is observable.
   `graph_generators_test/` (configured with cmake and Ninja) and
   `graph_mode_test/` (a CMake project; its test writes a `[graph]` TOML into a
   copy, since `test/*/*.toml` is untracked) are graph mode's live fixtures.
+
+- Rust: `test/rust_test/crate` is the live fixture crate (one directory
+  deeper than the others: `test/*/*.toml` is untracked and would take its
+  `Cargo.toml`) and `test/rust_test/nostd` a second one (`#![no_std]`,
+  `#![deny(warnings)]`); `verify.jl` (plain `ccall`) and `verify_thunks.jl`
+  (thunks) are the child-process probes. A real crate's check clones from
+  the network, so it is a Hub package's file, never a repository test.
+  `test/fixtures/rust/lean_o{0,3}.*` are vendored from `lean.rs` by
+  `test/tools/gen_rust_fixtures.jl` (IR lines as `.ir.txt`: `*.ll` is
+  ignored). `owned_o3.metadata.json` is the ownership half of the fixture
+  crate's own metadata (`test/tools/gen_rust_owned_fixture.jl`, which needs
+  cargo): regenerate it when `METADATA_VERSION` or a row's meaning moves.
+  The thunk probes run twice, through the JIT and through the thunks library
+  `wrap` compiles; a probe script says which it used (`PROBE thunks_from`),
+  so a pass through one cannot stand for the other.
 
 - **A test that pins emitted text pins the part it is about** (the thunk and
   the return type, the type of one position), not a whole call. Six tests went
@@ -2139,6 +2558,15 @@ Where the time goes was measured on Jolt, the largest Hub package
   build's share, at that cost per precompile of the package; a directive on
   `wrap` recovers nothing (the generators are reached by dynamic dispatch),
   so wrap would need a workload that runs one. Not done: John's call.
+- **A function that only sometimes calls `build`, `wrap` or `register` must
+  not make them part of its own compile** (2026-11-19). `discover` ends in
+  `_build_and_wrap`, whose calls were known at compile time, so the first
+  `discover` of a session compiled all three before it ran: 87 s to keep a
+  file or to write one. They go through `Base.invokelatest` there (6 s, the
+  scan's own code). Measure the first call of an entry point with a runtime
+  argument (`f(dir, force) = discover(dir; force)`): a literal keyword lets
+  the compiler prune the branch and hides the cost.
+  (`test_rust_discover.jl`.)
 
 ## Open problems
 
@@ -2292,6 +2720,29 @@ don't file them as defects. Never extrapolate a narrow entry into "X is unbuilt"
 read the generator output first. (User-facing C++ RAII — `Managed<T>` finalizers with
 DWARF-resolved destructors — **is** built.)
 
+- **Rust, what is left** (2026-11-19; `docs/updates/RUST_FRONT_END.md`
+  §21 to §24). A generic function is wrapped only for the types
+  `[rust] instantiate` names. Of trait objects and callbacks: a callback
+  the library keeps and calls later, a callback that takes a string, a
+  slice or a record by value, two Rust function pointers of one kind in one
+  call (the library has one function of that signature to be given), a Julia type implementing a Rust trait, a
+  function that returns `&dyn Trait`, a `dyn` of two traits. Of ownership:
+  building an owning record or an enum with data from Julia (only `String`
+  and `Vec` are built), `Box::new` from a Julia value, a type nothing with
+  a public path returns, a slice of what is not plain data, a value aligned
+  beyond 16 bytes (tiny-skia's SIMD records). Also unbuilt: an `extern "C"`
+  function taking a record the C way, a crate with several codegen units,
+  `show` for a Rust record (it prints as its bytes), and an object file
+  written by libJLCS itself, so that compiling thunks ahead of time needs no
+  system `llc` (a machine with only the prebuilt libJLCS gets the JIT
+  wrapper; the same holds for C++ AOT thunks). Not checked, and not checkable from Julia: that a value
+  borrowing from another does not outlive it, and that a value is dropped
+  on the thread that made it (a finalizer runs where the collector does).
+  Linux x86-64 is measured on the dev box. Linux AArch64 runs only in CI
+  (tier2-linux's arm cell, first run 2026-11-20: the build and thunk tests
+  passed there, compiled and JIT'd, and the wrapper's probes all but the two
+  callback ones, reworked since). Windows is not run: CI's Windows cells run
+  the pkg and unit suites only.
 - Toolchain records by value that still trap (narrowed 2026-11-13; `tuple`,
   `optional` and `complex` are laid out, above): one with a virtual base, a
   struct (not a union) holding an empty record as a member, and anything

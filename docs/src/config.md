@@ -45,7 +45,7 @@ folder holding `replibuild.toml` unless they are absolute.
 
 | Key | Default | Meaning |
 |:----|:--------|:--------|
-| `language` | `"cpp"` | `"c"` or `"cpp"`, in lower case. Chooses the compiler. Anything other than `"c"` is treated as C++. |
+| `language` | `"cpp"` | `"c"` or `"cpp"`, in lower case. Chooses the compiler. Anything other than `"c"` is treated as C++. A project with a `[rust]` section is `"rust"` and needs no `language`. |
 | `module_name` | CamelCase of the project name | The Julia module's name, and the wrapper file's (`julia/<module_name>.jl`). |
 | `shim_headers` | none | Headers that define the macros in `[wrap.macros]`, written as in an `#include`. Used only together with `[wrap.macros]` or `shim_defines`. |
 | `shim_defines` | none | `#define`s placed before those headers, in that one generated file: `"NAME"` or `"NAME=VALUE"`. Compiles a single-header library's implementation. Needs `shim_headers`. |
@@ -172,6 +172,68 @@ An unknown key or a wrong type in `[graph]` is an error. In a graph project
 `[compile]`, `[types]` and the `[wrap]` keys other than `module_name` do not
 apply: flags come from CMake.
 
+## `[rust]`
+
+Present: the project is a Rust crate, and cargo builds it.
+[Rust crates](rust.md) is the guide; `discover` writes this section for a
+folder that holds a `Cargo.toml`.
+
+`build`, `wrap` and `use` work on a Rust crate's public functions,
+`#[inline]` ones included, on Linux x86-64 (AArch64 and Windows are not run
+yet):
+
+- numbers, `bool`, `char`, strings and slices in; records, tuples, enums and
+  `Option` out;
+- a `String` is a Julia `String` and a `Vec` a Julia `Vector`, both ways;
+- anything else that owns something (a `Box`, a record holding a `String`)
+  is a Julia object that frees it when Julia collects the object. Passing it
+  to a Rust function by value moves it: the object is empty afterwards. The
+  module's `OWNED` lists those types;
+- a `Result` returned is its value, or a thrown
+  `RepliBuild.RustRuntime.RustError` holding the error;
+- a Rust panic arrives as a `RepliBuild.RustRuntime.RustPanic`;
+- where a function takes `&dyn Trait`, pass a value of any type that
+  implements the trait, or a `Box` of the trait object; a trait's methods are
+  functions too (`Area_area(x)`);
+- where a function takes a function (`fn(i32) -> i32`), pass a Julia
+  function;
+- a `static NAME` is `NAME()` for its value and `NAME_ptr()` for where it is.
+
+A generic function is wrapped for the types `instantiate` names. A function
+that is not wrapped is in the module as a stub that says why, and is listed
+in the module's `UNSUPPORTED`.
+
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `manifest` | `"Cargo.toml"` | The crate's `Cargo.toml`, relative to the project root. With `dependency`, relative to that dependency's source. |
+| `dependency` | | The `[dependencies]` entry whose source holds the crate. |
+| `package` | the manifest's own package | The package to wrap, by its Cargo name. Needed when the manifest is a workspace. |
+| `opt_level` | `0` | The optimization level the crate is compiled at, `0` to `3`. |
+| `features` | none | Cargo features to turn on: `["simd"]`. |
+| `default_features` | `true` | `false` turns the crate's default features off. |
+| `instantiate` | none | Generic functions to compile for particular types, each written as Rust names it: `["geo::largest::<f64>", "geo::Pair::<i32>::sum"]`. |
+
+A generic function such as `fn largest<T>(xs: &[T]) -> T` is not in a
+library until something uses it with a type, so `instantiate` says which
+types you want. Each entry becomes a function of the module named after it
+(`largest_f64`, `Pair_i32_sum`). An entry that is not a function of the
+crate is a build error that shows the compiler's message. A function that
+takes `impl Trait` is named by the type it should have:
+`"(geo::scale as fn(f32) -> f64)"`. Nothing else about a crate needs an
+entry: its `#[inline]` functions are found by the build.
+
+The crate is built as it is: it needs no `extern "C"`, no `#[repr(C)]` and no
+other change. `cargo` and `rustc` must be installed; `REPLIBUILD_TOOL_CARGO`
+and `REPLIBUILD_TOOL_RUSTC` name particular ones.
+
+`wrap` compiles the calls a plain Julia call cannot make into
+`lib<name>_thunks.so` beside the library, whenever it can; there is no key
+for it. Without that file the module compiles them at first use.
+
+An unknown key or a wrong type in `[rust]` is an error. In a Rust project
+`[compile]`, `[link]` and `[types]` do not apply, and `[rust]` cannot be
+combined with `[graph]` or `[ingest]`.
+
 ## `[paths]`, `[binary]`, `[cache]`
 
 | Key | Default | Meaning |
@@ -212,7 +274,7 @@ recipe does not need them.
 alone. `discover(path; force = true)` scans again and rewrites it, keeping
 these keys from the old file:
 
-- `[dependencies]`, `[graph]` and `[platform.*]`, whole;
+- `[dependencies]`, `[graph]`, `[rust]` and `[platform.*]`, whole;
 - `[types] templates`, `template_headers`, `records`;
 - `[wrap] macros`, `varargs`, `cstring_owned`, `rename`, `shim_headers`,
   `shim_defines`, `exclude_symbols`, `surface_types_only`,

@@ -186,6 +186,7 @@ const SEC_HOST  = "Host"
 const SEC_C     = "C bucket — Tier 3 (ccall)"
 const SEC_DWARF = "DWARF extraction — required by every tier"
 const SEC_CPP   = "C++ — Tier 2 (MLIR thunks)"
+const SEC_RUST  = "Rust — a crate, built by cargo"
 const SEC_MSYS  = "MSYS2"
 
 # =============================================================================
@@ -614,6 +615,113 @@ function _msys2_env(tool::AbstractString)::String
 end
 
 # =============================================================================
+# PROBES — Rust
+# =============================================================================
+
+# A `[rust]` project is compiled and linked by the user's own Rust toolchain;
+# RepliBuild brings none. These probes are optional: a C or C++ project needs
+# none of them, and a machine without Rust is not a broken one.
+#
+# `RustBuild` is the module that runs these tools and is loaded after this
+# one, so it is reached at call time: the probe asks the program the build
+# will start (`RustBuild.tool`: REPLIBUILD_TOOL_CARGO / _RUSTC, then PATH)
+# what it is, the way the build asks (`RustBuild._capture`).
+const _RUST_ADVICE = [
+    "Only a [rust] project needs this; C and C++ projects do not.",
+    "Install the Rust toolchain:  https://rustup.rs  (or the distribution's `rust` package)",
+    "Or name the programs:  REPLIBUILD_TOOL_CARGO, REPLIBUILD_TOOL_RUSTC",
+]
+
+_rust_build() = getfield(parentmodule(@__MODULE__), :RustBuild)
+
+"""
+    _check_rust_tool(name; tool, capture) -> ToolStatus
+
+`cargo` or `rustc`, as the Rust front end will start it. `tool` and `capture`
+are `RustBuild.tool` and `RustBuild._capture`; a test passes its own.
+"""
+function _check_rust_tool(name::String; tool = _rust_build().tool, capture = _rust_build()._capture)::ToolStatus
+    path = tool(name)
+    args = name == "rustc" ? ["-vV"] : ["-V"]
+    (out, err, code) = capture(`$path $args`)
+    if code != 0
+        why = code == BuildBridge.SPAWN_FAILED ? "not found" :
+              "`$path $(join(args, " "))` exited with $code: $(first(split(strip(err), '\n'; limit = 2)))"
+        return ToolStatus(name, false, false, "", "", false, why; section=SEC_RUST, advice=_RUST_ADVICE)
+    end
+    first_line = String(strip(first(split(strip(out), '\n'; limit = 2))))
+    m = match(r"(\d+\.\d+\.\d+)", first_line)
+    version = m === nothing ? "" : String(m.captures[1])
+    detail = first_line
+    if name == "rustc"
+        field(k) = (f = match(Regex("^" * k * ":\\s*(.+)\$", "m"), out); f === nothing ? "" : String(strip(f.captures[1])))
+        host = field("host")
+        llvm = field("LLVM version")
+        detail = "rustc $version" * (isempty(host) ? "" : " $(DIM)(host $host" * (isempty(llvm) ? "" : ", its own LLVM $llvm") * ")$(RESET)")
+    end
+    return ToolStatus(name, false, true, isabspath(path) ? path : "", version, true, detail; section=SEC_RUST)
+end
+
+# A Rust symbol is read back as a path (`rb_fix::inner::add`), and every name
+# in a Rust wrapper comes from that path. binutils' demangler has read rustc's
+# v0 names since 2.36; an older one answers with the name it was given, and a
+# wrapper generated from that has no usable names. So: demangle one.
+const _RUST_V0_SAMPLE = "_RNvCs1hrDFCe5rCe_4lean3add"
+
+function _check_rust_demangler(; demangle = nothing)::ToolStatus
+    out = try
+        demangle === nothing ?
+            read(pipeline(Tools.tool_cmd(`c++filt`); stdin = IOBuffer(_RUST_V0_SAMPLE * "\n"), stderr = devnull), String) :
+            demangle(_RUST_V0_SAMPLE)
+    catch e
+        return ToolStatus("demangler", false, false, "", "", false,
+            "c++filt could not be run: $(first(sprint(showerror, e), 80))"; section=SEC_RUST,
+            advice=["A Rust wrapper's names come from demangled symbols; binutils 2.36 or newer reads them.",
+                    "Or name one:  REPLIBUILD_TOOL_CXXFILT"])
+    end
+    read_back = String(strip(out))
+    ok = read_back != _RUST_V0_SAMPLE && endswith(read_back, "::add")
+    found, path = _find_tool("c++filt")
+    ok || return ToolStatus("demangler", false, true, found ? path : "", "", false,
+        "c++filt does not read rustc's symbol names (it answered `$read_back`)"; section=SEC_RUST,
+        advice=["A Rust wrapper's names come from demangled symbols; binutils 2.36 or newer reads them.",
+                "Or name one:  REPLIBUILD_TOOL_CXXFILT"])
+    return ToolStatus("demangler", false, true, found ? path : "", "", true,
+        "c++filt reads rustc's symbol names"; section=SEC_RUST)
+end
+
+"The probes a `[rust]` project's build depends on, by name."
+const RUST_PROBES = ("cargo", "rustc", "demangler", "DWARF dumper", "symbol reader")
+
+"""
+    rust_ready(status) -> Bool
+
+Whether a `[rust]` project can be built here: cargo, rustc, a demangler that
+reads rustc's names, and the DWARF and symbol readers every wrapper needs. It
+asks nothing of the C or C++ toolchains. `false` for a status that carries no
+probes (one read back from the registry's cache).
+"""
+rust_ready(status::ToolchainStatus)::Bool = all(n -> _probe_ok(status.tools, n), RUST_PROBES)
+
+"""
+    rust_problem(status) -> String
+
+What a `[rust]` project is missing here, with the advice under each probe:
+the error `build` raises for one when `rust_ready` is false.
+"""
+function rust_problem(status::ToolchainStatus)::String
+    broken = [t for t in status.tools if t.name in RUST_PROBES && !(t.found && t.meets_requirement)]
+    missing_probes = [n for n in RUST_PROBES if !any(t -> t.name == n, status.tools)]
+    lines = ["[RepliBuild] A [rust] project cannot be built here — $(length(broken) + length(missing_probes)) probe(s) failed:"]
+    for t in broken
+        push!(lines, "  ✗ $(t.name): $(_plain(t.message))")
+        append!(lines, ("      " * a for a in t.advice))
+    end
+    foreach(n -> push!(lines, "  ✗ $n: not probed"), missing_probes)
+    return join(lines, "\n")
+end
+
+# =============================================================================
 # PUBLIC API
 # =============================================================================
 
@@ -625,8 +733,10 @@ the capability it enables, with fix advice under whatever failed.
 
 Probes the C bucket (Clang_unified_jll + sysroot), DWARF extraction (GNU dumper
 + symbol reader), the C++/Tier-2 chain (llvm-config, clang++, mlir-tblgen,
-cmake, llvm-dwarfdump, libJLCS), and on Windows which MSYS2 environment the C++
-toolchain comes from.
+cmake, llvm-dwarfdump, libJLCS), the Rust toolchain a `[rust]` project is built
+with (cargo, rustc, a demangler that reads rustc's names; optional, and
+`EnvironmentDoctor.rust_ready(status)` is the answer for such a project), and
+on Windows which MSYS2 environment the C++ toolchain comes from.
 
 The result is iterable, so the REPL can pick it apart:
 
@@ -657,6 +767,9 @@ function check_environment(; verbose::Bool=true, throw_on_error::Bool=false)::To
         _check_cmake(),
         _check_llvm_dwarfdump(),
         _check_libJLCS(llvm_config.version),
+        _check_rust_tool("cargo"),
+        _check_rust_tool("rustc"),
+        _check_rust_demangler(),
     ]
     Sys.iswindows() && push!(tools, _check_msys2(clangxx.found ? clangxx.path : ""))
 
@@ -757,6 +870,17 @@ function _summary_lines(status::ToolchainStatus)::Vector{String}
         push!(lines, "       $(CYAN)using Pkg; Pkg.build(\"RepliBuild\")$(RESET)  $(DIM)(other ways under libJLCS above)$(RESET)")
     else
         push!(lines, "  $(_icon(:warn)) $(YELLOW)Tier 2 (MLIR thunks) unavailable$(RESET) — a C++ wrapper keeps only its noexcept functions that ccall can pass")
+    end
+    # Only when the Rust probes ran: a status built without them says nothing about Rust.
+    if any(t -> t.name == "cargo", status.tools)
+        if rust_ready(status)
+            push!(lines, "  $(_icon(:ok)) $(GREEN)Rust crates$(RESET) — cargo and rustc found" *
+                         (ok("libJLCS") ? "" : "; calls a plain ccall cannot make need the dialect library (libJLCS above)"))
+        elseif ok("cargo") && ok("rustc")
+            push!(lines, "  $(_icon(:warn)) $(YELLOW)Rust crates unavailable$(RESET) — cargo and rustc are here, and a probe a wrapper needs failed (above)")
+        else
+            push!(lines, "  $(_icon(:warn)) $(YELLOW)Rust crates unavailable$(RESET) — a [rust] project needs cargo and rustc; nothing else does")
+        end
     end
     return lines
 end

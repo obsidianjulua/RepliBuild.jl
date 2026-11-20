@@ -377,6 +377,16 @@ read metadata.
 """
 _read_json(path::AbstractString) = JSON.parse(read(path, String); dicttype=Dict{String,Any})
 
+"""
+    _parse_json(text)
+
+`_read_json` for JSON that is not a file: what a tool printed (cargo's
+`metadata`, and its build messages, one object per line). The same types on
+both JSON majors, for the reason `_read_json` gives. The hygiene test counts
+this and `_read_json` as the only two places `src/` parses JSON.
+"""
+_parse_json(text::AbstractString) = JSON.parse(String(text); dicttype=Dict{String,Any})
+
 # ============================================================================
 # LOAD MODULES
 # ============================================================================
@@ -392,8 +402,15 @@ include("Builder.jl")
 # IRGen: MLIR bindings, IR generation, JIT execution
 include("IRGen.jl")
 
+# What a generated Rust wrapper calls at run time (thunks, the catching frame).
+include("RustRuntime.jl")
+
 # Wrapper: Julia binding generation
 include("Wrapper.jl")
+
+# The Rust front end's generator: its own file and its own rules (it reads
+# another metadata shape than the C and C++ generators).
+include("Wrapper/Rust/GeneratorRust.jl")
 include("Wrapper/Cpp/STLWrappers.jl")
 
 # ThunkBuilder: bridge between Builder and IRGen (needs Wrapper.is_c_lto_safe)
@@ -598,7 +615,9 @@ end
 """
     discover(target_dir="."; force=false, build=false, wrap=false) -> String
 
-Scan a C or C++ project and generate its replibuild.toml.
+Scan a C or C++ project and generate its replibuild.toml. In a directory that
+holds a `Cargo.toml` and no replibuild.toml yet, the project is that Rust
+crate: cargo is asked what it is, and the file names it under `[rust]`.
 
 **This is the entry point for new projects.** Run this first to set up RepliBuild.
 
@@ -852,14 +871,18 @@ RepliBuild.wrap("replibuild.toml")
 """
 function build(toml_path::String="replibuild.toml"; clean::Bool=false)
 
-    # Validate environment before attempting build
-    env_status = EnvironmentDoctor.check_environment(verbose=false)
-    if !env_status.ready
-        EnvironmentDoctor.check_environment(verbose=true, throw_on_error=true)
-    end
-
     # Resolve absolute path to TOML file
     toml_path = abspath(toml_path)
+
+    # Validate environment before attempting build. A Rust project is asked
+    # about the Rust toolchain and the readers a wrapper needs, and nothing
+    # about the C and C++ compilers, which it never starts.
+    env_status = EnvironmentDoctor.check_environment(verbose=false)
+    if ConfigurationManager.is_rust_toml(toml_path)
+        EnvironmentDoctor.rust_ready(env_status) || error(EnvironmentDoctor.rust_problem(env_status))
+    elseif !env_status.ready
+        EnvironmentDoctor.check_environment(verbose=true, throw_on_error=true)
+    end
 
     if !isfile(toml_path)
         error("Configuration file not found: $toml_path\n" *
@@ -891,6 +914,12 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
         # extracted on its own. Returns the output directory that holds them.
         if config.graph !== nothing
             return GraphMode.build_graph_project(config)
+        end
+
+        # Rust: cargo and rustc compile and link the crate; RepliBuild sets
+        # their flags and reads the library, its DWARF and the IR back.
+        if config.rust !== nothing
+            return abspath(RustBuild.build_rust_project(config; generator = PackageRegistry._generator_fingerprint()))
         end
 
         # Compile the project (C++ → IR → library + metadata)
@@ -991,6 +1020,12 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
             isempty(headers) || error("wrap: `headers` does not apply to a [graph] project; " *
                                       "each library's headers come from its own include path.")
             return GraphMode.wrap_graph_project(config)
+        end
+
+        # Rust: its own generator, from the metadata its build wrote.
+        if config.rust !== nothing
+            isempty(headers) || error("wrap: `headers` does not apply to a [rust] project; a crate has none.")
+            return abspath(GeneratorRust.wrap_project(config))
         end
 
         # Find library

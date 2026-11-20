@@ -14,6 +14,7 @@ using ..EnvironmentDoctor
 import ..Compiler
 import ..Tools
 import ..GraphMode
+import ..RustBuild
 using TOML
 using SHA
 using Dates
@@ -163,7 +164,22 @@ function hash_config(config::RepliBuildConfig)::String
     # ...and only for the toolchain that built it. A C build made on Julia 1.13
     # (libLLVM 20) carries Tier 1 slices that LLVM 18 cannot parse, so use()
     # under 1.12 must miss rather than serve it. See `_toolchain_identity`.
-    SHA.update!(ctx, Vector{UInt8}(Compiler._toolchain_identity(config)))
+    # A Rust project's compiler is rustc, fed further down.
+    config.rust === nothing && SHA.update!(ctx, Vector{UInt8}(Compiler._toolchain_identity(config)))
+
+    # A [rust] project's sources are the crate's tree, which nothing above
+    # reads (`[compile] source_files` is C and C++): every file of it, path
+    # and content, the pin of the dependency it comes from, and the Rust
+    # toolchain, which is the compiler of all of it.
+    if config.rust !== nothing
+        SHA.update!(ctx, Vector{UInt8}("replibuild-rust"))
+        SHA.update!(ctx, Vector{UInt8}(RustBuild.source_identity(config)))
+        for (rel, path) in RustBuild.input_files(config)
+            SHA.update!(ctx, Vector{UInt8}(rel))
+            SHA.update!(ctx, read(path))
+        end
+        SHA.update!(ctx, Vector{UInt8}(RustBuild.toolchain_identity(config)))
+    end
 
     # A [graph] project is one entry for every library of the graph, so its
     # hash covers all of their inputs: every file of the CMake project's tree
@@ -629,7 +645,9 @@ output directory to `builds/<hash>/` and publish it (`_publish!`). Returns the
 updated entry, saved.
 """
 function _build_and_vendor!(entry::RegistryEntry; clean::Bool=false, verbose::Bool=true)::RegistryEntry
-    _ensure_toolchain()
+    # A Rust project's toolchain is not the C and C++ one this asks about;
+    # `build` asks about the right one for either.
+    ConfigurationManager.is_rust_toml(entry.toml_path) || _ensure_toolchain()
     parent_mod = parentmodule(@__MODULE__)
     parent_mod.build(entry.toml_path; clean=clean)
     parent_mod.wrap(entry.toml_path)

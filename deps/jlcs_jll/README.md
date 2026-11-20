@@ -17,7 +17,7 @@ Two numbers, both in `src/mlir`:
   library that reports another. Bump it with any change to what Julia
   generates for the dialect or calls in it (an op, an attribute, a thunk
   convention, a C API signature).
-- `VERSION`: the binary's own version (`1.0.0`), independent of RepliBuild's.
+- `VERSION`: the binary's own version (`3.0.0`), independent of RepliBuild's.
   Bump it for every published build; a change of `ABI_VERSION` is a new major.
 
 ## Today: a release on this repository
@@ -33,6 +33,16 @@ RepliBuild downloads the library through the lazy `JLCS` entry of
 4. Create the release `jlcs-v<VERSION>` with the two `JLCS.v<VERSION>.*.tar.gz`
    files from `./products` (`gh release create ... --latest=false`), then
    commit `Artifacts.toml`. Upload exactly the files step 3 hashed.
+
+Run step 2 from this directory: the tarballs land in `./products`, which is
+where step 3 reads them.
+
+**A change of `ABI_VERSION` is published from its own branch, before it
+merges.** CI's Linux `runtests` cells have no local build and load the
+published library, so the branch is red until its `Artifacts.toml` names a
+release of the new number. The release is a tag of its own and `main`'s
+`Artifacts.toml` still names the old one, so neither waits on the other:
+build from the branch, publish, commit `Artifacts.toml` to the branch.
 
 ## Registering `JLCS_jll` in General
 

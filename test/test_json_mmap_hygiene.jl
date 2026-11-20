@@ -52,7 +52,10 @@ const READ_ENTRY = r"JSON\.(parsefile|parse|lazyfile|lazy)\b"
                 # a comment is not a call site.
                 startswith(strip(line), "#") && continue
                 where = string(relpath(path, src_dir), ":", i, "  ", strip(line))
-                is_def = startswith(strip(line), "_read_json(path::AbstractString) =")
+                # The two helpers: a file (`_read_json`) and text a tool printed
+                # (`_parse_json`, which maps nothing: it has no file).
+                is_def = startswith(strip(line), "_read_json(path::AbstractString) =") ||
+                         startswith(strip(line), "_parse_json(text::AbstractString) =")
                 if occursin(READ_ENTRY, line)
                     push!(is_def ? helper_defs : offenders, where)
                 end
@@ -60,10 +63,13 @@ const READ_ENTRY = r"JSON\.(parsefile|parse|lazyfile|lazy)\b"
             end
         end
 
-        # The helper exists exactly once, and it is the shape the rule relies on.
-        @test length(helper_defs) == 1
-        @test all(d -> occursin("read(path, String)", d) &&
-                       occursin("dicttype=Dict{String,Any}", d), helper_defs)
+        # Each helper exists exactly once, and is the shape the rule relies on:
+        # the file one reads without mapping, and both give `Dict{String,Any}`.
+        @test length(helper_defs) == 2
+        @test count(d -> occursin("_read_json(path::AbstractString) =", d) &&
+                         occursin("read(path, String)", d), helper_defs) == 1
+        @test count(d -> occursin("_parse_json(text::AbstractString) =", d), helper_defs) == 1
+        @test all(d -> occursin("dicttype=Dict{String,Any}", d), helper_defs)
 
         # Assert the sweep actually ran. A rename, a move, or a bad walkdir would
         # otherwise make this testset pass by finding nothing — the same "the

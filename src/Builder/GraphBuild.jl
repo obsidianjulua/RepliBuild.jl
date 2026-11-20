@@ -792,6 +792,7 @@ function _library_config(lib::LibraryPlan; optimization_level::AbstractString = 
         CM.parse_types_config(data),
         nothing,
         graph,
+        nothing,
         "",
         DateTime(2000))
 end

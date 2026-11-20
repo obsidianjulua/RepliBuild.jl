@@ -1,0 +1,8 @@
+# A second fixture crate for the Rust front end, for two things the first one
+# is not: `#![no_std]`, and denying its own warnings.
+[package]
+name = "rb-nostd"
+version = "0.1.0"
+edition = "2021"
+
+[lib]

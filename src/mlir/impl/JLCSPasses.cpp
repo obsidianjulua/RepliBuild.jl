@@ -1570,6 +1570,111 @@ struct FFECallOpLowering : public ConversionPattern {
 };
 
 //===----------------------------------------------------------------------===//
+// NativeCallOp Lowering
+//===----------------------------------------------------------------------===//
+
+// A call made exactly as stated: the operands and the result as they are,
+// the stated parameter attributes on the call site and on the declaration,
+// and no CallShape. ffe_call and try_call ask the host's C classifier about
+// every struct; this op exists for a callee whose signature is already the
+// lowered one, because its own compiler wrote it (rustc's `define` line).
+// The identity is the whole of it: anything added here is a second ABI rule.
+//
+// With no `callee` attribute the first operand is the function's address and
+// the call goes through it: the same call, of a function the module does not
+// name. There is then no declaration to retype, and nothing for a loader or
+// a JIT to resolve.
+struct NativeCallOpLowering : public ConversionPattern {
+    NativeCallOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
+        : ConversionPattern(typeConverter, NativeCallOp::getOperationName(), 1,
+              ctx)
+    {
+    }
+
+    LogicalResult
+    matchAndRewrite(Operation* op, ArrayRef<Value> operands,
+        ConversionPatternRewriter& rewriter) const override
+    {
+        auto nativeCallOp = cast<NativeCallOp>(op);
+        Location loc = nativeCallOp.getLoc();
+
+        auto calleeAttr = op->getAttrOfType<FlatSymbolRefAttr>("callee");
+        if (!calleeAttr && (operands.empty() || !isa<LLVM::LLVMPointerType>(operands[0].getType())))
+            return op->emitError("native_call requires a 'callee' symbol reference attribute, or the "
+                                 "function's address as its first operand");
+
+        SmallVector<Type, 1> resultTypes;
+        for (Type t : nativeCallOp.getResults().getTypes()) {
+            Type converted = typeConverter->convertType(t);
+            if (!converted)
+                return op->emitError("native_call: could not convert result type");
+            resultTypes.push_back(converted);
+        }
+        // The arguments of the call: every operand, less the callee's address.
+        ArrayRef<Value> callArgs = calleeAttr ? operands : operands.drop_front();
+        SmallVector<Type, 4> argTypes;
+        for (Value v : callArgs)
+            argTypes.push_back(v.getType());
+
+        // One dictionary per argument (the verifier holds the shape).
+        ArrayAttr argAttrs = op->getAttrOfType<ArrayAttr>("arg_attrs");
+
+        if (!calleeAttr) {
+            auto fnType = LLVM::LLVMFunctionType::get(
+                resultTypes.empty() ? (Type)LLVM::LLVMVoidType::get(rewriter.getContext())
+                                    : resultTypes[0],
+                argTypes, /*isVarArg=*/false);
+            auto callOp = LLVM::CallOp::create(rewriter, loc, fnType, ValueRange(operands));
+            if (argAttrs)
+                callOp.setArgAttrsAttr(argAttrs);
+            if (resultTypes.empty())
+                rewriter.eraseOp(op);
+            else
+                rewriter.replaceOp(op, callOp.getResults());
+            return success();
+        }
+
+        // The declaration takes exactly this signature and these attributes:
+        // the call site is what the backend lowers, and the declaration is
+        // what the verifier checks the call site against.
+        ModuleOp moduleOp = op->getParentOfType<ModuleOp>();
+        StringRef callee = calleeAttr.getValue();
+        if (auto fn = moduleOp.lookupSymbol<func::FuncOp>(callee)) {
+            fn.setFunctionType(FunctionType::get(rewriter.getContext(), argTypes, resultTypes));
+            if (argAttrs)
+                for (unsigned i = 0; i < argAttrs.size(); ++i)
+                    for (NamedAttribute na : cast<DictionaryAttr>(argAttrs[i]))
+                        fn.setArgAttr(i, na.getName(), na.getValue());
+        } else if (auto llvmFn = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(callee)) {
+            llvmFn.setFunctionType(LLVM::LLVMFunctionType::get(
+                resultTypes.empty() ? (Type)LLVM::LLVMVoidType::get(rewriter.getContext())
+                                    : resultTypes[0],
+                argTypes, /*isVarArg=*/false));
+            if (argAttrs)
+                for (unsigned i = 0; i < argAttrs.size(); ++i)
+                    for (NamedAttribute na : cast<DictionaryAttr>(argAttrs[i]))
+                        llvmFn.setArgAttr(i, na.getName(), na.getValue());
+        } else {
+            // MLIR's translation dereferences null for a call to a symbol the
+            // module does not declare: an error here, not a dead process there.
+            return op->emitError("native_call: callee @") << callee
+                << " is not declared in the module";
+        }
+
+        auto callOp = LLVM::CallOp::create(rewriter, loc, resultTypes, callee,
+            ValueRange(operands));
+        if (argAttrs)
+            callOp.setArgAttrsAttr(argAttrs);
+
+        if (resultTypes.empty())
+            rewriter.eraseOp(op);
+        else
+            rewriter.replaceOp(op, callOp.getResults());
+        return success();
+    }
+};
+
+//===----------------------------------------------------------------------===//
 // TryCallOp Lowering (Exception-safe FFE Call)
 //===----------------------------------------------------------------------===//
 
@@ -2184,7 +2289,7 @@ struct LowerJLCSToLLVMPass
         // Define illegal ops (source dialect)
         target.addIllegalOp<GetFieldOp, SetFieldOp, VirtualCallOp,
             LoadArrayElementOp, StoreArrayElementOp, TypeInfoOp, FFECallOp,
-            TryCallOp, ConstructorCallOp, DestructorCallOp,
+            TryCallOp, NativeCallOp, ConstructorCallOp, DestructorCallOp,
             ScopeOp, YieldOp, MarshalArgOp, MarshalRetOp>();
 
         // Define legal dialects (target dialects)
@@ -2210,6 +2315,7 @@ struct LowerJLCSToLLVMPass
         patterns.add<TypeInfoOpLowering>(typeConverter, &getContext());
         patterns.add<FFECallOpLowering>(typeConverter, &getContext());
         patterns.add<TryCallOpLowering>(typeConverter, &getContext());
+        patterns.add<NativeCallOpLowering>(typeConverter, &getContext());
         patterns.add<ConstructorCallOpLowering>(typeConverter, &getContext());
         patterns.add<DestructorCallOpLowering>(typeConverter, &getContext());
         patterns.add<YieldOpLowering>(typeConverter, &getContext());

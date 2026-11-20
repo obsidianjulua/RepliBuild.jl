@@ -320,6 +320,58 @@ def TryCallOp : JLCS_Op<"try_call", [MemoryEffects<[MemRead, MemWrite]>]> {
 }
 
 // ====================================================================
+// Native Call Operation
+// ====================================================================
+
+// 15. Native Call Op (the callee's own signature, passed through unchanged)
+def NativeCallOp : JLCS_Op<"native_call", [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Call a function exactly as its own compiler declared it";
+  let description = [{
+    A direct call whose operand types, result type and parameter attributes
+    are the ones the callee's compiler wrote on its `define` line. Nothing is
+    classified and nothing is coerced: `ffe_call` and `try_call` apply the C
+    record rule of the host to every struct they see, which is right for a
+    function clang compiled and wrong for one compiled under another
+    convention (rustc's own: an `Option<i32>` comes back as a first-class
+    `{ i32, i32 }` in two registers, where the C rule packs it into one).
+
+    `callee` names the function. With no `callee` the first operand is the
+    function's address (an `!llvm.ptr`) and the call goes through it: the
+    module then names no function, so nothing has to resolve one, and the
+    caller says which function is meant. `arg_attrs`, when present, holds one
+    dictionary per argument of the call (the callee's address is not one)
+    with the LLVM parameter attributes that change how the argument is
+    passed, under the LLVM dialect's own names (`llvm.zeroext`,
+    `llvm.signext`, `llvm.sret`, `llvm.byval`, `llvm.align`, `llvm.inreg`).
+    The lowering stamps them on the call site and, for a named callee, on its
+    declaration, which it also retypes to exactly the argument and result
+    types of the op.
+
+    The call is a plain call: a callee that unwinds unwinds through the
+    caller. Whatever must end that unwind (a Rust panic may only be ended by
+    Rust) is a frame outside the thunk.
+
+    Example:
+    ```mlir
+    %r = jlcs.native_call %x
+      { callee = @_RNvCs1hrDFCe5rCe_4lean5maybe }
+      : (i32) -> !llvm.struct<(i32, i32)>
+
+    jlcs.native_call %ret, %a
+      { callee = @_RNvCs1hrDFCe5rCe_4lean8rec_make,
+        arg_attrs = [ {llvm.sret = !llvm.array<16 x i8>, llvm.align = 8 : i64}, {} ] }
+      : (!llvm.ptr, i8) -> ()
+
+    %r = jlcs.native_call %fn, %x : (!llvm.ptr, i32) -> !llvm.struct<(i32, i32)>
+    ```
+  }];
+  let arguments = (ins Variadic<AnyType>:$args);
+  let results = (outs Variadic<AnyType>:$results);
+  let assemblyFormat = "$args attr-dict `:` functional-type($args, $results)";
+  let hasVerifier = 1;
+}
+
+// ====================================================================
 // RAII Operations (Constructor / Destructor)
 // ====================================================================
 

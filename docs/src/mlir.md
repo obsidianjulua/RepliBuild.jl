@@ -279,7 +279,8 @@ generalization, and the lowering reads data and strides only.
 
 ## 6. The ops
 
-Fourteen ops, **all fourteen with a producer** as of 2026-08-13. Liveness is
+Fifteen ops, **all fifteen with a producer** (the fourteen C++ ones as of
+2026-08-13; `native_call` since 2026-11-19). Liveness is
 tracked deliberately, because "defined in TableGen" and "something emits it" are
 different claims — and it is checked mechanically rather than asserted here, by
 `test_jlcs_invariants.jl` §E, which reads the mnemonics out of `JLCSOps.td`,
@@ -291,6 +292,7 @@ exists because this table was wrong for months (see below).
 | `jlcs.type_info` | `JLCSIRGenerator` | ✅ | class metadata: layout, primary base, destructor, MI/VI base tables |
 | `jlcs.ffe_call` | `FunctionGen` | — | direct call to a named symbol, SysV-coerced |
 | `jlcs.try_call` | `FunctionGen` | — | as `ffe_call`, plus invoke + landing pad |
+| `jlcs.native_call` | `RustThunks` | ✅ | a call with the callee's own signature and parameter attributes, passed through unchanged: no record rule is applied. By name, or through the function's address |
 | `jlcs.vcall` | `FunctionGen` | ✅ | vtable dispatch: read vptr, index slot, adjust `this`, indirect call |
 | `jlcs.marshal_arg` | `FunctionGen` | ✅ | Julia-aligned struct pointer → C-packed struct value |
 | `jlcs.marshal_ret` | `FunctionGen` | — | C-packed struct value → Julia-aligned struct value |
@@ -390,6 +392,40 @@ universally correct under Itanium. Two deliberate exclusions: destructors stay
 direct calls (exact-class semantics for finalizers and RAII), and struct-shaped
 signatures stay direct because the `vcall` lowering does no sret/packed
 coercion.
+
+`native_call` is the call for a function whose signature is already the
+lowered one, because its own compiler wrote it. `ffe_call` and `try_call`
+hand every struct operand and result to the host's C classifier, which is
+right for a function clang compiled and wrong for one compiled under another
+convention: rustc returns an `Option<i32>` as a first-class `{ i32, i32 }` in
+two registers, where the C rule packs it into one. `native_call` classifies
+nothing. Its argument and result types are the `define` line's, and
+`arg_attrs` holds one dictionary per argument with the parameter attributes
+that change how the argument is passed, under the LLVM dialect's own names.
+
+The callee is named (`callee = @f`), or, with no `callee`, is the first
+operand: the function's address, called through. The second is the form
+`RustThunks` emits. A thunk is handed the address of the function it is to
+call, so a thunk module names no function, has nothing for a loader or a JIT
+to resolve, and can be compiled into a library that depends on nothing:
+
+```mlir
+%r = jlcs.native_call %fn, %x : (!llvm.ptr, i32) -> !llvm.struct<(i32, i32)>
+
+jlcs.native_call %fn, %ret, %a
+  { arg_attrs = [{llvm.sret = !llvm.array<16 x i8>, llvm.align = 8 : i64}, {}] }
+  : (!llvm.ptr, !llvm.ptr, i8) -> ()
+
+%r = jlcs.native_call %x { callee = @_RNv…5maybe } : (i32) -> !llvm.struct<(i32, i32)>
+```
+
+For a named callee the lowering retypes the declaration to exactly that
+signature and stamps the attributes on it and on the call site; through an
+address there is no declaration, and the attributes go on the call site. One
+`llvm.call` either way. It is a plain call: a callee that unwinds unwinds
+through the thunk, and whatever must end that unwind is a frame outside it (a
+Rust panic may only be ended by Rust). Its producer is `RustThunks`, and only
+that: the C and C++ generators never emit it (`test_jlcs_invariants.jl` §E).
 
 ### RAII: `scope`, `ctor_call`, `dtor_call`, `yield`
 

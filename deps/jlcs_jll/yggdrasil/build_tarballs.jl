@@ -3,7 +3,7 @@
 using BinaryBuilder, Pkg
 
 name = "JLCS"
-version = v"1.0.0"
+version = v"3.0.0"
 
 # The JLCS MLIR dialect of RepliBuild.jl: the library its Tier 2 (C++ methods,
 # by-value aggregates, virtual dispatch, exceptions) lowers and JITs thunks

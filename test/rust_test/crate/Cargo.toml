@@ -1,0 +1,9 @@
+# The Rust front end's fixture crate. Plain Rust: nothing here is written for
+# RepliBuild (no `extern "C"` on the API, no `#[repr(C)]`, no `#[inline(never)]`).
+# The package name has a `-`, which the crate name spells `_`.
+[package]
+name = "rb-fix"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
