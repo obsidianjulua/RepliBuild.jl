@@ -182,15 +182,28 @@ jobs:
           clang++ --version | head -n 1
           cmake --version | head -n 1
           readelf --version | head -n 1
+          # The Rust front end's tests use the image's own Rust, which moves
+          # with the image: a red Rust test is read against these lines first.
+          # (cargo 1.100 changed where a build's files go, and this
+          # environment's CARGO_INCREMENTAL=0 overrode the build's profile.)
+          if command -v cargo > /dev/null; then
+            rust="$(cargo -V), $(rustc -vV | sed -n 's/^LLVM version: /rustc LLVM /p')"
+          else
+            rust="no cargo: the Rust tests skip"
+          fi
+          echo "$rust"
+          echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL-unset}"
           {
             echo "### LLVM $LLVM_MAJOR, Julia $JULIA, $(uname -m)"
             echo "- Ubuntu $CODENAME, LLVM/Clang/MLIR $llvm (\`$PACKAGE\`)"
+            echo "- Rust: $rust"
             echo "- REPLIBUILD_SKIP_TESTS: \`${REPLIBUILD_SKIP_TESTS:-none}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # libJLCS is pinned to LLVM's minor SONAME and carries MLIR from the static
       # libraries, so it is reused only for the same llvm-config version and the
-      # same dialect sources. Julia plays no part in it, so both Julia cells of
+      # same dialect sources. The ABI version is compiled in from its own file,
+      # so that file is part of the key: a library of the old number is refused. Julia plays no part in it, so both Julia cells of
       # one LLVM share it. Saved straight after the build rather than at the end
       # of the job, so a red devtests run still keeps it.
       - name: Restore libJLCS
@@ -200,7 +213,7 @@ jobs:
           path: |
             src/mlir/build/libJLCS.so*
             src/mlir/build/jlcs_llvm_version
-          key: libJLCS-${{ runner.arch }}-${{ steps.llvm.outputs.codename }}-llvm${{ steps.toolchain.outputs.llvm }}-${{ hashFiles('src/mlir/CMakeLists.txt', 'src/mlir/build.sh', 'src/mlir/*.td', 'src/mlir/IR/*.h', 'src/mlir/impl/*') }}
+          key: libJLCS-${{ runner.arch }}-${{ steps.llvm.outputs.codename }}-llvm${{ steps.toolchain.outputs.llvm }}-${{ hashFiles('src/mlir/CMakeLists.txt', 'src/mlir/build.sh', 'src/mlir/ABI_VERSION', 'src/mlir/VERSION', 'src/mlir/*.td', 'src/mlir/IR/*.h', 'src/mlir/impl/*') }}
 
       - name: Build the JLCS dialect
         if: steps.jlcs.outputs.cache-hit != 'true'

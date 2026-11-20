@@ -423,7 +423,14 @@ If you are asked to work on it:
   statement, a thunk convention, a C API signature), together with
   `src/mlir/VERSION` (the binary's own version, a new major), a rebuilt and
   republished artifact and `Artifacts.toml`: a published library of the old
-  number is refused from that commit on. `deps/jlcs_jll/README.md` has the
+  number is refused from that commit on. **An ABI bump is published from its
+  own branch, before the merge** (2026-11-20): the pkg suite's Linux cells
+  have no local build and load the published library, so the branch's CI is
+  red until its `Artifacts.toml` names a release of the new number. Build
+  the tarballs from the branch, publish them under a new tag
+  (`jlcs-v<VERSION>`), and commit the regenerated `Artifacts.toml` to the
+  branch; `main` keeps the release its own file names, so neither waits on
+  the other. `deps/jlcs_jll/README.md` has the
   publishing and Yggdrasil steps; `yggdrasil/build_tarballs.jl` is the same
   build as the local recipe from a pinned commit. (`test_jlcs_abi_version.jl`,
   devtests `test_jlcs_abi_live.jl`.)
@@ -2007,7 +2014,32 @@ outward-facing, so ask first.
   rustc gives a small `pub fn` no symbol unless incremental is on (4 of 17
   kept one at opt-level 3; 17 of 17 with it). `cargo_args` states the whole
   profile (`codegen-units=1`, so exactly one `<crate>-<hash>.ll`); changing
-  one setting there needs the surface re-measured. An `#[inline]` function
+  one setting there needs the surface re-measured. **The profile is not the
+  last word on a setting, so what the build depends on is pinned where
+  nothing overrides it**: `CARGO_INCREMENTAL` and `CARGO_BUILD_INCREMENTAL`
+  override every profile and are removed from cargo's environment (`_cargo`;
+  GitHub's runners set `CARGO_INCREMENTAL=0`, and every optimized build in CI
+  lost a third of its symbols, 2026-11-20), and `build.incremental` in a
+  configuration file does too, so it is stated on the command line. Before
+  relying on a cargo setting, ask what overrides it.
+- **Where rustc writes a crate's files is cargo's business, and it is read
+  from the names cargo reports** (`_output_dirs`, `root_ir`, `_crate_ir`).
+  Through cargo 1.99 every crate's files were in `target/debug/deps/`; from
+  1.100 each unit has `target/debug/build/<package>/<hash>/out/`, and the
+  build, which looked for the root crate's IR beside the wrapped crate's,
+  failed on its first line with a new cargo. A hashed file name cargo reports
+  (the `.rlib`, or the `.rmeta` beside the unhashed copy it makes for the
+  user) gives the directory and the hash; the root crate's IR is beside the
+  file the reported library is a copy of, since a profile directory keeps
+  one unit per set of flags. Never join `deps` to a path.
+  (`test_rust_config.jl`.)
+- **The Rust toolchain is the user's and moves under the tests.** CI uses
+  the runner image's Rust (`tier2-linux.yml` prints it), which is newer than
+  a dev box's. Run the three live Rust tests on the newest stable as well as
+  the installed one before calling a Rust change done:
+  `RUSTUP_TOOLCHAIN=<version> CARGO_INCREMENTAL=0 julia --project=.
+  test/test_rust_<build|thunks|wrap>_live.jl` (`rustup toolchain install
+  <version> --profile minimal` puts one beside the default). An `#[inline]` function
   has no symbol at any level: the library has it only because the build
   names it in the root crate (below).
 - **A TOML entry only for what no compile of the same code can say** (John,

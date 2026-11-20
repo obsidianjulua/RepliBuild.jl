@@ -26,7 +26,10 @@
 #   crate type `dylib`     every non-generic `pub fn` is exported; a `cdylib`
 #                          exports only `extern "C"` items
 #   debug info 2           every type and parameter is in the DWARF
-#   one codegen unit       one IR file per crate, `…/deps/<crate>-<hash>.ll`
+#   one codegen unit       one IR file per crate, beside the crate's own
+#                          library wherever this cargo puts that
+#                          (`_output_dirs`: `deps/`, or from cargo 1.100
+#                          `build/<package>/<hash>/out/`)
 #   --emit=llvm-ir,link    the `define` lines, which say how each call is made
 #   v0 symbol names        the names say which crate an item belongs to
 #   --cap-lints=warn       the crate's own `#![deny(warnings)]` is its
@@ -271,6 +274,11 @@ function _cargo(tc::Toolchain, args::Vector{String}, dir::AbstractString; keep_m
     # One source of rustc flags, read before any configuration file (`rustflags`).
     env["CARGO_ENCODED_RUSTFLAGS"] = join(rustflags(; keep_merged), '\x1f')
     delete!(env, "RUSTFLAGS")
+    # Whether the build is incremental is the profile's to say (`cargo_args`):
+    # which functions keep a symbol above opt-level 0 depends on it. These two
+    # variables override every profile, and a CI environment sets them to 0.
+    delete!(env, "CARGO_INCREMENTAL")
+    delete!(env, "CARGO_BUILD_INCREMENTAL")
     return setenv(cmd, env)
 end
 
@@ -950,8 +958,60 @@ function discovery_args(rc::RustConfig, crate::Crate)::Vector{String}
     return vcat(cut === nothing ? args : args[1:cut-1], ["-p", crate.package, "--", "-C", "link-dead-code"])
 end
 
+# Whether two paths are one file: the same file (cargo's copy for the user is
+# a hard link where the filesystem allows one), or the same bytes.
+_same_bytes(a::AbstractString, b::AbstractString) =
+    isfile(a) && isfile(b) &&
+    (Base.samefile(String(a), String(b)) || (filesize(a) == filesize(b) && _file_sha(a) == _file_sha(b)))
+
+"""
+    _output_dirs(profile_dir) -> Vector{String}
+
+The directories under a cargo profile directory (`target/debug`) that rustc
+writes a crate's own files into, whichever layout this cargo uses: `deps/`
+(every crate's, through cargo 1.99) and `build/<package>/<hash>/out/` (one
+per unit, from cargo 1.100). Only the ones that exist.
+"""
+function _output_dirs(profile_dir::AbstractString)::Vector{String}
+    dirs = String[]
+    deps = joinpath(String(profile_dir), "deps")
+    isdir(deps) && push!(dirs, deps)
+    build = joinpath(String(profile_dir), "build")
+    if isdir(build)
+        for pkg in sort!(readdir(build; join = true))
+            isdir(pkg) || continue
+            for unit in sort!(readdir(pkg; join = true))
+                out = joinpath(unit, "out")
+                isdir(out) && push!(dirs, out)
+            end
+        end
+    end
+    return dirs
+end
+
+"""
+    root_ir(library, crate) -> Union{String,Nothing}
+
+The IR file of the root crate, given the dynamic library cargo reported for
+it. cargo reports the copy it makes for the user (`target/debug/lib<root>.so`);
+rustc wrote the library and its IR side by side somewhere under that
+directory (`_output_dirs`). The IR is the `<root>.ll` beside the file the
+reported library is a copy of: a profile directory holds one such pair per
+set of flags it was ever built with (another opt-level is another unit), so
+the name alone does not say which. With no library beside it to compare, a
+lone `<root>.ll` is taken; several are `nothing`.
+"""
+function root_ir(library::AbstractString, crate::Crate)::Union{String,Nothing}
+    name = root_name(crate) * ".ll"
+    found = [d for d in _output_dirs(dirname(String(library))) if isfile(joinpath(d, name))]
+    same = [d for d in found if _same_bytes(joinpath(d, basename(String(library))), library)]
+    dir = !isempty(same) ? first(same) : length(found) == 1 ? only(found) : nothing
+    return dir === nothing ? nothing : joinpath(dir, name)
+end
+
 # The IR file of the wrapped crate that a cargo run reported building, or `nothing`.
 function _crate_ir(messages::AbstractString, crate::Crate)::Union{String,Nothing}
+    hashed = Regex("^lib\\Q$(crate.name)\\E-[0-9a-f]+\\.(rlib|rmeta)\$")
     for line in eachsplit(messages, '\n')
         startswith(line, "{") || continue
         msg = try
@@ -963,22 +1023,29 @@ function _crate_ir(messages::AbstractString, crate::Crate)::Union{String,Nothing
         target = get(msg, "target", Dict())
         (replace(String(get(target, "name", "")), '-' => '_') == crate.name &&
          _same_file(get(msg, "manifest_path", ""), crate.manifest)) || continue
-        k = findfirst(f -> endswith(f, ".rlib"), String[String(f) for f in get(msg, "filenames", String[])])
-        k === nothing && continue
-        rlib = String(msg["filenames"][k])
-        if basename(dirname(rlib)) != "deps"
-            # The crate cargo was asked for by name is reported where cargo
-            # puts a copy for the user (`target/debug/lib<crate>.rlib`), with
-            # no hash in its name. The IR is beside the file it is a copy of.
-            deps = joinpath(dirname(rlib), "deps")
-            isdir(deps) || return nothing
-            twins = [joinpath(deps, f) for f in readdir(deps) if startswith(f, "lib$(crate.name)-") && endswith(f, ".rlib")]
-            i = findfirst(t -> Base.samefile(t, rlib), twins)
-            i === nothing && (sha = _file_sha(rlib); i = findfirst(t -> _file_sha(t) == sha, twins))
-            i === nothing && return nothing
-            rlib = twins[i]
+        files = String[String(f) for f in get(msg, "filenames", String[])]
+        # A file rustc wrote carries the build's hash in its name, and the IR
+        # is beside it under the same hash. Which directory that is is cargo's
+        # business and has changed (`deps/`, then `build/<package>/<hash>/out/`
+        # from cargo 1.100), so it is read from the name cargo reports, never
+        # assumed. Beside the copy it makes for the user
+        # (`target/debug/lib<crate>.rlib`, no hash), cargo names the `.rmeta`.
+        k = findfirst(f -> occursin(hashed, basename(f)), files)
+        if k !== nothing
+            stem = replace(basename(files[k]), r"^lib" => ""; count = 1)
+            return joinpath(dirname(files[k]), replace(stem, r"\.(rlib|rmeta)$" => ".ll"))
         end
-        return joinpath(dirname(rlib), replace(replace(basename(rlib), r"^lib" => ""; count = 1), r"\.rlib$" => ".ll"))
+        # Only the copy is named: look for the file it is a copy of.
+        j = findfirst(f -> endswith(f, ".rlib"), files)
+        j === nothing && continue
+        rlib = files[j]
+        twins = String[]
+        for dir in _output_dirs(dirname(rlib))
+            append!(twins, [joinpath(dir, f) for f in readdir(dir) if occursin(hashed, f) && endswith(f, ".rlib")])
+        end
+        i = findfirst(t -> _same_bytes(t, rlib), twins)
+        i === nothing && return nothing
+        return joinpath(dirname(twins[i]), replace(replace(basename(twins[i]), r"^lib" => ""; count = 1), r"\.rlib$" => ".ll"))
     end
     return nothing
 end
@@ -1084,6 +1151,9 @@ function cargo_args(rc::RustConfig, crate::Crate; windows::Bool = Sys.iswindows(
     for p in profile
         append!(args, ["--config", "profile.dev." * p])
     end
+    # `build.incremental` in a configuration file overrides every profile's
+    # own setting; stated on the command line, it is this build's.
+    append!(args, ["--config", "build.incremental=$(opt > 0)"])
     link = vcat(Compiler._self_binding_link_flags(; windows), Compiler._reproducible_link_flags(; windows))
     isempty(link) || push!(args, "--")
     for flag in link
@@ -1247,7 +1317,8 @@ function build_rust_project(config::RepliBuildConfig; generator::AbstractString 
     rm(library; force = true)
     cp(artifact.library, library)
 
-    metadata = extract_metadata(config, crate, tc, library, [ir]; plan, allow_empty = true)
+    metadata = extract_metadata(config, crate, tc, library, [ir]; plan, allow_empty = true,
+                                root_ir = root_ir(artifact.library, crate))
     need = RustGlue.wanted(metadata["functions"], metadata["types"])
     found = _functions_wanted(rc, crate, tc, metadata; keep_merged = keep_merged[])
     fn_need = vcat(found, _trait_objects_wanted(metadata))
@@ -1264,7 +1335,8 @@ function build_rust_project(config::RepliBuildConfig; generator::AbstractString 
             artifact = find_artifacts(messages, crate)
             rm(library; force = true)
             cp(artifact.library, library)
-            metadata = extract_metadata(config, crate, tc, library, [artifact.ir]; plan, allow_empty = true)
+            metadata = extract_metadata(config, crate, tc, library, [artifact.ir]; plan, allow_empty = true,
+                                        root_ir = root_ir(artifact.library, crate))
             again = RustGlue.wanted(metadata["functions"], metadata["types"])
             fns_again = vcat(found, _trait_objects_wanted(metadata))
             # Again when the functions compiled in move types that were not
@@ -1424,7 +1496,8 @@ result.
 """
 function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
                           library::AbstractString, ir_files::Vector{String};
-                          plan::RustGlue.Plan = RustGlue.Plan(), allow_empty::Bool = false)::Dict{String,Any}
+                          plan::RustGlue.Plan = RustGlue.Plan(), allow_empty::Bool = false,
+                          root_ir::Union{AbstractString,Nothing} = joinpath(dirname(ir_files[1]), root_name(crate) * ".ll"))::Dict{String,Any}
     exported = Compiler._runtime_symbol_names(String(library))
     exported === nothing && error("the dynamic symbol table of $library could not be read")
     defs = RustABI.definitions(ir_files)
@@ -1439,15 +1512,16 @@ function extract_metadata(config::RepliBuildConfig, crate::Crate, tc::Toolchain,
     table = Dict{String,String}()
     picked = String[]                    # the drop functions the compiler chose for types that were not spelled
     if !isempty(plan.fns) || any(r -> !isempty(r.call), plan.rows)      # (callbacks are among `plan.fns`)
-        root_ir = joinpath(dirname(ir_files[1]), root_name(crate) * ".ll")
-        isfile(root_ir) || error("rustc wrote no IR file $root_ir for the root crate `$(root_name(crate))`")
-        table = RustGlue.address_table([root_ir])
+        (root_ir !== nothing && isfile(root_ir)) ||
+            error("the IR file of the root crate `$(root_name(crate))` was not found" *
+                  (root_ir === nothing ? " beside the library cargo built" : " at $root_ir") *
+                  ". The build reads it for the functions the library has no symbol for.")
+        table = RustGlue.address_table([String(root_ir)])
         picked = String[table[RustGlue.dropfn_symbol(r.n)] for r in plan.rows
                         if !isempty(r.call) && haskey(table, RustGlue.dropfn_symbol(r.n))]
     end
     if !isempty(plan.fns)
-        root_ir = joinpath(dirname(ir_files[1]), root_name(crate) * ".ll")
-        root_defs = RustABI.definitions([root_ir])
+        root_defs = RustABI.definitions([String(root_ir)])
         named = _demangle(unique!(vcat(collect(values(table)), String[f.symbol for f in plan.fns if !isempty(f.symbol)])))
         taken = Set{String}(symbols)
         for f in plan.fns

@@ -326,6 +326,9 @@ end
     # what keeps a small `pub fn` its symbol.
     args3 = RB.cargo_args(rc(3), crate; windows = false)
     @test "profile.dev.opt-level=3" in config(args3) && "profile.dev.incremental=true" in config(args3)
+    # ...and it is stated a second time where no configuration file can undo
+    # it: `build.incremental` overrides every profile's own setting.
+    @test "build.incremental=true" in config(args3) && "build.incremental=false" in config(args)
     @test "profile.dev.debug-assertions=false" in config(args3) && "profile.dev.overflow-checks=false" in config(args3)
     @test "profile.dev.debug=2" in config(args3)
 
@@ -367,6 +370,14 @@ end
     end
     env = Dict(split(e, '='; limit = 2)[1] => split(e, '='; limit = 2)[2] for e in cmd.env)
     @test split(env["CARGO_ENCODED_RUSTFLAGS"], '\x1f') == vcat(["-g"], ours)
+    # Whether the build is incremental is the profile's to say. The two
+    # variables that override every profile do not reach cargo: a CI
+    # environment sets CARGO_INCREMENTAL=0, and with it an optimized build
+    # gave a third of the fixture's functions no symbol (2026-11-20).
+    for var in ("CARGO_INCREMENTAL", "CARGO_BUILD_INCREMENTAL")
+        inherited = withenv(() -> RB._cargo(tc, ["metadata"], tempdir()), var => "0")
+        @test !any(e -> startswith(e, var * "="), inherited.env)
+    end
     without = withenv(() -> RB._cargo(tc, ["metadata"], tempdir(); keep_merged = false), "RUSTFLAGS" => nothing, "CARGO_ENCODED_RUSTFLAGS" => nothing)
     @test any(e -> e == "CARGO_ENCODED_RUSTFLAGS=" * join(plain, '\x1f'), without.env)
     @test !haskey(env, "RUSTFLAGS") && env["CARGO_TERM_COLOR"] == "never"
@@ -432,7 +443,7 @@ end
         a = RB.find_artifacts(messages(), crate)
         @test a.library == so && a.fresh
         # The IR is beside the crate's rlib, under its name: THIS crate's, told from its namesake by manifest.
-        @test a.ir == "/t/debug/deps/rb_fix-3cb2bb3e.ll"
+        @test replace(a.ir, '\\' => '/') == "/t/debug/deps/rb_fix-3cb2bb3e.ll"
         # Either one recompiled is "built".
         @test !RB.find_artifacts(messages(; root_fresh = false), crate).fresh
         @test !RB.find_artifacts(messages(; crate_fresh = false), crate).fresh
@@ -444,6 +455,78 @@ end
         @test occursin("no library for the crate `rb_fix`", rust_error(() -> RB.find_artifacts(no_crate, crate)))
         @test occursin("no artifact at all", rust_error(() -> RB.find_artifacts("", crate)))
     end
+end
+
+@testset "cargo: where rustc wrote a crate's files" begin
+    # Which directory a crate's own files land in is cargo's business and has
+    # changed: `deps/` for every crate through cargo 1.99, and
+    # `build/<package>/<hash>/out/` per unit from 1.100. The build looked in
+    # `deps/` and failed on the first build with a new cargo (2026-11-20). It
+    # reads the place from the names cargo reports, under either layout.
+    crate_named(dir) = RB.Crate("rb-fix", "rb_fix", joinpath(dir, "crate", "Cargo.toml"), joinpath(dir, "crate"))
+    function tree(dir, files)
+        for (path, bytes) in files
+            mkpath(dirname(joinpath(dir, path)))
+            write(joinpath(dir, path), bytes)
+        end
+    end
+    artifact(name, types, files, mpath) =
+        "{\"reason\":\"compiler-artifact\",\"manifest_path\":$(repr(mpath)),\"target\":{\"name\":\"$name\"," *
+        "\"crate_types\":$(repr(types)),\"kind\":$(repr(types))},\"filenames\":$(repr(files)),\"fresh\":false}"
+    so = "librb_fix_rb." * Libdl.dlext
+    unix(p) = replace(p, '\\' => '/')
+
+    for (layout, out_crate, out_root, stale_root) in (
+            ("deps/", "target/debug/deps", "target/debug/deps", nothing),
+            ("build/<package>/<hash>/out/", "target/debug/build/rb-fix/aaaa1111/out", "target/debug/build/rb_fix_rb/bbbb2222/out",
+             "target/debug/build/rb_fix_rb/cccc3333/out"))
+        mktempdir() do dir
+            crate = crate_named(dir)
+            tree(dir, ["crate/Cargo.toml" => "",
+                       "$out_crate/librb_fix-aaaa1111.rlib" => "the build's", "$out_crate/rb_fix-aaaa1111.ll" => "ir",
+                       "$out_root/$so" => "the library", "$out_root/rb_fix_rb.ll" => "root ir",
+                       "target/debug/$so" => "the library"])
+            profile = joinpath(dir, "target", "debug")
+            # The directories that exist, and only those.
+            @test (layout, unix.(RB._output_dirs(profile))) ==
+                  (layout, unique!(unix.([joinpath(dir, out_crate), joinpath(dir, out_root)])) |> sort!)
+            # The root crate's IR is beside the file the reported library is a copy of.
+            @test (layout, unix(RB.root_ir(joinpath(profile, so), crate))) == (layout, unix(joinpath(dir, out_root, "rb_fix_rb.ll")))
+            if stale_root !== nothing
+                # A profile directory keeps one unit per set of flags it was
+                # built with: another opt-level left a library and an IR file
+                # of the same names. The one that is the reported library wins.
+                tree(dir, ["$stale_root/$so" => "an older build", "$stale_root/rb_fix_rb.ll" => "older ir"])
+                @test unix(RB.root_ir(joinpath(profile, so), crate)) == unix(joinpath(dir, out_root, "rb_fix_rb.ll"))
+                # With nothing to tell them apart it is not guessed.
+                write(joinpath(profile, so), "neither")
+                @test RB.root_ir(joinpath(profile, so), crate) === nothing
+            end
+
+            # The build's own message names the crate's library with its hash: the IR is beside it.
+            built = artifact("rb_fix", ["lib"], [joinpath(dir, out_crate, "librb_fix-aaaa1111.rlib"),
+                                                 joinpath(dir, out_crate, "librb_fix-aaaa1111.rmeta")], crate.manifest) * "\n" *
+                    artifact("rb_fix_rb", ["dylib"], [joinpath(profile, so)], joinpath(dir, "root", "Cargo.toml"))
+            @test unix(RB.find_artifacts(built, crate).ir) == unix(joinpath(dir, out_crate, "rb_fix-aaaa1111.ll"))
+            # The compile that lists the crate's functions is reported as the
+            # copy cargo makes for the user (no hash) beside the hashed
+            # `.rmeta`: the hash and the directory are read from that name.
+            listing_dir = layout == "deps/" ? out_crate : "target/debug/build/rb-fix/dddd4444/out"
+            tree(dir, ["target/debug/librb_fix.rlib" => "the listing's",
+                       "$listing_dir/librb_fix-dddd4444.rlib" => "the listing's", "$listing_dir/rb_fix-dddd4444.ll" => "listing ir"])
+            listed = artifact("rb_fix", ["lib"], [joinpath(profile, "librb_fix.rlib"),
+                                                  joinpath(dir, listing_dir, "librb_fix-dddd4444.rmeta")], crate.manifest)
+            @test (layout, unix(RB._crate_ir(listed, crate))) == (layout, unix(joinpath(dir, listing_dir, "rb_fix-dddd4444.ll")))
+            # Only the copy named: the file it is a copy of is found, by content, among every unit's.
+            only_copy = artifact("rb_fix", ["lib"], [joinpath(profile, "librb_fix.rlib")], crate.manifest)
+            @test (layout, unix(RB._crate_ir(only_copy, crate))) == (layout, unix(joinpath(dir, listing_dir, "rb_fix-dddd4444.ll")))
+            # A namesake from another manifest is not this crate.
+            other = artifact("rb_fix", ["lib"], [joinpath(dir, listing_dir, "librb_fix-dddd4444.rmeta")], joinpath(dir, "vendor", "Cargo.toml"))
+            @test RB._crate_ir(other, crate) === nothing
+        end
+    end
+    # No profile directory at all is no directory, not an error.
+    @test isempty(RB._output_dirs(joinpath(tempdir(), "no-such-target-$(getpid())")))
 end
 
 @testset "cargo: the tools are the user's, or the ones named" begin

@@ -1974,6 +1974,30 @@ Measured (Linux x86-64, rustc 1.97.1): the fixture crate at opt-level 0 and
 Hub's `rustlibm` (126 thunks, 1,063 checks) and `rustsemver` (57 thunks, 59
 checks) re-wrapped and passing.
 
+**What CI found (2026-11-20).** The first run on GitHub's runners failed in
+two ways the dev box could not show, both about the toolchain being the
+user's:
+
+- *cargo 1.100 moved a build's files.* Every crate's files used to be in
+  `target/debug/deps/`; from 1.100 each unit has
+  `target/debug/build/<package>/<hash>/out/`. The build found the root
+  crate's IR by joining its name to the wrapped crate's directory, and failed
+  on its first line. It now reads each place from the hashed file name cargo
+  reports, and finds the root crate's IR beside the file the reported
+  library is a copy of (`_output_dirs`, `root_ir`, `_crate_ir`).
+- *The runners set `CARGO_INCREMENTAL=0`*, which overrides every profile.
+  The build states `incremental = true` for an optimized build because that
+  is what keeps a small `pub fn` its symbol (§18), so in CI a third of the
+  fixture's functions lost theirs. The front end still wrapped them (as
+  functions with no symbol, §22), which is the design holding; what failed
+  were tests that state which functions have a symbol. The variable no
+  longer reaches cargo, and `build.incremental` is stated on the command
+  line, where no configuration file undoes it.
+
+Both are reproduced on the dev box now (`rustup` toolchains 1.99.0 and
+1.100.0 beside the default 1.97.1, with `CARGO_INCREMENTAL=0`), and the three
+live tests pass on all three.
+
 Not built, and not run: Linux AArch64 and Windows (no Rust target for either
 is on the dev box; nothing here is x86-64's alone by design, and nothing has
 shown it); object files written by libJLCS itself, so that compiling thunks

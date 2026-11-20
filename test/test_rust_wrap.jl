@@ -442,7 +442,7 @@ end
         @test occursin("const THUNKS_SHA = $(repr(sha))", with)
         # Which thunks library there is changes those lines and nothing else: the calls are the same text.
         cut(t) = replace(t, r"^# Generated: .*$"m => "", r"(?s)# (No thunks library|The calls a plain `ccall` cannot make).*?const THUNKS_SHA = [^\n]*\n" => "",
-                         lib => "/somewhere/librb_fix.so")
+                         repr(lib) => repr("/somewhere/librb_fix.so"))
         @test cut(with) == cut(text) && with != text
         @test [r["tier"] for r in report2] == [r["tier"] for r in report]
 

@@ -371,8 +371,11 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         @test ccall(at("rb_fix::into_f64::<f32>"), Float64, (Float32,), 2.5f0) == 2.5
         # The compile that lists the crate's functions is a second IR file of
         # the crate; the build's own is untouched, and nothing is linked from it.
-        deps = joinpath(_RBL_DIR, "build", "rust", "target", "debug", "deps")
-        @test count(n -> startswith(n, "rb_fix-") && endswith(n, ".ll"), readdir(deps)) >= 2
+        # (Which directory holds them is cargo's choice and changed in 1.100.)
+        profile = joinpath(_RBL_DIR, "build", "rust", "target", "debug")
+        irs = [n for d in RepliBuild.RustBuild._output_dirs(profile) for n in readdir(d)
+               if startswith(n, "rb_fix-") && endswith(n, ".ll")]
+        @test length(irs) >= 2
         @test crate_tree == _rbl_tree(joinpath(_RBL_DIR, "crate"))
     end
 
