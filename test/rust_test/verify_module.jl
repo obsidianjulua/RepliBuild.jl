@@ -10,6 +10,7 @@
 # One `PROBE <name>: PASS|FAIL …` line per case, then `PROBE_DONE`.
 
 using RepliBuild
+using Libdl
 
 const M = include(abspath(ARGS[1]))
 const RT = RepliBuild.RustRuntime
@@ -318,4 +319,16 @@ case("a_destructor_is_not_called_by_name") do
     (e isa ErrorException, occursin("destructor", M.UNSUPPORTED[:Guard_Drop_drop])) == (true, true)
 end
 
+# Where the thunks came from, asked after every call above was made: the
+# thunks library `wrap` compiled (then nothing was JIT'd here and the dialect
+# library was never loaded), or, when that library is absent, the JIT.
+let lib = M._rb_library()
+    jlcs = any(p -> occursin("libJLCS", p), Libdl.dllist())
+    if lib.thunks_handle != C_NULL
+        println("PROBE thunks_from: ", (lib.session === nothing && !jlcs) ? "PASS aot" :
+                "FAIL a thunk was compiled here (session $(lib.session !== nothing), libJLCS loaded $jlcs)")
+    else
+        println("PROBE thunks_from: ", lib.session !== nothing ? "PASS jit" : "FAIL no thunk was used")
+    end
+end
 println("PROBE_DONE")

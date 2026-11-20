@@ -175,9 +175,12 @@ apply: flags come from CMake.
 ## `[rust]`
 
 Present: the project is a Rust crate, and cargo builds it.
+[Rust crates](rust.md) is the guide; `discover` writes this section for a
+folder that holds a `Cargo.toml`.
 
-**In progress.** `build`, `wrap` and `use` work on a Rust crate's public
-functions, `#[inline]` ones included:
+`build`, `wrap` and `use` work on a Rust crate's public functions,
+`#[inline]` ones included, on Linux x86-64 (AArch64 and Windows are not run
+yet):
 
 - numbers, `bool`, `char`, strings and slices in; records, tuples, enums and
   `Option` out;
@@ -222,6 +225,10 @@ entry: its `#[inline]` functions are found by the build.
 The crate is built as it is: it needs no `extern "C"`, no `#[repr(C)]` and no
 other change. `cargo` and `rustc` must be installed; `REPLIBUILD_TOOL_CARGO`
 and `REPLIBUILD_TOOL_RUSTC` name particular ones.
+
+`wrap` compiles the calls a plain Julia call cannot make into
+`lib<name>_thunks.so` beside the library, whenever it can; there is no key
+for it. Without that file the module compiles them at first use.
 
 An unknown key or a wrong type in `[rust]` is an error. In a Rust project
 `[compile]`, `[link]` and `[types]` do not apply, and `[rust]` cannot be

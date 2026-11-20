@@ -61,6 +61,12 @@ end
         @test length(mods) == 1 && mods[1].args[2] === :Lean
         @test occursin("const LIBRARY_SHA = \"$("0"^64)\"", text)
         @test occursin("const LIBRARY_PATH = let baked = \"/somewhere/liblean.so\"", text)
+        # With no thunks library the module says so, and compiles its thunks
+        # at first use. It states the thunk convention its calls are written
+        # for, which the runtime checks before any call.
+        @test occursin("const THUNKS_LIBRARY_PATH = \"\"\n", text) && occursin("const THUNKS_SHA = \"\"\n", text)
+        @test occursin("RepliBuild.RustRuntime.Library(LIBRARY_PATH; thunks = THUNKS_LIBRARY_PATH,", text)
+        @test occursin("convention = \"$(RepliBuild.RustThunks.CONVENTION)\"", text)
         # Every function of the library is in the module, wrapped or as a stub that says why.
         @test length(report) == 31 && allunique(r["name"] for r in report)
         @test count(r -> r["tier"] == "unsupported", report) == 3
@@ -110,6 +116,11 @@ end
     add0 = body(text0, "add")
     @test occursin("RepliBuild.RustRuntime.invoke(_rb_library(), RepliBuild.RustRuntime.thunk(_THUNKS[", add0)
     @test occursin(", true, _slots, _ret_p)", add0) && !occursin("ccall(", add0)
+    # The thunk's slots: one per parameter, then the function's own address,
+    # which the thunk calls. The loader's address of the symbol, here.
+    @test occursin(r"_slots = Base\.Ptr\{Base\.Cvoid\}\[Base\.Ptr\{Base\.Cvoid\}\(Base\.unsafe_convert\(Base\.Ptr\{Base\.UInt32\}, _v1\)\), Base\.Ptr\{Base\.Cvoid\}\(Base\.unsafe_convert\(Base\.Ptr\{Base\.UInt32\}, _v2\)\), Base\.cglobal\(\(:_R\w+4lean3add, LIBRARY_PATH\)\)\]", add0)
+    # A function with no parameter still has the one slot.
+    @test occursin(r"_slots = Base\.Ptr\{Base\.Cvoid\}\[Base\.cglobal\(\(:_R\w+4lean5hello, LIBRARY_PATH\)\)\]", body(text3, "hello"))
     @test occursin(", false, _slots, _ret_p)", body(text3, "maybe"))
     @test occursin(", true, _slots, _ret_p)", body(text3, "checked_div"))
 end
@@ -326,7 +337,12 @@ end
     address = only(f for f in md["functions"] if f["path"] == "rb_fix::small")["address"]
     @test occursin("ccall(Base.unsafe_load(Base.cglobal((:$address, LIBRARY_PATH), Base.Ptr{Base.Cvoid})), Base.UInt32, (Base.UInt32,), ", small)
     @test !occursin("4small, LIBRARY_PATH", small)
-    @test occursin("RepliBuild.RustRuntime.thunk(_THUNKS[", body(text, "sum_diff")) && !occursin("cglobal", body(text, "sum_diff"))
+    # Through a thunk, the address the thunk is handed is the one the static holds, and never the name.
+    sum_diff = body(text, "sum_diff")
+    sd_address = only(f for f in md["functions"] if f["path"] == "rb_fix::sum_diff")["address"]
+    @test occursin("RepliBuild.RustRuntime.thunk(_THUNKS[", sum_diff)
+    @test occursin(", Base.unsafe_load(Base.cglobal((:$sd_address, LIBRARY_PATH), Base.Ptr{Base.Cvoid}))]", sum_diff)
+    @test !occursin("8sum_diff, LIBRARY_PATH", sum_diff)
     @test occursin(", true, _slots, _ret_p)", body(text, "divide"))                    # it may panic: the catching frame
     @test occursin("function Named_rename(a1::Base.Union{Named,Base.Ptr}, a2::Base.AbstractString)", body(text, "Named_rename"))
     @test occursin("return Tag(_RbRaw(), ", body(text, "Tag_Clone_clone"))             # a clone is a value of its own
@@ -395,4 +411,80 @@ end
     @test !haskey(old_reasons, "rec_sum_ref") && !haskey(old_reasons, "flag") && !haskey(old_reasons, "check")
     @test !occursin("mutable struct", old_text) && !occursin("_rb_take!", old_text)
     @test !any(a -> a isa Expr && a.head in (:incomplete, :error), Meta.parseall(old_text).args)
+end
+
+@testset "Rust wrapper: thunks compiled ahead of time" begin
+    md = RepliBuild._read_json(rust_fixture("owned_o3.metadata.json"))
+    (text, report) = GR.generate(md; module_name = "RbFix", library_path = "/somewhere/librb_fix.so")
+    through = [String(r["symbol"]) for r in report if r["tier"] in ("thunk", "guarded")]
+    @test length(through) >= 20
+
+    # The stage hands the compiler exactly the functions the wrapper calls
+    # through a thunk, and the module then names the library it wrote, by the
+    # file beside it first, with the hash of the file it was generated with.
+    mktempdir() do dir
+        lib = joinpath(dir, "librb_fix.so")
+        write(lib, "not a library")
+        asked = Ref{Vector{String}}()
+        function stand_in(library, metadata, symbols)
+            asked[] = collect(String, symbols)
+            out = joinpath(dirname(library), RepliBuild.RustThunks.aot_library_name(library))
+            write(out, "thunks")
+            return (out, asked[], Dict{String,String}())
+        end
+        (path, sha, note) = GR.compile_thunks(lib, md, report; compile = stand_in)
+        @test asked[] == through
+        @test path == joinpath(dir, "librb_fix_thunks.so") && isfile(path)
+        @test sha == bytes2hex(RepliBuild.SHA.sha256("thunks"))
+        @test occursin("librb_fix_thunks.so", note) && occursin("$(length(through)) compiled ahead of time", note)
+        (with, report2) = GR.generate(md; module_name = "RbFix", library_path = lib, thunks_library = path, thunks_sha = sha)
+        @test occursin("const THUNKS_LIBRARY_PATH = let baked = $(repr(path))", with)
+        @test occursin("const THUNKS_SHA = $(repr(sha))", with)
+        # Which thunks library there is changes those lines and nothing else: the calls are the same text.
+        cut(t) = replace(t, r"^# Generated: .*$"m => "", r"(?s)# (No thunks library|The calls a plain `ccall` cannot make).*?const THUNKS_SHA = [^\n]*\n" => "",
+                         lib => "/somewhere/librb_fix.so")
+        @test cut(with) == cut(text) && with != text
+        @test [r["tier"] for r in report2] == [r["tier"] for r in report]
+
+        # A thunk the wrapper calls that the library does not have, or a
+        # compile that fails, is no thunks library and a wrapper that compiles
+        # at first use: never a library that lacks one, and never a failed wrap.
+        short(library, metadata, symbols) = (stand_in(library, metadata, symbols)[1], asked[][2:end], Dict(asked[][1] => "for the test"))
+        (path, sha, note) = GR.compile_thunks(lib, md, report; compile = short)
+        @test (path, sha) == ("", "") && !isfile(joinpath(dir, "librb_fix_thunks.so"))
+        @test occursin("not compiled ahead of time", note) && occursin("for the test", note) && occursin("at first use", note)
+        write(joinpath(dir, "librb_fix_thunks.so"), "an older build's")
+        (path, sha, note) = GR.compile_thunks(lib, md, report; compile = (a...) -> error("no llc here"))
+        @test (path, sha) == ("", "") && occursin("no llc here", note)
+        @test !isfile(joinpath(dir, "librb_fix_thunks.so"))          # an older build's thunks do not stay
+
+        # A wrapper of plain calls has no thunks library, and an older one is removed.
+        plain = [Dict{String,Any}(r..., "tier" => "ccall") for r in report]
+        write(joinpath(dir, "librb_fix_thunks.so"), "an older build's")
+        @test GR.compile_thunks(lib, md, plain; compile = (a...) -> error("not asked")) == ("", "", "")
+        @test !isfile(joinpath(dir, "librb_fix_thunks.so"))
+    end
+end
+
+@testset "Rust runtime: a wrapper of another thunk convention is refused" begin
+    RR = RepliBuild.RustRuntime
+    # Before the library is opened: the path here names nothing.
+    refused = try
+        RR.Library("/nowhere/librb_fix.so")
+        ""
+    catch e
+        sprint(showerror, e)
+    end
+    @test occursin("rust-thunk-1", refused) && occursin(RepliBuild.RustThunks.CONVENTION, refused)
+    @test occursin("RepliBuild.wrap", refused)
+    # A thunks library that is not the one the wrapper was generated with is not opened.
+    mktempdir() do dir
+        t = joinpath(dir, "libx_thunks.so")
+        write(t, "another build's")
+        @test RR._open_thunks("/nowhere/libx.so", "", "") == C_NULL
+        @test RR._open_thunks("/nowhere/libx.so", joinpath(dir, "absent.so"), "") == C_NULL
+        @test (@test_logs (:warn, r"not the thunks library") RR._open_thunks("/nowhere/libx.so", t, "0"^64)) == C_NULL
+        # The right file that is no library does not load, and that is not an error either.
+        @test RR._open_thunks("/nowhere/libx.so", t, bytes2hex(RepliBuild.SHA.sha256("another build's"))) == C_NULL
+    end
 end

@@ -1867,11 +1867,125 @@ callback that takes a string, a slice or a record by value; a Julia type as
 the implementor of a Rust trait; a function that RETURNS `&dyn Trait`; a
 `dyn` of more than one trait.
 
-## 24. The walk from here
+## 24. Shipping (built 2026-11-19)
 
-11. **Shipping**: AOT thunks, `discover` on a Cargo project, the doctor,
-    a user guide page, Windows and AArch64.
+| §15 step | Where | What it does |
+|---|---|---|
+| 11a. A thunk that names no function | `RustThunks.thunk`, the dialect's `jlcs.native_call` with no `callee` | the thunk calls the address it is handed, in the slot after its parameters |
+| 11b. Thunks ahead of time | `RustThunks.aot_library`, `GeneratorRust.compile_thunks`, `RustRuntime.Library` | `wrap` compiles the thunks the module calls into `lib<name>_thunks.so`; the module uses it, or compiles at first use without it |
+| 11c. The doctor | `EnvironmentDoctor` (`_check_rust_tool`, `_check_rust_demangler`, `rust_ready`) | cargo, rustc and a demangler that reads rustc's names; `build` asks a Rust project about those and nothing of C or C++ |
+| 11d. `discover` | `RustBuild.discover_project`, `discovered_crate`, `project_text` | a folder with a `Cargo.toml` gets a project file that names the crate; cargo is asked, nothing is scanned |
+| 11e. The guide | `docs/src/rust.md` | setup, the recipe, how a crate's values look in Julia, with every example run |
+
+**A thunk is the shape of a call, and the caller says which function.** A
+thunk used to call its function by name. That is right for a JIT, which was
+handed the library, and was already awkward there: a function the library has
+no symbol for (§22) had to be registered on the JIT under its name, at the
+address the library's static holds. Compiled ahead of time it cannot work at
+all, since no loader binds a name the library does not export. So the thunk
+takes the function's ADDRESS, as one more slot after the parameters, and
+calls through it:
+
+```mlir
+func.func @<symbol>_rbthunk(%args: !llvm.ptr, %ret: !llvm.ptr) {
+  ...                                               // one slot per parameter, as before
+  %sf = llvm.getelementptr %args[2] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr
+  %fn = llvm.load %sf : !llvm.ptr -> !llvm.ptr
+  %r = jlcs.native_call %fn, %v1, %v2 : (!llvm.ptr, i32, i32) -> i32
+  ...
+}
+```
+
+The dialect's op takes that form: with no `callee` attribute its first
+operand is the function's address, `arg_attrs` has one dictionary per
+argument of the call (the address is not one), and the lowering is the same
+call made through the pointer, with no declaration to retype. The dialect's
+ABI version is 3 for it. The module's side is one expression per call: the
+loader's address of the symbol (`cglobal`), or, for a function with no
+symbol, the value of the library's static, which is what a plain call of
+such a function already used.
+
+What follows from a thunk module that names nothing:
+
+- it has nothing for a loader or a JIT to resolve, so there is no symbol to
+  look up first and nothing for ORC to wait on;
+- the same text is JIT'd or compiled ahead of time, and a function the
+  library exports and one it does not are called the same way;
+- the ahead-of-time library depends on NOTHING: not the crate's library, not
+  libJLCS (a Rust thunk makes a plain call and needs no exception buffer),
+  not the C library. It is linked `-nostdlib` by the compiler and linker the
+  C bucket uses, which come with Julia. Measured: no `NEEDED` entry, no
+  undefined symbol, 29 KB for the fixture's 114 thunks.
+
+**`wrap` compiles the thunks, with no key to ask for it.** Which functions
+call through a thunk is the generator's answer, so the stage runs after a
+first generation and hands the compiler exactly that set
+(`compile_thunks`); the text that names the library is a second generation,
+whose calls are the same text. The module bakes the file's hash. At run time
+`RustRuntime.Library` opens the thunks library when it is there and is that
+file; a thunk it does not have, or no library at all, is the JIT, as
+before. So the outcomes are: a wrapper of plain calls (no thunks library, no
+JIT), a wrapper with its thunks library (no JIT, and libJLCS is never
+loaded: the live test asserts that of the child process), and a wrapper
+whose thunks could not be compiled when it was written (the JIT at first
+use). The last is not a failed wrap; `wrap` says which it is.
+
+Compiling needs libJLCS and LLVM's `llc` on the machine that runs `wrap`
+(the object file is written by `llc`, as for C++ thunks). A machine with
+only the prebuilt libJLCS has no `llc` and gets the JIT wrapper.
+
+**A wrapper says which convention its calls are written for.** A module
+generated before this hands its thunks one slot fewer, which a thunk of this
+convention would read as the function's address. The module passes the
+convention's name (`rust-thunk-2`) when it opens its library, and one that
+passes another, or none, is refused there, before any call, with a message
+that says to wrap again. Measured on the Hub's two packages as they stood.
+
+**The doctor asks the programs the build will start.** `cargo -V` and
+`rustc -vV` through `RustBuild.tool`, so `REPLIBUILD_TOOL_CARGO` and
+`REPLIBUILD_TOOL_RUSTC` are honoured, and `c++filt` is given one of rustc's
+v0 names to read: every name in a Rust wrapper comes from a demangled
+symbol, and a binutils older than 2.36 answers with the name it was given.
+The three are optional probes (a machine without Rust is not a broken one).
+`rust_ready` is those three and the two readers every wrapper needs, and
+`build` asks a `[rust]` project about exactly that: it used to ask the C and
+C++ doctor first and refuse a crate where the C compiler's headers were
+missing.
+
+**`discover` asks cargo and scans nothing.** A folder with a `Cargo.toml`
+and no project file is a Rust crate. `cargo metadata` says which packages
+the manifest has; the manifest's own library is the crate, a workspace's one
+library crate is named with `[rust] package`, several are the user's choice
+(the error lists them and shows the file to write), and a binary is refused
+as a binary, whatever its siblings are (cargo answers for the whole
+workspace from any member's manifest). The file it writes is the crate's
+name and the `[rust]` section, nothing else. An existing `[rust]` project is
+never rescanned, with `force` too: the scan looks for C and C++ sources, and
+would write a C++ project with none.
+
+Found on the way: the first `discover` of a session spent 87 seconds
+compiling before it ran, whatever it was asked to do. Its last step calls
+`build` or `register`, known at compile time, so compiling `discover`
+compiled all of `build`, `wrap` and `register`. They are reached through
+`invokelatest` now: 6 seconds, the scan's own code.
+
+Measured (Linux x86-64, rustc 1.97.1): the fixture crate at opt-level 0 and
+3 through the JIT and through the thunks library, every probe the same; the
+Hub's `rustlibm` (126 thunks, 1,063 checks) and `rustsemver` (57 thunks, 59
+checks) re-wrapped and passing.
+
+Not built, and not run: Linux AArch64 and Windows (no Rust target for either
+is on the dev box; nothing here is x86-64's alone by design, and nothing has
+shown it); object files written by libJLCS itself, so that compiling thunks
+needs no `llc`; `show` for a Rust record (it prints as its bytes); the
+registry's own toolchain check for a Rust project is skipped, and `build`'s
+is what runs.
+
+## 25. The walk from here
+
+The roadmap of §15 is walked. What is left is in the lists at the end of
+§21 to §24: each is a piece of its own, and none is needed for the others.
 
 Before any of this reaches a machine without a local libJLCS: the dialect's
-ABI version is 2, and the published artifact is version 1
+ABI version is 3, and the published artifact is version 1
 (`deps/jlcs_jll/README.md` has the steps).

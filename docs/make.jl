@@ -24,6 +24,7 @@ makedocs(;
             "Where the source comes from" => "dependencies.md",
             "Several libraries" => "libraries.md",
             "CMake projects" => "graph.md",
+            "Rust crates" => "rust.md",
             "Header-only libraries" => "header-only.md",
         ],
         "Use the wrapper" => [

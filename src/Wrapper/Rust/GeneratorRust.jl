@@ -47,11 +47,13 @@
 module GeneratorRust
 
 using Dates
+import SHA
 
 import ..ConfigurationManager
 import ..ConfigurationManager: RepliBuildConfig, get_output_path, get_library_name, get_module_name
 import ..RustABI
 import ..RustGlue
+import ..RustThunks
 import .._read_json
 
 export generate, wrap_project
@@ -1111,7 +1113,14 @@ function emit_function(ctx::Ctx, row::AbstractDict, name::String, index::Int)::E
         held = join(vcat(keep, ["_v$j" for j in eachindex(vals)], ["_ret"]), " ")
         println(io, "    GC.@preserve $held begin")
         println(io, "        _ret_p = Base.Ptr{Base.Cvoid}(Base.unsafe_convert(Base.Ptr{Base.NTuple{$(max(rsize, 1)),Base.UInt8}}, _ret))")
-        slots = join(("Base.Ptr{Base.Cvoid}(Base.unsafe_convert(Base.Ptr{$(v[1])}, _v$j))" for (j, v) in enumerate(vals)), ", ")
+        # One slot per parameter, then the function's own address, which the
+        # thunk calls: where the loader put it, or, for a function the library
+        # has no symbol for, where the library's static says it is.
+        callee = haskey(row, "address") ?
+            "Base.unsafe_load(Base.cglobal(($(_sym(row["address"])), LIBRARY_PATH), Base.Ptr{Base.Cvoid}))" :
+            "Base.cglobal(($(_sym(row["symbol"])), LIBRARY_PATH))"
+        slots = join(vcat(["Base.Ptr{Base.Cvoid}(Base.unsafe_convert(Base.Ptr{$(v[1])}, _v$j))" for (j, v) in enumerate(vals)],
+                          [callee]), ", ")
         println(io, "        _slots = Base.Ptr{Base.Cvoid}[$slots]")
         println(io, "        RepliBuild.RustRuntime.invoke(_rb_library(), RepliBuild.RustRuntime.thunk(_THUNKS[$index], _rb_library(), ",
                 repr(String(row["symbol"])), "), $guarded, _slots, _ret_p)")
@@ -1566,17 +1575,24 @@ function _emit_statics(ctx::Ctx, statics, taken::Set{String})
 end
 
 """
-    generate(metadata; module_name, library_path, generator = "") -> (text, report)
+    generate(metadata; module_name, library_path, generator = "",
+             thunks_library = "", thunks_sha = "") -> (text, report)
 
 The wrapper module for a Rust library, from its build's metadata (parsed).
 `report` lists, per function, its Julia name and how it calls
 (`"ccall"`, `"thunk"`, `"guarded"`, `"unsupported"` with a reason).
 
+`thunks_library` is the library of thunks compiled ahead of time
+(`RustThunks.aot_library`) and `thunks_sha` its hash; with neither, the
+module compiles its thunks the first time one is called. The calls
+themselves are the same text either way.
+
 The text is a function of the metadata and the names given: rows are taken in
 the metadata's order (path, then symbol), types by name.
 """
 function generate(metadata::AbstractDict; module_name::AbstractString, library_path::AbstractString,
-                  generator::AbstractString = "")
+                  generator::AbstractString = "", thunks_library::AbstractString = "",
+                  thunks_sha::AbstractString = "")
     get(metadata, "language", "") == "rust" || error("GeneratorRust.generate: the metadata is not a Rust library's")
     ctx = Ctx(metadata)
     type_names = Set(values(ctx.names))
@@ -1632,6 +1648,18 @@ function generate(metadata::AbstractDict; module_name::AbstractString, library_p
     println(io, "const BUILD_GENERATOR = $(repr(String(generator)))")
     println(io, "const RUST_TOOLCHAIN = $(repr(String(metadata["toolchain"]["rustc"])))")
     println(io)
+    if isempty(thunks_library)
+        println(io, "# No thunks library: a call that needs a thunk has it compiled at first use.")
+        println(io, "const THUNKS_LIBRARY_PATH = \"\"")
+    else
+        println(io, "# The calls a plain `ccall` cannot make, compiled when this file was generated.")
+        println(io, "const THUNKS_LIBRARY_PATH = let baked = $(repr(String(thunks_library)))")
+        println(io, "    sibling = Base.joinpath(Base.@__DIR__, Base.basename(baked))")
+        println(io, "    Base.isfile(sibling) ? sibling : baked")
+        println(io, "end")
+    end
+    println(io, "const THUNKS_SHA = $(repr(String(thunks_sha)))")
+    println(io)
     println(io, "struct _RbRaw end")
     println(io, "_rb_address(x::Base.Ptr) = Base.Ptr{Base.Cvoid}(x)")
     println(io, "_rb_address(x::Base.RefValue{T}) where {T} = Base.Ptr{Base.Cvoid}(Base.unsafe_convert(Base.Ptr{T}, x))")
@@ -1640,7 +1668,8 @@ function generate(metadata::AbstractDict; module_name::AbstractString, library_p
     println(io, "function _rb_library()")
     println(io, "    lib = _LIBRARY[]")
     println(io, "    lib === nothing || return lib")
-    println(io, "    return _LIBRARY[] = RepliBuild.RustRuntime.Library(LIBRARY_PATH)")
+    println(io, "    return _LIBRARY[] = RepliBuild.RustRuntime.Library(LIBRARY_PATH; thunks = THUNKS_LIBRARY_PATH,")
+    println(io, "                                                        thunks_sha = THUNKS_SHA, convention = $(repr(RustThunks.CONVENTION)))")
     println(io, "end")
     println(io, "const _THUNKS = [Base.RefValue{Base.Ptr{Base.Cvoid}}(Base.C_NULL) for _ in 1:$(length(rows))]")
     println(io, "# One call at a time gives the library a Julia function to call back: what the library's")
@@ -1730,11 +1759,47 @@ function _assert_parses(text::AbstractString, where::AbstractString)
 end
 
 """
+    compile_thunks(library, metadata, report; compile = RustThunks.aot_library) -> (path, sha, note)
+
+Compile ahead of time the thunks of the functions `report` says call through
+one, into a library beside `library`. `path` and `sha` are that library's, or
+`""` when there is none, and `note` is the line `wrap` prints about it.
+
+A wrapper with no thunk has no thunks library. One whose thunks could not be
+compiled (no dialect library, no `llc`, no linker) has none either, and is
+not a failed wrap: the module compiles them at the first call that needs one,
+which needs the dialect library then. `compile` is `RustThunks.aot_library`;
+a test passes a stand-in.
+"""
+function compile_thunks(library::AbstractString, metadata::AbstractDict, report; compile = RustThunks.aot_library)
+    stale = joinpath(dirname(String(library)), RustThunks.aot_library_name(library))
+    symbols = String[String(r["symbol"]) for r in report if r["tier"] in ("thunk", "guarded")]
+    if isempty(symbols)
+        rm(stale; force = true)
+        return ("", "", "")
+    end
+    try
+        (path, made, skipped) = compile(library, metadata, symbols)
+        missed = setdiff(symbols, made)
+        isempty(missed) || error("$(length(missed)) function(s) the wrapper calls through a thunk have none " *
+                                 "(first: $(first(missed)): $(get(skipped, first(missed), "no reason given")))")
+        sha = bytes2hex(open(SHA.sha256, path))
+        kb = round(filesize(path) / 1024; digits = 1)
+        return (String(path), sha, "thunks: $(basename(path)) ($(length(made)) compiled ahead of time, $kb KB)")
+    catch e
+        rm(stale; force = true)
+        why = first(split(sprint(showerror, e), '\n'))
+        return ("", "", "thunks: not compiled ahead of time ($why); the module compiles them at first use")
+    end
+end
+
+"""
     wrap_project(config) -> String
 
-`RepliBuild.wrap` for a `[rust]` project: read the build's metadata, write
-`<[paths] output>/<Module>.jl`, and say what was wrapped and what was not.
-Returns the wrapper's path.
+`RepliBuild.wrap` for a `[rust]` project: read the build's metadata, compile
+the thunks the wrapper calls into a library of their own (`compile_thunks`),
+write `<[paths] output>/<Module>.jl`, and say what was wrapped and what was
+not. Returns the wrapper's path.
 """
 function wrap_project(config::RepliBuildConfig)::String
     out_dir = get_output_path(config)
@@ -1745,7 +1810,13 @@ function wrap_project(config::RepliBuildConfig)::String
     metadata = _read_json(meta)
     module_name = get_module_name(config)
     version = something(pkgversion(@__MODULE__), "")
+    # Which functions call through a thunk is the generator's answer, so the
+    # thunks are compiled from a first generation and the text that names
+    # their library is the second. The calls are the same in both.
     (text, report) = generate(metadata; module_name, library_path = abspath(library), generator = string(version))
+    (thunks, thunks_sha, note) = compile_thunks(abspath(library), metadata, report)
+    isempty(thunks) || ((text, report) = generate(metadata; module_name, library_path = abspath(library),
+                                                  generator = string(version), thunks_library = thunks, thunks_sha))
     path = joinpath(out_dir, module_name * ".jl")
     _assert_parses(text, path)
     write(path, text)
@@ -1755,6 +1826,7 @@ function wrap_project(config::RepliBuildConfig)::String
     println("  wrapper: $(basename(path)): $(length(report) - get(tiers, "unsupported", 0)) of $(length(report)) functions " *
             "($(get(tiers, "ccall", 0)) plain calls, $(get(tiers, "thunk", 0) + get(tiers, "guarded", 0)) through thunks, " *
             "$(get(tiers, "guarded", 0)) of those may panic)")
+    isempty(note) || println("  ", note)
     reasons = Dict{String,Vector{String}}()
     for r in report
         r["tier"] == "unsupported" && push!(get!(reasons, replace(String(r["reason"]), r"`[^`]*`" => "…"), String[]), String(r["name"]))

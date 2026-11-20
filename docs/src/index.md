@@ -35,7 +35,7 @@ There are three things to do, and the manual is in that order.
 **1. [Set up](install.md).** Install the package and run
 `RepliBuild.check_environment()`. RepliBuild brings some of its tools and
 takes the rest from your system; the page says which. C libraries need almost
-nothing installed. C++ libraries need `clang++`.
+nothing installed. C++ libraries need `clang++`. Rust crates need `cargo`.
 
 **2. Write the recipe.** `replibuild.toml` is the only file you write.
 
@@ -48,6 +48,7 @@ nothing installed. C++ libraries need `clang++`.
 | [Several libraries](libraries.md) | Many sources into one library, a CMake project of several libraries with shared types, or two wrappers that link each other. |
 | [CMake projects](graph.md) | The `[graph]` section in detail. |
 | [Header-only libraries](header-only.md) | Libraries, or parts of an API, that live in headers. |
+| [Rust crates](rust.md) | A Rust crate, wrapped as it is: what cargo builds, the short recipe, and how its values look in Julia. |
 
 **3. Use the wrapper.**
 

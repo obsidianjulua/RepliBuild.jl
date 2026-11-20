@@ -28,8 +28,10 @@ A **Rust front end is in progress** (branch work since 2026-11-19): `build`,
 instantiate` names, through plain `ccall`s and generated thunks
 (`RustThunks`, the dialect's `jlcs.native_call`), ownership included
 (`String`, `Vec`, `Box`, records that hold them, `Result`), with trait
-objects, callbacks and statics. What is left is shipping (AOT thunks,
-`discover`, the doctor, Windows and AArch64). It wraps plain Rust, never `extern "C"`; design
+objects, callbacks and statics; `wrap` compiles the thunks ahead of time,
+`discover` writes the project file for a folder with a `Cargo.toml`, and the
+doctor reports cargo and rustc. Measured on Linux x86-64 only: AArch64 and
+Windows are not run. It wraps plain Rust, never `extern "C"`; design
 and measurements are `docs/updates/RUST_FRONT_END.md`, the rules are under
 "Rust front end" below.
 
@@ -66,6 +68,7 @@ toml = RepliBuild.discover("path/to/project")   # scan, write replibuild.toml
 RepliBuild.build(toml)                          # clang → IR → .so + DWARF metadata
 RepliBuild.wrap(toml)                           # generate julia/<Name>.jl
 RepliBuild.discover("path", build=true, wrap=true)   # all three
+RepliBuild.discover("path/to/crate")            # a Cargo.toml and no replibuild.toml: a [rust] project
 
 RepliBuild.clean(toml); RepliBuild.info(toml)
 RepliBuild.scaffold_package("LuaWrapper"); RepliBuild.check_environment()
@@ -125,10 +128,10 @@ skill drives adding a package.
   the mtime.
 - **`packages/rustlibm` is the Rust reference package** (2026-11-19): the
   `libm` crate from its pinned commit, `[rust] dependency`, in `index.toml`.
-  `use("rustlibm")` wraps the 114 functions the library exports (104 plain
-  calls, 10 through thunks) and the 116 `#[inline]` ones the build finds in
-  the crate; its `test_deep.jl` checks them against Julia's own math through
-  the generated module. John's Hub is the starter every user's own Hub
+  `use("rustlibm")` wraps the 114 functions the library exports and the 116
+  `#[inline]` ones the build finds in the crate (104 plain calls, 126
+  through thunks compiled ahead of time); its `test_deep.jl` checks them
+  against Julia's own math through the generated module. John's Hub is the starter every user's own Hub
   begins from, so an in-progress package belongs there.
 - **`packages/rustsemver` is the Rust package for values Rust owns**
   (2026-11-19): the `semver` crate from its pinned commit. A parsed
@@ -486,12 +489,15 @@ If you are asked to work on it:
   "must this be dropped" with the function that drops it (`RustGlue`, the
   metadata's `glue`). `RustABI`, `RustDWARF` and `RustGlue` are text in,
   tables out, and run no tool. `IRGen/RustThunks.jl` turns the rows into thunks (one
-  `jlcs.native_call` each), JITs them (`load`) and calls one (`call_raw`).
+  `jlcs.native_call` each), JITs them (`load`), compiles them into a library
+  of their own (`aot_library`, which `wrap` runs) and calls one (`call_raw`).
+  `RustBuild.discover_project` is `discover` for a Cargo folder.
   `Wrapper/Rust/GeneratorRust.jl` is `wrap`: the Julia module, from the
   metadata alone. `RustRuntime.jl` is what that module calls: `Library`,
   `invoke`, `RustPanic`.
   (`test_rust_abi.jl`, `test_rust_dwarf.jl`, `test_rust_config.jl`,
-  `test_rust_thunks.jl`, `test_rust_wrap.jl`, `test_rust_glue.jl`, devtests
+  `test_rust_thunks.jl`, `test_rust_wrap.jl`, `test_rust_glue.jl`,
+  `test_rust_discover.jl`, `test_doctor_rust.jl`, devtests
   `test_rust_build_live.jl`, `test_rust_thunks_live.jl`,
   `test_rust_wrap_live.jl`.)
 - `Builder/PackageRegistry.jl` — `~/.replibuild/` registry. **A project builds
@@ -2021,9 +2027,9 @@ outward-facing, so ask first.
   any function's. Never state such a function's signature in generated
   Rust. Its metadata row has `address` (the static) and `instance`
   (`"inline"` or `"instantiate"`), and **it is called by address, never by
-  name**: `RustThunks.load` reads the address through the library's handle
-  and registers it on that library's JIT under the function's symbol; a
-  plain call loads it with `cglobal`. Anything that takes a row's `symbol`
+  name**: the module reads the static with `cglobal` and hands the value to
+  a plain call or to the function's thunk (`RustThunks.callee_addresses` is
+  the same answer for `call_raw`). Anything that takes a row's `symbol`
   for a name the loader binds must ask for `address` first.
 - **A found function's path is spelled like a type's** (`function_expression`,
   then the probe's chosen paths), and one with no public path is not the
@@ -2100,7 +2106,10 @@ outward-facing, so ask first.
 - **`jlcs.native_call` is the Rust front end's op and nobody else's.** It
   lowers to exactly the call it states: operand and result types as given,
   `arg_attrs` (one dictionary per operand, the LLVM dialect's names) copied
-  to the call site and the declaration, no `CallShape`. Anything added to its
+  to the call site and the declaration, no `CallShape`. With no `callee`
+  attribute the first operand is the function's address and the call goes
+  through it (`arg_attrs` is then one dictionary per ARGUMENT, which the
+  address is not): the form `RustThunks` emits. Anything added to its
   lowering is a second ABI rule. The C and C++ generators must never emit it
   (`test_jlcs_invariants.jl` §E), and a new op must be in the conversion
   target's illegal list, or a failed lowering pattern is not a failed pass.
@@ -2110,9 +2119,34 @@ outward-facing, so ask first.
   pointer left out because it is `ret` itself, a returned pair stored at the
   offsets DWARF gives its two scalars, a `bool` a byte in storage. Only the
   attributes that change how an argument is passed go on the op (`_arg_attrs`:
-  zeroext, signext, inreg, sret, byval, and `align` with those two). `load`
-  looks every callee up through the library's handle first: ORC waits forever
-  on a symbol it cannot find.
+  zeroext, signext, inreg, sret, byval, and `align` with those two).
+- **A thunk names no function: its last slot is the function's ADDRESS**
+  (itself, not a pointer to it), and the thunk calls through it. So a thunk
+  module declares nothing and has nothing for a loader or a JIT to resolve
+  (ORC waits forever on a symbol it cannot find; there is none to find), the
+  same text is JIT'd or compiled ahead of time, and a function the library
+  exports and one it has no symbol for are called the same way. Never put a
+  callee's name back into a thunk: the ahead-of-time library is linked
+  against nothing and would not load. What the slots hold is a named
+  convention (`RustThunks.CONVENTION`, `rust-thunk-2`): the module passes it
+  to `RustRuntime.Library`, and a module written for another (or for none: a
+  wrapper from before this) is refused there, before any call, since its
+  slots would be read wrong. Change what a slot holds and the name changes
+  with it.
+- **`wrap` compiles the thunks, and there is no key for it**
+  (`GeneratorRust.compile_thunks`, `RustThunks.aot_library`,
+  `lib<name>_thunks.<ext>` beside the library). Which functions call through
+  a thunk is the generator's answer, so the stage runs on a first
+  generation's report and the text naming the library is a second one, with
+  the same calls. The library depends on NOTHING, by design: it is linked
+  `-nostdlib` with the C bucket's clang and linker, so a thunk must stay
+  loads, stores and one call (anything that makes LLVM ask the C runtime for
+  a function would be an undefined symbol; `test_rust_thunks_live.jl` reads
+  `NEEDED` and the undefined symbols). A stage that writes no library
+  (no libJLCS, no `llc`: `MLIRNative.emit_object` starts it) is a JIT
+  wrapper and never a failed wrap; an older thunks library is removed first.
+  The module bakes the file's hash, and `RustRuntime` uses the file only
+  when it is that file, else the JIT.
 - **A Rust value crosses as its bytes** (`GeneratorRust`). A record, tuple
   or enum with data is a Julia struct of `_rb_bytes` with a property per
   field at its DWARF offset; a by-value argument is encoded into a byte
@@ -2198,15 +2232,34 @@ outward-facing, so ask first.
   function's) is tried once more without them, so a crate that changed
   under its lines still builds.
 - **A wrapper JITs nothing at load.** `RustRuntime.Library` opens the
-  library; the thunk session is created at the first thunk call, and never
-  while Julia is generating output. A wrapper of plain calls needs no libJLCS.
+  library and, when there is one, its thunks library; a thunk session is
+  created only at the first call of a thunk that library does not have, and
+  never while Julia is generating output. A wrapper of plain calls needs no
+  libJLCS, and neither does one with its thunks library (devtests
+  `test_rust_wrap_live.jl` asserts libJLCS is never loaded in that child).
+- **The doctor's Rust probes are optional, and a Rust project is asked only
+  about them** (`EnvironmentDoctor.rust_ready`: cargo, rustc, a `c++filt`
+  that reads one of rustc's v0 names, the DWARF and symbol readers). `build`
+  decides which question to ask from the project file
+  (`ConfigurationManager.is_rust_toml`) before it loads the configuration;
+  a status with no probes (the registry's cache) is not ready, so the
+  registry skips its own check for a Rust project and `build`'s runs.
+  (`test_doctor_rust.jl`.)
+- **`discover` asks cargo and scans nothing** (`RustBuild.discover_project`):
+  a folder with a `Cargo.toml` and NO replibuild.toml is a crate, and the
+  file written is its name and `[rust]`. An existing `[rust]` project is
+  kept byte for byte, with `force` too (the scan is for C and C++ sources).
+  cargo answers for the whole workspace from any member's manifest, so
+  `discovered_crate` takes the manifest's own package first, lets only the
+  workspace ROOT stand for its members, and refuses several library crates
+  with the file to write. (`test_rust_discover.jl`.)
 - **The registry hashes a Rust project's own inputs** (`hash_config`'s rust
   branch: `RustBuild.input_files`, `source_identity`, `toolchain_identity`):
   `[compile] source_files` is C and C++ and would miss every `.rs`.
   `PackageRegistry` is included after the Rust modules for this, so
   `RustBuild` takes the generator fingerprint from its caller.
-- **The dialect's ABI version is 2 since `native_call`; the published libJLCS
-  artifact is version 1** and is refused. Until it is rebuilt and republished
+- **The dialect's ABI version is 3 (2 with `native_call`, 3 with its address
+  form); the published libJLCS artifact is version 1** and is refused. Until it is rebuilt and republished
   (`deps/jlcs_jll/README.md`, outward-facing, ask first), Tier 2 on this
   branch needs a local `src/mlir/build`.
 - **`RustDWARF` builds a unit's DIE tree only when the unit names a wanted
@@ -2334,6 +2387,9 @@ Start here for any ABI question: register state is observable.
   ignored). `owned_o3.metadata.json` is the ownership half of the fixture
   crate's own metadata (`test/tools/gen_rust_owned_fixture.jl`, which needs
   cargo): regenerate it when `METADATA_VERSION` or a row's meaning moves.
+  The thunk probes run twice, through the JIT and through the thunks library
+  `wrap` compiles; a probe script says which it used (`PROBE thunks_from`),
+  so a pass through one cannot stand for the other.
 
 - **A test that pins emitted text pins the part it is about** (the thunk and
   the return type, the type of one position), not a whole call. Six tests went
@@ -2464,6 +2520,15 @@ Where the time goes was measured on Jolt, the largest Hub package
   build's share, at that cost per precompile of the package; a directive on
   `wrap` recovers nothing (the generators are reached by dynamic dispatch),
   so wrap would need a workload that runs one. Not done: John's call.
+- **A function that only sometimes calls `build`, `wrap` or `register` must
+  not make them part of its own compile** (2026-11-19). `discover` ends in
+  `_build_and_wrap`, whose calls were known at compile time, so the first
+  `discover` of a session compiled all three before it ran: 87 s to keep a
+  file or to write one. They go through `Base.invokelatest` there (6 s, the
+  scan's own code). Measure the first call of an entry point with a runtime
+  argument (`f(dir, force) = discover(dir; force)`): a literal keyword lets
+  the compiler prune the branch and hides the cost.
+  (`test_rust_discover.jl`.)
 
 ## Open problems
 
@@ -2618,7 +2683,7 @@ read the generator output first. (User-facing C++ RAII — `Managed<T>` finalize
 DWARF-resolved destructors — **is** built.)
 
 - **Rust, what is left** (2026-11-19; `docs/updates/RUST_FRONT_END.md`
-  §24): shipping, below. A generic function is wrapped only for the types
+  §21 to §24). A generic function is wrapped only for the types
   `[rust] instantiate` names. Of trait objects and callbacks: a callback
   the library keeps and calls later, a callback that takes a string, a
   slice or a record by value, a Julia type implementing a Rust trait, a
@@ -2626,11 +2691,12 @@ DWARF-resolved destructors — **is** built.)
   building an owning record or an enum with data from Julia (only `String`
   and `Vec` are built), `Box::new` from a Julia value, a type nothing with
   a public path returns, a slice of what is not plain data, a value aligned
-  beyond 16 bytes (tiny-skia's SIMD records). Also unbuilt: `discover` on a
-  Cargo project, the doctor reporting cargo and rustc (`build` still asks
-  the C/C++ doctor first), an `extern "C"` function taking a record the C
-  way, AOT thunks for Rust, a crate with several codegen units, a user
-  guide page. Not checked, and not checkable from Julia: that a value
+  beyond 16 bytes (tiny-skia's SIMD records). Also unbuilt: an `extern "C"`
+  function taking a record the C way, a crate with several codegen units,
+  `show` for a Rust record (it prints as its bytes), and an object file
+  written by libJLCS itself, so that compiling thunks ahead of time needs no
+  system `llc` (a machine with only the prebuilt libJLCS gets the JIT
+  wrapper; the same holds for C++ AOT thunks). Not checked, and not checkable from Julia: that a value
   borrowing from another does not outlive it, and that a value is dropped
   on the thread that made it (a finalizer runs where the collector does).
   Measured on Linux x86-64 only; AArch64 and Windows are not run.

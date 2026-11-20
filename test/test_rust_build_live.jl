@@ -524,6 +524,68 @@ if requires("Rust front end (live)", :cargo, :rustc, :nm)
         end
     end
 
+    @testset "discover: a directory with a Cargo.toml is that crate" begin
+        mktempdir() do dir
+            # The fixture crate, copied: cargo is asked what the manifest is
+            # and nothing is compiled, so the copy gains one file.
+            crate = joinpath(dir, "crate")
+            cp(joinpath(_RBL_DIR, "crate"), crate)
+            rm(joinpath(crate, "target"); force = true, recursive = true)
+            before = _rbl_tree(crate)
+            toml = redirect_stdout(() -> RepliBuild.discover(crate), devnull)
+            @test toml == joinpath(crate, "replibuild.toml") && isfile(toml)
+            @test first.(setdiff(_rbl_tree(crate), before)) == ["replibuild.toml"]
+            data = RepliBuild.TOML.parsefile(toml)
+            @test data["project"]["name"] == "rb_fix"               # the crate's name, not the package's (`rb-fix`)
+            @test data["rust"] == Dict("manifest" => "Cargo.toml", "opt_level" => 0)
+            cfg = RepliBuild.ConfigurationManager.load_config(toml)
+            @test cfg.rust !== nothing && RepliBuild.ConfigurationManager.get_module_name(cfg) == "RbFix"
+            # A second discover keeps the file, forced or not.
+            write(toml, read(toml, String) * "# mine\n")
+            mine = read(toml, String)
+            redirect_stdout(() -> RepliBuild.discover(crate; force = true), devnull)
+            @test read(toml, String) == mine
+            # The file it wrote is a project that builds.
+            lib3 = withenv("REPLIBUILD_JULIA_ENV" => "none") do
+                redirect_stdout(() -> RepliBuild.build(toml), devnull)
+            end
+            md3 = RepliBuild._read_json(joinpath(dirname(lib3), "compilation_metadata.json"))
+            @test md3["crate"]["name"] == "rb_fix" && any(f -> f["path"] == "rb_fix::add", md3["functions"])
+
+            # A workspace: one library crate is that crate, by name; two are
+            # the user's choice, and the error shows the file to write.
+            ws = joinpath(dir, "ws")
+            member(name, kind) = begin
+                mkpath(joinpath(ws, name, "src"))
+                write(joinpath(ws, name, "Cargo.toml"), "[package]\nname = \"$name\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+                write(joinpath(ws, name, "src", kind == :lib ? "lib.rs" : "main.rs"),
+                      kind == :lib ? "pub fn one() -> i32 { 1 }\n" : "fn main() {}\n")
+            end
+            member("ws-core", :lib)
+            member("ws-cli", :bin)
+            write(joinpath(ws, "Cargo.toml"), "[workspace]\nresolver = \"2\"\nmembers = [\"ws-core\", \"ws-cli\"]\n")
+            toml = redirect_stdout(() -> RepliBuild.discover(ws), devnull)
+            data = RepliBuild.TOML.parsefile(toml)
+            @test data["project"]["name"] == "ws_core" && data["rust"]["package"] == "ws-core"
+            @test RepliBuild.RustBuild.crate_info(RepliBuild.RustBuild._located(RepliBuild.ConfigurationManager.load_config(toml)),
+                                                 RepliBuild.RustBuild.toolchain(ws)).name == "ws_core"
+            rm(toml)
+            member("ws-io", :lib)
+            write(joinpath(ws, "Cargo.toml"), "[workspace]\nresolver = \"2\"\nmembers = [\"ws-core\", \"ws-cli\", \"ws-io\"]\n")
+            msg = _rbl_error(() -> redirect_stdout(() -> RepliBuild.discover(ws), devnull))
+            @test occursin("2 library crates: ws-core, ws-io", msg) && occursin("package = \"ws-core\"", msg)
+            @test !isfile(joinpath(ws, "replibuild.toml"))             # nothing is written for a refusal
+            # A binary has no API to wrap, and its siblings' libraries do not
+            # make it one (cargo answers for the whole workspace from any member).
+            msg = _rbl_error(() -> redirect_stdout(() -> RepliBuild.discover(joinpath(ws, "ws-cli")), devnull))
+            @test occursin("\"ws-cli\" has no library target", msg) && !isfile(joinpath(ws, "ws-cli", "replibuild.toml"))
+            # A library member, asked for by its own directory, is that member.
+            toml = redirect_stdout(() -> RepliBuild.discover(joinpath(ws, "ws-io")), devnull)
+            @test RepliBuild.TOML.parsefile(toml)["project"]["name"] == "ws_io"
+            @test !haskey(RepliBuild.TOML.parsefile(toml)["rust"], "package")
+        end
+    end
+
     @testset "what cargo cannot build is cargo's error, in full" begin
         mktempdir() do dir
             cp(joinpath(_RBL_DIR, "crate"), joinpath(dir, "crate"))

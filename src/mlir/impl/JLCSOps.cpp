@@ -220,13 +220,27 @@ LogicalResult SetFieldOp::verify() {
     return verifyPtrOperand(getOperation(), getStructValue(), "structValue");
 }
 
-// native_call states its callee and, per operand, the attributes its call
-// site and declaration carry. The lowering copies them as they are, so their
-// shape is checked here: a string where a dictionary belongs would otherwise
-// be a cast failure in a pass.
+// native_call states its callee and, per call argument, the attributes its
+// call site and declaration carry. The lowering copies them as they are, so
+// their shape is checked here: a string where a dictionary belongs would
+// otherwise be a cast failure in a pass.
+//
+// The callee is a symbol (`callee = @f`) or, with no `callee` attribute, the
+// first operand: a pointer to the function, called through. `arg_attrs` has
+// one dictionary per argument of the call, which the callee operand is not.
 LogicalResult NativeCallOp::verify() {
-    if (!(*this)->getAttrOfType<FlatSymbolRefAttr>("callee"))
-        return emitOpError() << "requires a 'callee' symbol reference attribute";
+    bool direct = static_cast<bool>((*this)->getAttrOfType<FlatSymbolRefAttr>("callee"));
+    if (!direct && (*this)->getAttr("callee"))
+        return emitOpError() << "'callee' must be a symbol reference; with no 'callee' the "
+                             << "first operand is the function's address";
+    if (!direct) {
+        if (getArgs().empty())
+            return emitOpError() << "requires a 'callee' symbol reference attribute, or the "
+                                 << "function's address as its first operand";
+        if (!isa<LLVM::LLVMPointerType>(getArgs()[0].getType()))
+            return emitOpError() << "has no 'callee', so its first operand is the function's "
+                                 << "address and must be an !llvm.ptr, not " << getArgs()[0].getType();
+    }
     if (getNumResults() > 1)
         return emitOpError() << "returns at most one value, and has " << getNumResults();
     Attribute attrs = (*this)->getAttr("arg_attrs");
@@ -234,13 +248,14 @@ LogicalResult NativeCallOp::verify() {
         return success();
     auto perArg = dyn_cast<ArrayAttr>(attrs);
     if (!perArg)
-        return emitOpError() << "'arg_attrs' must be an array of dictionaries, one per operand";
-    if (perArg.size() != getArgs().size())
+        return emitOpError() << "'arg_attrs' must be an array of dictionaries, one per argument";
+    size_t nArgs = getArgs().size() - (direct ? 0 : 1);
+    if (perArg.size() != nArgs)
         return emitOpError() << "'arg_attrs' has " << perArg.size() << " entrie(s) for "
-                             << getArgs().size() << " operand(s); each operand needs exactly one";
+                             << nArgs << " argument(s); each argument needs exactly one";
     for (Attribute a : perArg)
         if (!isa<DictionaryAttr>(a))
-            return emitOpError() << "'arg_attrs' must hold dictionaries (an operand with "
+            return emitOpError() << "'arg_attrs' must hold dictionaries (an argument with "
                                  << "no attribute is `{}`)";
     return success();
 }

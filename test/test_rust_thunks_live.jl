@@ -98,6 +98,27 @@ if requires("jlcs.native_call lowering", :libJLCS)
     }
     """)
     @test "declare void @hidden(ptr sret([8 x i8]) align 4, i32)" in low.declares
+
+    # With no `callee` the first operand is the function's address and the
+    # call goes through it: the same call, the same attributes on the same
+    # arguments, and nothing declared, so nothing for a loader to resolve.
+    # This is the form a Rust thunk uses.
+    low = _rtl_lowered("""
+    module {
+      func.func @t(%f: !llvm.ptr, %x: i32, %p: !llvm.ptr, %a: i8, %d: f64, %b: i1) {
+        %r = jlcs.native_call %f, %x : (!llvm.ptr, i32) -> !llvm.struct<(i32, i32)>
+        jlcs.native_call %f, %p, %a, %d { arg_attrs = [{llvm.sret = !llvm.array<16 x i8>, llvm.align = 8 : i64}, {}, {}] } : (!llvm.ptr, !llvm.ptr, i8, f64) -> ()
+        %n = jlcs.native_call %f, %b, %a { arg_attrs = [{llvm.zeroext}, {llvm.signext}] } : (!llvm.ptr, i1, i8) -> i1
+        jlcs.native_call %f : (!llvm.ptr) -> ()
+        return
+      }
+    }
+    """)
+    @test length(low.calls) == 4 && isempty(low.declares)
+    @test any(l -> occursin(r"= call \{ i32, i32 \} %\d+\(i32 %\d+\)$", l), low.calls)
+    @test any(l -> occursin(r"^call void %\d+\(ptr sret\(\[16 x i8\]\) align 8 %\d+, i8 %\d+, double %\d+\)$", l), low.calls)
+    @test any(l -> occursin(r"= call i1 %\d+\(i1 zeroext %\d+, i8 signext %\d+\)$", l), low.calls)
+    @test any(l -> occursin(r"^call void %\d+\(\)$", l), low.calls)
 end
 
 @testset "jlcs.native_call refuses what it cannot state" begin
@@ -105,12 +126,22 @@ end
     tail = "\n    return\n  }\n}\n"
     parse(body) = _rtl_error(() -> _RTL_N.parse_module(_RTL_N.create_context(), head * body * tail;
                                                        source_name = "native_call_bad"))
-    # No callee, attributes for another number of operands, a string where a dictionary goes.
-    @test occursin("callee", parse("    %r = jlcs.native_call %x, %x : (i32, i32) -> i32"))
+    # No callee and a first operand that is not an address, or no operand at
+    # all; a callee that is not a symbol; attributes for another number of
+    # arguments; a string where a dictionary goes.
+    @test occursin("first operand is the function's address", parse("    %r = jlcs.native_call %x, %x : (i32, i32) -> i32"))
+    @test occursin("callee", parse("    jlcs.native_call : () -> ()"))
+    @test occursin("symbol reference", parse("    %r = jlcs.native_call %x, %x { callee = \"f\" } : (i32, i32) -> i32"))
     @test occursin("arg_attrs", parse("    %r = jlcs.native_call %x, %x { callee = @f, arg_attrs = [{}] } : (i32, i32) -> i32"))
     @test occursin("arg_attrs", parse("    %r = jlcs.native_call %x, %x { callee = @f, arg_attrs = [\"zeroext\", {}] } : (i32, i32) -> i32"))
     @test occursin("arg_attrs", parse("    %r = jlcs.native_call %x, %x { callee = @f, arg_attrs = {} } : (i32, i32) -> i32"))
     @test parse("    %r = jlcs.native_call %x, %x { callee = @f, arg_attrs = [{}, {}] } : (i32, i32) -> i32") == ""
+    # Through an address, the address is not an argument: two arguments, two dictionaries.
+    ptr_head = "module {\n  func.func @t(%f: !llvm.ptr, %x: i32) {\n"
+    parse_ptr(body) = _rtl_error(() -> _RTL_N.parse_module(_RTL_N.create_context(), ptr_head * body * tail;
+                                                           source_name = "native_call_bad"))
+    @test occursin("2 argument(s)", parse_ptr("    %r = jlcs.native_call %f, %x, %x { arg_attrs = [{}, {}, {}] } : (!llvm.ptr, i32, i32) -> i32"))
+    @test parse_ptr("    %r = jlcs.native_call %f, %x, %x { arg_attrs = [{}, {}] } : (!llvm.ptr, i32, i32) -> i32") == ""
 
     # A callee the module does not declare is an error in the lowering. MLIR's
     # own translation would dereference null for it, which is a dead process.
@@ -153,23 +184,46 @@ if requires("Rust thunks (live)", :libJLCS, :cargo, :rustc, :nm)
             @test count("jlcs.native_call", ir) == length(made)
             @test sort!(collect(keys(skipped))) == sort!([f["symbol"] for f in md["functions"] if f["refusal"] !== nothing])
             @test isempty(RepliBuild.JLCSIRGenerator.undeclared_callees(ir))
+            # The module names no function: nothing declared, no symbol called.
+            @test !occursin("func.func private", ir) && !occursin("callee", ir)
             # The fixture has every way a result comes back, so the probes below mean something.
             @test Set(f["return"]["pass"] for f in callable) == Set(["ignore", "direct", "pair", "cast", "indirect"])
 
-            r = run_isolated(`$(joinpath(_RTL_DIR, "verify_thunks.jl")) $lib $meta`; timeout = 600)
-            v = probe_verdicts(r.output)
-            @test r.ok
-            @test haskey(v, "PROBE_DONE")
+            # The same thunks compiled ahead of time: a library that depends on
+            # nothing (not on the crate's library, not on libJLCS, not on libc)
+            # and exports one thunk per function. The probes below run twice,
+            # through the JIT and through this library.
+            aot = mktempdir()
+            (thunks, aot_made, aot_skipped) = RepliBuild.RustThunks.aot_library(lib, md, made; output = aot)
+            @test isfile(thunks) && basename(thunks) == RepliBuild.RustThunks.aot_library_name(lib)
+            @test aot_made == made && isempty(aot_skipped)
+            exported = RepliBuild.Compiler._runtime_symbol_names(thunks)
+            @test exported !== nothing && all(s -> RepliBuild.RustThunks.thunk_name(s) in exported, made)
+            needed = read(RepliBuild.Tools.tool_cmd(`readelf -d $thunks`), String)
+            @test !occursin("NEEDED", needed)
+            undefined = [l for l in eachline(RepliBuild.Tools.tool_cmd(`nm -D --undefined-only $thunks`)) if !isempty(strip(l))]
+            @test isempty(undefined)
+            @test !isfile(joinpath(aot, "rust_thunks.o"))
+
             expected = ["thunks_for_every_callable", "functions_with_no_symbol", "option_i32", "two_field_record", "record_of_two_doubles", "tuple",
                         "str_returned", "method_returning_a_record", "trait_object", "three_byte_integer", "u128",
                         "bool", "fieldless_enum", "char_and_plain_scalars", "one_bit_values", "zero_sized",
                         "record_through_hidden_pointer", "enum_with_data", "string_out_and_in", "slices",
                         "box_and_niche", "wrong_calls_are_errors"]
-            for name in expected
-                @test (name, startswith(get(v, name, "no PROBE line"), "PASS") ? "PASS" : get(v, name, "no PROBE line")) ==
-                      (name, "PASS")
+            for (how, extra) in (("jit", String[]), ("aot", [thunks]))
+                r = run_isolated(`$(joinpath(_RTL_DIR, "verify_thunks.jl")) $lib $meta $extra`; timeout = 600)
+                v = probe_verdicts(r.output)
+                @test r.ok
+                @test haskey(v, "PROBE_DONE")
+                # Which thunks ran: the child says, so the second pass cannot pass on the JIT's.
+                @test get(v, "thunks_from", "") == "PASS " * how
+                for name in expected
+                    @test (how, name, startswith(get(v, name, "no PROBE line"), "PASS") ? "PASS" : get(v, name, "no PROBE line")) ==
+                          (how, name, "PASS")
+                end
+                @test length(v) == length(expected) + 2
             end
-            @test length(v) == length(expected) + 1
+            rm(aot; force = true, recursive = true)
         end
     end
 end

@@ -179,6 +179,11 @@ end
 
 Main discovery pipeline - scans project and generates configuration.
 
+A directory that holds a `Cargo.toml` and no replibuild.toml is a Rust crate:
+cargo is asked what the crate is (`RustBuild.discover_project`) and the
+project file names it under `[rust]`; nothing is scanned. An existing `[rust]`
+project is kept as it is, with `force` too.
+
 # Process:
 1. Check for existing replibuild.toml (project identified by presence of replibuild.toml)
 2. Scan all files and categorize
@@ -250,6 +255,24 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
         end
     end
 
+    # A Rust project is a Cargo crate: cargo finds its sources, and what the
+    # project file holds beside the crate's name is the user's (`[rust]`
+    # features, instantiate, a dependency's pin). So an existing `[rust]`
+    # project is never rescanned, forced or not: a scan here looks for C and
+    # C++ sources and would write a C++ project with none.
+    if isfile(config_path) && ConfigurationManager.is_rust_toml(config_path)
+        println("RepliBuild | discover: $(basename(config_path)) is a [rust] project; cargo finds its sources, so there is nothing to rescan")
+        return _build_and_wrap(config_path, build, wrap)
+    end
+    # A directory with a Cargo.toml and no project file yet is a Cargo
+    # project. (With a project file that is not a Rust one, the file says what
+    # the project is, and it is rescanned as that.)
+    if !isfile(config_path) && isfile(joinpath(target_dir, "Cargo.toml"))
+        println("RepliBuild | discover $(basename(rstrip(abspath(target_dir), ['/', '\\']))) (Cargo.toml: a Rust crate, which cargo builds)")
+        getfield(parentmodule(@__MODULE__), :RustBuild).discover_project(target_dir)
+        return _build_and_wrap(config_path, build, wrap)
+    end
+
     # User-intent sections of an existing toml must survive re-discovery:
     # generate_config always emits them empty (they are not derivable from
     # source), so regeneration used to silently destroy them. That broke
@@ -257,7 +280,7 @@ function discover(target_dir::String=pwd(); force::Bool=false, unsafe::Bool=fals
     # run, taking the whole STL wrapper section with it (found 2026-07-17).
     preserved = _collect_preserved_sections(config_path)
 
-    println("RepliBuild | discover $(basename(abspath(target_dir)))")
+    println("RepliBuild | discover $(basename(rstrip(abspath(target_dir), ['/', '\\'])))")
 
     scan_results = scan_all_files(target_dir)
     binaries = detect_all_binaries(target_dir, scan_results)
@@ -286,13 +309,20 @@ end
 # The optional tail of `discover`: `build`, or `build` and `wrap` and then
 # `register`, which does both in the project and vendors the result. A bare
 # discover registers nothing: there is no build yet to vendor.
+#
+# The two calls are made through `invokelatest` so that compiling `discover`
+# does not compile them: called directly they are known at compile time, and
+# the first `discover` of a session then compiled the whole of `build`, `wrap`
+# and `register` before it ran, about 87 s on the dev box (measured
+# 2026-11-19), to write one file or to keep the one that was there. A
+# `discover` that does build still pays for what it runs, when it runs it.
 function _build_and_wrap(config_path::String, build::Bool, wrap::Bool)::String
     build || return config_path
     parent_mod = parentmodule(@__MODULE__)
     if wrap
-        parent_mod.register(config_path)
+        Base.invokelatest(parent_mod.register, config_path)
     else
-        parent_mod.build(config_path)
+        Base.invokelatest(parent_mod.build, config_path)
     end
     return config_path
 end

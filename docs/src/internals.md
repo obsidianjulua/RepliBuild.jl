@@ -75,7 +75,7 @@ The `Wrapper` package generates Julia FFI modules from DWARF metadata and binary
 | `RustABI` | `src/Builder/RustABI.jl` | How each Rust function is called, read from the `define` lines of rustc's IR and matched to its DWARF parameters; a function that does not match is refused |
 | `RustDWARF` | `src/Builder/RustDWARF.jl` | rustc's DWARF: records, enums that carry data, pointer kinds, methods |
 | `RustGlue` | `src/Builder/RustGlue.jl` | The Rust the build writes per type so a value can be dropped: which types, how each is spelled in source, and what the built library says of each |
-| `RustThunks` | `src/IRGen/RustThunks.jl` | One thunk per Rust function, from its metadata row |
+| `RustThunks` | `src/IRGen/RustThunks.jl` | One thunk per Rust function, from its metadata row: JIT'd, or compiled by `wrap` into a library of their own that depends on nothing |
 | `RustRuntime` | `src/RustRuntime.jl` | What a Rust wrapper calls at run time: the library, a call through a thunk, `RustPanic`, `RustError`, `drop!` |
 | `GeneratorRust` | `src/Wrapper/Rust/GeneratorRust.jl` | `wrap` for a `[rust]` project: the Julia module, from the metadata alone |
 

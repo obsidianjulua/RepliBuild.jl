@@ -16,6 +16,9 @@
 #             order of the define line, the hidden return pointer left out.
 #             A parameter that is itself a pointer (`ptr`) is stored as a
 #             pointer: one slot per IR parameter, no exceptions.
+#   args[n]   one more slot, after the parameters: the ADDRESS of the function
+#             to call, itself (not a pointer to it). The thunk calls through
+#             it.
 #   ret       where the result goes. For a function that returns through a
 #             hidden pointer it IS that pointer: Rust builds the value in the
 #             caller's buffer, which must be as large and as aligned as the
@@ -24,21 +27,35 @@
 #
 # A `bool` (`i1`) is a byte in storage, on both sides.
 #
+# **A thunk names no function.** It is the shape of a call, and the caller
+# says which function. So a thunk module has nothing for a loader or a JIT to
+# resolve: the same text is JIT'd (`load`) or compiled ahead of time into a
+# library of its own that depends on nothing, not on the wrapped library and
+# not on libJLCS (`aot_library`). And a function the library has no symbol
+# for (an `#[inline]` one, whose address the library keeps in a static) is
+# called the same way as one it exports.
+#
 # The thunk makes a PLAIN call. A Rust function that panics unwinds through
 # it, and only Rust may end a Rust panic: the catching frame is a Rust
-# function outside the thunk, which is not built yet. Until it is, a panic in
-# a call made here ends the process.
+# function outside the thunk (`RustRuntime.invoke`, the root crate's
+# `__rb_catch`).
 #
-# Design: docs/updates/RUST_FRONT_END.md §13 and Part III.
+# Design: docs/updates/RUST_FRONT_END.md §13, Part III and §24.
 
 module RustThunks
 
 using Libdl
 
+import SHA
+
 import ..MLIRNative
 import ..RustABI
+import ..Compiler
 
-export thunk_name, thunk_module, load, call_raw
+export thunk_name, thunk_module, load, call_raw, aot_library, aot_library_name
+
+"The thunk convention's name. It is in an ahead-of-time library's record: thunks of another convention are not used."
+const CONVENTION = "rust-thunk-2"
 
 "The thunk's name for the function `symbol`."
 thunk_name(symbol::AbstractString) = String(symbol) * "_rbthunk"
@@ -112,12 +129,13 @@ function _arg_attrs(attrs)::Union{String,Nothing}
 end
 
 """
-    thunk(row, types) -> (text, callee_decl) or a refusal String
+    thunk(row, types) -> (text, slots) or a refusal String
 
-One function's thunk and its callee's declaration, from its metadata row
-(`RustABI.join_function`) and the type table. A `String` says why there is
-no thunk: the row is refused, or its signature has a type or an attribute a
-thunk does not carry.
+One function's thunk, from its metadata row (`RustABI.join_function`) and the
+type table, and how many slots it reads: one per IR parameter it is handed,
+then the function's address. A `String` says why there is no thunk: the row
+is refused, or its signature has a type or an attribute a thunk does not
+carry.
 """
 function thunk(row::AbstractDict, types::AbstractDict)
     row["refusal"] === nothing || return "the function is refused: " * String(row["refusal"])
@@ -168,9 +186,12 @@ function thunk(row::AbstractDict, types::AbstractDict)
         push!(operands, "%v$i")
         slot += 1
     end
-    attrs = any(a -> a != "{}", arg_attrs) ? ", arg_attrs = [" * join(arg_attrs, ", ") * "]" : ""
-    call = "jlcs.native_call " * join(operands, ", ") * " { callee = $(_sym(sym))$attrs } : (" *
-           join(arg_types, ", ") * ") -> " * (isempty(ret_type) ? "()" : ret_type)
+    # The function to call: its address is the slot after the parameters.
+    println(io, "    %sf = llvm.getelementptr %args[$slot] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")
+    println(io, "    %fn = llvm.load %sf : !llvm.ptr -> !llvm.ptr")
+    attrs = any(a -> a != "{}", arg_attrs) ? " { arg_attrs = [" * join(arg_attrs, ", ") * "] }" : ""
+    call = "jlcs.native_call " * join(vcat(["%fn"], operands), ", ") * attrs * " : (" *
+           join(vcat(["!llvm.ptr"], arg_types), ", ") * ") -> " * (isempty(ret_type) ? "()" : ret_type)
     function store(value, type, offset)
         v = value
         if type == "i1"
@@ -206,9 +227,7 @@ function thunk(row::AbstractDict, types::AbstractDict)
     end
     println(io, "    return")
     println(io, "  }")
-    decl = "  func.func private $(_sym(sym))(" * join(arg_types, ", ") * ")" *
-           (isempty(ret_type) ? "" : " -> " * ret_type)
-    return (String(take!(io)), decl)
+    return (String(take!(io)), slot + 1)
 end
 
 """
@@ -218,11 +237,10 @@ The MLIR module holding a thunk for each function row that can have one, in
 the rows' order. `made` lists their symbols; `skipped` maps each other symbol
 to its reason. `only`, when given, is the set of symbols to consider.
 
-An alias (`alias_of`) is called by its own name: it is its own symbol in the
-library, and its call is its target's.
+The module declares nothing and calls nothing by name: each thunk calls the
+address it is handed.
 """
 function thunk_module(functions, types::AbstractDict; only = nothing)
-    decls = String[]
     bodies = String[]
     made = String[]
     skipped = Dict{String,String}()
@@ -235,16 +253,16 @@ function thunk_module(functions, types::AbstractDict; only = nothing)
             continue
         end
         push!(bodies, t[1])
-        push!(decls, t[2])
         push!(made, sym)
     end
-    ir = "module {\n" * join(decls, "\n") * (isempty(decls) ? "" : "\n") * join(bodies, "") * "}\n"
+    ir = "module {\n" * join(bodies, "") * "}\n"
     return (ir, made, skipped)
 end
 
 """
 A library's thunks, JIT'd. `thunks` maps a function's symbol to its thunk's
-address; `skipped` maps every other function of the metadata to the reason it
+address and `callees` to the function's own address, which the thunk is
+handed; `skipped` maps every other function of the metadata to the reason it
 has none. The context and the engine live as long as the session.
 """
 struct Session
@@ -252,9 +270,41 @@ struct Session
     ctx::Ptr{Cvoid}
     jit::Ptr{Cvoid}
     thunks::Dict{String,Ptr{Cvoid}}
+    callees::Dict{String,Ptr{Cvoid}}
     skipped::Dict{String,String}
     functions::Dict{String,Any}
     types::Dict{String,Any}
+end
+
+"""
+    callee_addresses(handle, functions) -> (found, missing)
+
+Where each function of the metadata is, asked of the library's own handle:
+`found` maps a symbol to its address, `missing` to why it has none. A
+function the library exports is its symbol. One it has no symbol for (a row
+with `address`: an `#[inline]` function or an instantiation the root crate
+compiled) is the value of the exported static that row names.
+"""
+function callee_addresses(handle::Ptr{Cvoid}, functions)
+    found = Dict{String,Ptr{Cvoid}}()
+    missing = Dict{String,String}()
+    for row in functions
+        sym = String(row["symbol"])
+        address = get(row, "address", nothing)
+        if address isa AbstractString
+            cell = something(Libdl.dlsym_e(handle, String(address)), C_NULL)
+            fp = cell == C_NULL ? C_NULL : unsafe_load(Ptr{Ptr{Cvoid}}(cell))
+            if fp == C_NULL
+                missing[sym] = "the library does not export `$address`, which holds where this function is"
+            else
+                found[sym] = fp
+            end
+        else
+            fp = something(Libdl.dlsym_e(handle, sym), C_NULL)
+            fp == C_NULL ? (missing[sym] = "the library does not export `$sym`") : (found[sym] = fp)
+        end
+    end
+    return (found, missing)
 end
 
 """
@@ -263,15 +313,10 @@ end
 Generate, lower and JIT the thunks for a Rust library from its
 `compilation_metadata.json` (parsed).
 
-Every callee is looked up through the library's own handle first, and a
-function the handle does not resolve gets no thunk: the JIT does not raise
-for a symbol it cannot find, it waits forever.
-
-A function the library has no symbol for (a row with `address`: an
-`#[inline]` function or an instantiation the root crate compiled) is not a
-name the loader binds. The library exports a static that holds where it is;
-that address is read through the handle and given to this library's JIT
-under the function's own name, and to no other.
+The thunk module names no function of the library, so the JIT resolves
+nothing. Each function's address is asked of the library's own handle here,
+once (`callee_addresses`), for `call_raw` and so that a function the library
+does not have is reported as that, with no thunk.
 """
 function load(library::AbstractString, metadata::AbstractDict; opt_level::Int = 2)::Session
     get(metadata, "language", "") == "rust" ||
@@ -280,40 +325,17 @@ function load(library::AbstractString, metadata::AbstractDict; opt_level::Int = 
     functions = metadata["functions"]
     types = metadata["types"]
     handle = Libdl.dlopen(library, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
-    bound = Set{String}()
-    unbound = Dict{String,String}()
-    placed = Dict{String,Ptr{Cvoid}}()             # a function with no symbol => where it is
-    for row in functions
-        sym = String(row["symbol"])
-        address = get(row, "address", nothing)
-        if address isa AbstractString
-            cell = Libdl.dlsym_e(handle, String(address))
-            fp = cell == C_NULL ? C_NULL : unsafe_load(Ptr{Ptr{Cvoid}}(cell))
-            if fp == C_NULL
-                unbound[sym] = "the library does not export `$address`, which holds where this function is"
-            else
-                placed[sym] = fp
-                push!(bound, sym)
-            end
-        elseif Libdl.dlsym_e(handle, sym) == C_NULL
-            unbound[sym] = "the library does not export `$sym`"
-        else
-            push!(bound, sym)
-        end
-    end
-    (ir, made, skipped) = thunk_module(functions, types; only = bound)
+    (callees, unbound) = callee_addresses(handle, functions)
+    (ir, made, skipped) = thunk_module(functions, types; only = Set{String}(keys(callees)))
     merge!(skipped, unbound)
     by_symbol = Dict{String,Any}(String(r["symbol"]) => r for r in functions)
     ctx = MLIRNative.create_context()
     thunks = Dict{String,Ptr{Cvoid}}()
-    isempty(made) && return Session(library, ctx, C_NULL, thunks, skipped, by_symbol, types)
+    isempty(made) && return Session(library, ctx, C_NULL, thunks, callees, skipped, by_symbol, types)
     mod = MLIRNative.parse_module(ctx, ir; debug_base = MLIRNative.debug_dir_for(library))
     MLIRNative.lower_to_llvm(mod) ||
         error(MLIRNative._with_diagnostics("RustThunks.load: the thunk module for $library did not lower."))
-    jit = MLIRNative.create_jit(mod; opt_level, shared_libs = [library, MLIRNative.libJLCS_path()])
-    for sym in sort!(collect(keys(placed)))
-        MLIRNative.register_symbol(jit, sym, placed[sym])
-    end
+    jit = MLIRNative.create_jit(mod; opt_level, shared_libs = String[])
     for sym in made
         addr = MLIRNative.lookup(jit, thunk_name(sym))
         if addr == C_NULL
@@ -322,7 +344,70 @@ function load(library::AbstractString, metadata::AbstractDict; opt_level::Int = 
             thunks[sym] = addr
         end
     end
-    return Session(library, ctx, jit, thunks, skipped, by_symbol, types)
+    return Session(library, ctx, jit, thunks, callees, skipped, by_symbol, types)
+end
+
+# =============================================================================
+# Ahead of time
+# =============================================================================
+
+"The file name of a library's ahead-of-time thunks: `librb_fix.so` gives `librb_fix_thunks.so`."
+function aot_library_name(library::AbstractString)::String
+    (stem, ext) = splitext(basename(String(library)))
+    return stem * "_thunks" * ext
+end
+
+"""
+    aot_library(library, metadata, symbols; output = <beside the library>) -> (path, made, skipped)
+
+Compile the thunks of the functions `symbols` into a shared library of their
+own, `aot_library_name(library)` in `output`, and return its path, the
+symbols it has a thunk for, and why each other one has none.
+
+The library depends on nothing: a thunk calls the address it is handed, so it
+is not linked against the wrapped library, and it makes plain calls, so it
+needs nothing of libJLCS at run time. libJLCS is needed here, to compile it.
+It is linked with no start files and no C library (`-nostdlib`) by the
+compiler and linker the C bucket links with, which a Julia installation
+brings; a thunk is loads, stores and one call, and asks the C runtime for
+nothing.
+
+Any earlier file of that name is removed first: a failure leaves no thunks
+library, and the wrapper then JITs.
+"""
+function aot_library(library::AbstractString, metadata::AbstractDict, symbols;
+                     output::AbstractString = dirname(abspath(String(library))))
+    get(metadata, "language", "") == "rust" ||
+        error("RustThunks.aot_library: $(library)'s metadata is not a Rust library's")
+    path = joinpath(String(output), aot_library_name(library))
+    rm(path; force = true)
+    wanted = Set{String}(String(s) for s in symbols)
+    (ir, made, skipped) = thunk_module(metadata["functions"], metadata["types"]; only = wanted)
+    isempty(made) && error("RustThunks.aot_library: none of the $(length(wanted)) function(s) asked for has a thunk")
+    object = joinpath(String(output), "rust_thunks.o")
+    ctx = MLIRNative.create_context()
+    try
+        mod = MLIRNative.parse_module(ctx, ir; debug_base = MLIRNative.debug_dir_for(String(library)))
+        mod == C_NULL && error("RustThunks.aot_library: the thunk module for $library did not parse")
+        MLIRNative.lower_to_llvm(mod) ||
+            error(MLIRNative._with_diagnostics("RustThunks.aot_library: the thunk module for $library did not lower."))
+        MLIRNative.emit_object(mod, object) ||
+            error("RustThunks.aot_library: no object file was written for the thunks of $library")
+        lld = Compiler._bundled_linker(:c)
+        args = String["-shared", "-fPIC", "-nostdlib", "-o", path, object,
+                      Compiler._reproducible_link_flags()...]
+        lld === nothing || push!(args, "--ld-path=" * lld)
+        (out, code) = Compiler._clang_for_c_bucket("clang", args)
+        (code == 0 && isfile(path)) ||
+            error("RustThunks.aot_library: the thunks of $library did not link (exit $code):\n$(strip(out))")
+    catch
+        rm(path; force = true)
+        rethrow()
+    finally
+        rm(object; force = true)
+        MLIRNative.destroy_context(ctx)
+    end
+    return (path, made, skipped)
 end
 
 """
@@ -337,9 +422,9 @@ to: at least as large as what the function returns, and for a function that
 returns through a hidden pointer, as aligned as its type.
 
 This is the thunk's own convention with the bookkeeping done, for tests and
-for trying a library by hand; a generated wrapper will write these slots
-itself. A count or a size that does not match the metadata is an error
-before the call, never a wrong call.
+for trying a library by hand; a generated wrapper writes these slots itself.
+A count or a size that does not match the metadata is an error before the
+call, never a wrong call.
 """
 function call_raw(s::Session, symbol::AbstractString, ret::Union{AbstractVector{UInt8},Base.RefValue,Ptr}, values...)
     sym = String(symbol)
@@ -364,6 +449,7 @@ function call_raw(s::Session, symbol::AbstractString, ret::Union{AbstractVector{
     refs = Any[Ref(v) for v in values]
     GC.@preserve refs ret begin
         slots = Ptr{Cvoid}[Base.unsafe_convert(Ptr{Cvoid}, r) for r in refs]
+        push!(slots, s.callees[sym])          # the function's address, after the parameters
         rp = ret isa Ptr ? Ptr{Cvoid}(ret) : Ptr{Cvoid}(Base.unsafe_convert(Ptr{eltype(ret)}, ret))
         GC.@preserve slots ccall(fp, Cvoid, (Ptr{Ptr{Cvoid}}, Ptr{Cvoid}), slots, rp)
     end

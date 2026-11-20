@@ -38,6 +38,12 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             md = RepliBuild._read_json(joinpath(dirname(lib), "compilation_metadata.json"))
             text = read(wrapper, String)
             @test occursin("module RbFix", text) && occursin("const LIBRARY_SHA = \"$(md["library_sha"])\"", text)
+            # `wrap` compiled the thunks the module calls into a library of
+            # their own beside the crate's, and the module names that file.
+            thunks = joinpath(dirname(lib), RepliBuild.RustThunks.aot_library_name(lib))
+            @test isfile(thunks)
+            @test occursin("const THUNKS_LIBRARY_PATH = let baked = $(repr(thunks))", text)
+            @test occursin("const THUNKS_SHA = \"$(bytes2hex(open(RepliBuild.SHA.sha256, thunks)))\"", text)
             # Every function of the library is in the module, wrapped or with its reason.
             (_, report) = RepliBuild.GeneratorRust.generate(md; module_name = "RbFix", library_path = lib)
             @test length(report) == length(md["functions"])
@@ -53,10 +59,6 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             @test tiers["add"] == (opt == 0 ? "guarded" : "ccall")
             @test tiers["maybe"] == (opt == 0 ? "guarded" : "thunk")
 
-            r = run_isolated(`$(joinpath(_RWL_DIR, "verify_module.jl")) $wrapper`; timeout = 600)
-            v = probe_verdicts(r.output)
-            @test r.ok
-            @test haskey(v, "PROBE_DONE")
             expected = ["scalars", "integer_arguments_are_converted_or_refused", "strings_and_slices",
                         "tuples_come_back_as_tuples", "fixed_size_arrays", "a_slice_of_records",
                         "option_is_a_value_or_nothing", "records_by_value_and_by_reference",
@@ -72,11 +74,24 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
                         "generic_functions_for_the_types_asked_for", "a_destructor_is_not_called_by_name",
                         "types_no_path_spells", "statics", "trait_objects", "trait_objects_that_change",
                         "callbacks", "an_error_in_a_callback"]
-            for name in expected
-                @test (name, startswith(get(v, name, "no PROBE line"), "PASS") ? "PASS" : get(v, name, "no PROBE line")) ==
-                      (name, "PASS")
+            # As wrapped, every thunk is the thunks library's: no thunk is
+            # compiled in the child, and the dialect library is never loaded.
+            # Unoptimized (where every Rust function goes through a thunk) the
+            # same module is then run with the thunks library taken away: it
+            # compiles its thunks at first use and gives the same answers.
+            for how in (opt == 0 ? ("aot", "jit") : ("aot",))
+                how == "jit" && rm(thunks)
+                r = run_isolated(`$(joinpath(_RWL_DIR, "verify_module.jl")) $wrapper`; timeout = 600)
+                v = probe_verdicts(r.output)
+                @test r.ok
+                @test haskey(v, "PROBE_DONE")
+                @test (how, get(v, "thunks_from", "no PROBE line")) == (how, "PASS " * how)
+                for name in expected
+                    @test (how, name, startswith(get(v, name, "no PROBE line"), "PASS") ? "PASS" : get(v, name, "no PROBE line")) ==
+                          (how, name, "PASS")
+                end
+                @test length(v) == length(expected) + 2
             end
-            @test length(v) == length(expected) + 1
         end
     end
 
@@ -95,6 +110,9 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
                                      ("hello hub", [0.0, 1.0, 4.0], true) ? "PASS" : "FAIL")
             println("PROBE inline: ", (M.small(41), M.midpoint_f64(1.0, 4.0), M.greet("hub")) == (Int32(42), 2.5, "hi hub") ? "PASS" : "FAIL")
             println("PROBE vendored: ", startswith(M.LIBRARY_PATH, $(repr(joinpath(home, "builds")))) ? "PASS" : "FAIL \$(M.LIBRARY_PATH)")
+            println("PROBE thunks: ", (startswith(M.THUNKS_LIBRARY_PATH, $(repr(joinpath(home, "builds")))),
+                                       M._rb_library().thunks_handle != C_NULL, M._rb_library().session === nothing) ==
+                                      (true, true, true) ? "PASS" : "FAIL \$(M.THUNKS_LIBRARY_PATH)")
             e = try; M.checked_div(1, 0); nothing; catch err; err; end
             println("PROBE panic: ", e isa RepliBuild.RustRuntime.RustPanic ? "PASS" : "FAIL \$e")
             println("PROBE_DONE")
@@ -105,7 +123,7 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             r = run_use()
             v = probe_verdicts(r.output)
             @test r.ok && haskey(v, "PROBE_DONE")
-            for name in ("use", "owned", "inline", "vendored", "panic")
+            for name in ("use", "owned", "inline", "vendored", "thunks", "panic")
                 @test (name, get(v, name, "no PROBE line")) == (name, "PASS")
             end
             # One vendored build (beside it, `.debug` holds the thunk module's text for a debugger).
@@ -113,7 +131,8 @@ if requires("Rust wrapper (live)", :libJLCS, :cargo, :rustc, :nm)
             builds = vendored()
             @test length(builds) == 1
             @test sort!(filter(f -> !startswith(f, "."), readdir(joinpath(home, "builds", builds[1])))) ==
-                  ["RbFix.jl", "compilation_metadata.json", "librb_fix.$(Libdl.dlext)", "rust_metadata.key"]
+                  ["RbFix.jl", "compilation_metadata.json", "librb_fix.$(Libdl.dlext)", "librb_fix_thunks.$(Libdl.dlext)",
+                   "rust_metadata.key"]
             # The crate's source is the project's input: an edit is another build.
             cfg() = RepliBuild.DependencyResolver.resolve_dependencies(RepliBuild.ConfigurationManager.load_config(toml))
             before = RepliBuild.PackageRegistry.hash_config(cfg())

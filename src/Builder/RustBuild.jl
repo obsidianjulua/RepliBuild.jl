@@ -352,6 +352,112 @@ function crate_info(rc::RustConfig, tc::Toolchain)::Crate
 end
 
 # =============================================================================
+# discover
+# =============================================================================
+
+"""
+    discovered_crate(metadata, manifest) -> (crate, package)
+
+The crate a `Cargo.toml` leads to, from `cargo metadata`'s answer (parsed
+JSON), for `discover`: the `Crate`, and what `[rust] package` must say for
+the build to pick it again (`""` when the manifest's own package is it).
+
+- The manifest's own package, when it has a library target.
+- Else, when the manifest is a workspace's root (with no package, or with
+  one that is only a binary) and exactly one member has a library target:
+  that one, by name.
+- A member of a workspace that has no library is an error about that
+  member, whatever its siblings are.
+- Several library crates is an error that lists them and shows the project
+  file to write: which one to wrap is not something the manifest says.
+- None is an error: a binary has no API to wrap.
+"""
+function discovered_crate(metadata::AbstractDict, manifest::AbstractString)
+    pkgs = metadata["packages"]
+    is_lib(p) = any(t -> any(k -> k in _LIBRARY_KINDS, t["kind"]), p["targets"])
+    rc(package) = RustConfig(String(manifest), "", String(package), 0, String[], true, "", String[])
+    own = findfirst(p -> _same_file(p["manifest_path"], manifest), pkgs)
+    (own !== nothing && is_lib(pkgs[own])) && return (select_crate(metadata, rc("")), "")
+    # cargo answers for the whole workspace whichever member's manifest it is
+    # asked about. A member that is not the workspace's root and has no
+    # library was pointed at by name: it is the answer, and it has no API
+    # (`select_crate` says which kind of crate it is). Only the root's
+    # manifest stands for the workspace.
+    at_root = _same_file(joinpath(String(metadata["workspace_root"]), "Cargo.toml"), manifest)
+    (own !== nothing && !at_root) && select_crate(metadata, rc(""))
+    libs = sort!(String[String(p["name"]) for p in pkgs if is_lib(p)])
+    if length(libs) == 1
+        return (select_crate(metadata, rc(libs[1])), libs[1])
+    elseif isempty(libs)
+        # The manifest's own package, if any, gives the reason (a binary, a C-only library).
+        own === nothing || select_crate(metadata, rc(""))
+        error("$(manifest) is a workspace and none of its packages has a library target " *
+              "($(join(sort!(String[String(p["name"]) for p in pkgs]), ", "))). A binary crate has no API to wrap.")
+    end
+    error("$(manifest) is a workspace with $(length(libs)) library crates: $(join(libs, ", ")). " *
+          "A project wraps one of them, and the manifest does not say which. Write replibuild.toml " *
+          "beside it:\n\n[project]\nname = $(repr(replace(libs[1], '-' => '_')))\n\n[rust]\nmanifest = \"Cargo.toml\"\n" *
+          "package = $(repr(libs[1]))\n")
+end
+
+"""
+    project_text(crate, package) -> String
+
+The replibuild.toml `discover` writes for a Cargo crate: the project's name
+(the crate's, which the library and the Julia module are named after) and the
+`[rust]` section that names the crate. Nothing else: every other key has a
+default, and what a build can find out is not asked of the file.
+"""
+function project_text(crate::Crate, package::AbstractString = "")::String
+    io = IOBuffer()
+    println(io, "# Written by RepliBuild.discover for the Cargo package `$(crate.package)`.")
+    println(io, "# cargo builds the crate as it is; RepliBuild.build and RepliBuild.wrap give the Julia module.")
+    println(io)
+    println(io, "[project]")
+    println(io, "name = ", repr(crate.name))
+    println(io, "root = \".\"")
+    println(io)
+    println(io, "[rust]")
+    println(io, "manifest = \"Cargo.toml\"")
+    isempty(package) || println(io, "package = ", repr(String(package)))
+    println(io, "# 0 to 3. 0 compiles fastest; 3 is what `cargo build --release` gives.")
+    println(io, "opt_level = 0")
+    return String(take!(io))
+end
+
+"""
+    discover_project(dir) -> String
+
+`RepliBuild.discover` for a directory that holds a `Cargo.toml`: ask cargo
+what the manifest is (`cargo metadata`, which reads the manifest and compiles
+nothing), pick the crate (`discovered_crate`), and write `replibuild.toml`
+beside the manifest (`project_text`). Returns that file's path.
+
+Nothing is scanned: cargo knows the crate's sources, and nothing about a
+crate needs an entry except what no compile can say (`[rust] instantiate`,
+features), which is the user's to add.
+"""
+function discover_project(dir::AbstractString)::String
+    dir = abspath(String(dir))
+    manifest = joinpath(dir, "Cargo.toml")
+    isfile(manifest) || error("RustBuild.discover_project: $manifest does not exist")
+    tc = toolchain(dir)
+    args = ["metadata", "--format-version", "1", "--no-deps", "--manifest-path", manifest]
+    (out, err, code) = _capture(_cargo(tc, args, dir))
+    code == BuildBridge.SPAWN_FAILED && error(_missing_tool_message("cargo", tc.cargo, code, err))
+    code == 0 || error("cargo metadata failed for $manifest (exit $code):\n$(strip(err))")
+    (crate, package) = discovered_crate(_parse_json(out), manifest)
+    path = joinpath(dir, "replibuild.toml")
+    write(path, project_text(crate, package))
+    # The file just written is one the build will load: say so now if it is not.
+    ConfigurationManager.load_config(path)
+    println("  found: the crate `$(crate.name)`" * (crate.package == crate.name ? "" : " (Cargo package `$(crate.package)`)") *
+            (isempty(package) ? "" : ", the workspace's one library crate"))
+    println("  wrote: $(basename(path)) ([rust] manifest = \"Cargo.toml\"" * (isempty(package) ? "" : ", package = $(repr(package))") * ")")
+    return path
+end
+
+# =============================================================================
 # The build
 # =============================================================================
 

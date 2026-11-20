@@ -1348,6 +1348,24 @@ function _checkout_relative(dependency::AbstractString, source::AbstractString, 
     return s
 end
 
+"""
+    is_rust_toml(path) -> Bool
+
+Whether the project file at `path` has a `[rust]` section, read without
+loading the configuration: what a caller needs to know before it decides
+which toolchain to ask about. `false` for a file that is absent or does not
+parse (loading it reports that).
+"""
+function is_rust_toml(path::AbstractString)::Bool
+    isfile(path) || return false
+    data = try
+        TOML.parsefile(String(path))
+    catch
+        return false
+    end
+    return haskey(data, "rust")
+end
+
 "The keys a `[rust]` section may have."
 const RUST_KEYS = ("manifest", "dependency", "package", "opt_level", "features", "default_features", "instantiate")
 

@@ -335,13 +335,17 @@ def NativeCallOp : JLCS_Op<"native_call", [MemoryEffects<[MemRead, MemWrite]>]> 
     convention (rustc's own: an `Option<i32>` comes back as a first-class
     `{ i32, i32 }` in two registers, where the C rule packs it into one).
 
-    `callee` names the function. `arg_attrs`, when present, holds one
-    dictionary per operand with the LLVM parameter attributes that change how
-    the argument is passed, under the LLVM dialect's own names
-    (`llvm.zeroext`, `llvm.signext`, `llvm.sret`, `llvm.byval`, `llvm.align`,
-    `llvm.inreg`). The lowering stamps them on the call site and on the
-    callee's declaration, which it also retypes to exactly the operand and
-    result types of the op.
+    `callee` names the function. With no `callee` the first operand is the
+    function's address (an `!llvm.ptr`) and the call goes through it: the
+    module then names no function, so nothing has to resolve one, and the
+    caller says which function is meant. `arg_attrs`, when present, holds one
+    dictionary per argument of the call (the callee's address is not one)
+    with the LLVM parameter attributes that change how the argument is
+    passed, under the LLVM dialect's own names (`llvm.zeroext`,
+    `llvm.signext`, `llvm.sret`, `llvm.byval`, `llvm.align`, `llvm.inreg`).
+    The lowering stamps them on the call site and, for a named callee, on its
+    declaration, which it also retypes to exactly the argument and result
+    types of the op.
 
     The call is a plain call: a callee that unwinds unwinds through the
     caller. Whatever must end that unwind (a Rust panic may only be ended by
@@ -357,6 +361,8 @@ def NativeCallOp : JLCS_Op<"native_call", [MemoryEffects<[MemRead, MemWrite]>]> 
       { callee = @_RNvCs1hrDFCe5rCe_4lean8rec_make,
         arg_attrs = [ {llvm.sret = !llvm.array<16 x i8>, llvm.align = 8 : i64}, {} ] }
       : (!llvm.ptr, i8) -> ()
+
+    %r = jlcs.native_call %fn, %x : (!llvm.ptr, i32) -> !llvm.struct<(i32, i32)>
     ```
   }];
   let arguments = (ins Variadic<AnyType>:$args);

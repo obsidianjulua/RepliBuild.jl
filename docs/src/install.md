@@ -20,8 +20,11 @@ until the summary says what you need:
 | `Tier 3 (ccall) — C wrappers will build` | You can wrap **C** libraries. |
 | `C++ builds — clang++ and LLVM 21+ found` | C++ sources will compile. |
 | `Tier 2 (MLIR thunks) — C++ methods, …` | You can wrap **C++** libraries. |
+| `Rust crates — cargo and rustc found` | You can wrap **Rust** crates. |
 
-Wrapping C needs only the first line. Wrapping C++ needs all three.
+Wrapping C needs only the first line. Wrapping C++ needs the first three.
+Wrapping a Rust crate needs only the last: `cargo` and `rustc`, which are
+yours to install ([Rust crates](rust.md)).
 
 ## What you need
 
@@ -46,6 +49,7 @@ them RepliBuild brings with it, and some it takes from your system:
 | `git` | Git dependencies | Comes with RepliBuild | Your system |
 | `cmake`, `ninja` | [CMake projects](graph.md) | Comes with RepliBuild | Your system (MSYS2) |
 | `pkg-config` | `system` dependencies only | Your system | Your system |
+| `cargo`, `rustc` | [Rust crates](rust.md) only | **Your system** ([rustup](https://rustup.rs)) | Not run yet |
 | `libJLCS` | RepliBuild's own C++ support library | Downloaded with RepliBuild | Built on your machine |
 
 So on Linux a C library needs almost nothing from the system, and a C++

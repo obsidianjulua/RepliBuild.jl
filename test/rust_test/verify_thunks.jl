@@ -13,6 +13,7 @@
 # One `PROBE <name>: PASS|FAIL …` line per case, then `PROBE_DONE`.
 
 using RepliBuild
+using Libdl
 
 const RT = RepliBuild.RustThunks
 const LIB = ARGS[1]
@@ -20,6 +21,15 @@ const MD = RepliBuild._read_json(ARGS[2])
 const FN = Dict(f["path"] => f for f in MD["functions"])
 const TYPES = MD["types"]
 const S = RT.load(LIB, MD)
+# A third argument is a library of the same thunks compiled ahead of time
+# (`RustThunks.aot_library`): every call below then goes through it, and the
+# JIT's session is used only for what it knows about each function.
+const AOT = length(ARGS) >= 3 ? Libdl.dlopen(ARGS[3], Libdl.RTLD_NOW | Libdl.RTLD_LOCAL) : C_NULL
+if AOT != C_NULL
+    for sym in collect(keys(S.thunks))
+        S.thunks[sym] = Libdl.dlsym(AOT, RT.thunk_name(sym))
+    end
+end
 
 probe(name, ok, detail = "") = (println("PROBE ", name, ": ", ok ? "PASS" : "FAIL " * string(detail)); flush(stdout))
 function case(body, name)
@@ -42,6 +52,8 @@ function call(path, args...; bytes = nothing)
     RT.call_raw(S, row["symbol"], buf, args...)
     return buf
 end
+
+println("PROBE thunks_from: PASS ", AOT == C_NULL ? "jit" : "aot"); flush(stdout)
 
 case("thunks_for_every_callable") do
     callable = [f["symbol"] for f in MD["functions"] if f["refusal"] === nothing]

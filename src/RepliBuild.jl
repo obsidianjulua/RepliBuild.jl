@@ -615,7 +615,9 @@ end
 """
     discover(target_dir="."; force=false, build=false, wrap=false) -> String
 
-Scan a C or C++ project and generate its replibuild.toml.
+Scan a C or C++ project and generate its replibuild.toml. In a directory that
+holds a `Cargo.toml` and no replibuild.toml yet, the project is that Rust
+crate: cargo is asked what it is, and the file names it under `[rust]`.
 
 **This is the entry point for new projects.** Run this first to set up RepliBuild.
 
@@ -869,14 +871,18 @@ RepliBuild.wrap("replibuild.toml")
 """
 function build(toml_path::String="replibuild.toml"; clean::Bool=false)
 
-    # Validate environment before attempting build
-    env_status = EnvironmentDoctor.check_environment(verbose=false)
-    if !env_status.ready
-        EnvironmentDoctor.check_environment(verbose=true, throw_on_error=true)
-    end
-
     # Resolve absolute path to TOML file
     toml_path = abspath(toml_path)
+
+    # Validate environment before attempting build. A Rust project is asked
+    # about the Rust toolchain and the readers a wrapper needs, and nothing
+    # about the C and C++ compilers, which it never starts.
+    env_status = EnvironmentDoctor.check_environment(verbose=false)
+    if ConfigurationManager.is_rust_toml(toml_path)
+        EnvironmentDoctor.rust_ready(env_status) || error(EnvironmentDoctor.rust_problem(env_status))
+    elseif !env_status.ready
+        EnvironmentDoctor.check_environment(verbose=true, throw_on_error=true)
+    end
 
     if !isfile(toml_path)
         error("Configuration file not found: $toml_path\n" *

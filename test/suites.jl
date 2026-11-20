@@ -193,6 +193,8 @@ const TESTS = TestFile[
     T("test_rust_thunks.jl", :unit, [:rust]),
     T("test_rust_wrap.jl", :unit, [:rust]),
     T("test_rust_glue.jl", :unit, [:rust, :build]),
+    T("test_rust_discover.jl", :unit, [:rust, :build]),
+    T("test_doctor_rust.jl", :unit, [:rust, :build]),
     T("test_cross_library_types.jl", :unit, [:graph, :c, :cpp]),
 
     # ── dev: compiles, links or JITs ─────────────────────────────────────────

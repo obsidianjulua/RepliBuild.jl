@@ -645,7 +645,9 @@ output directory to `builds/<hash>/` and publish it (`_publish!`). Returns the
 updated entry, saved.
 """
 function _build_and_vendor!(entry::RegistryEntry; clean::Bool=false, verbose::Bool=true)::RegistryEntry
-    _ensure_toolchain()
+    # A Rust project's toolchain is not the C and C++ one this asks about;
+    # `build` asks about the right one for either.
+    ConfigurationManager.is_rust_toml(entry.toml_path) || _ensure_toolchain()
     parent_mod = parentmodule(@__MODULE__)
     parent_mod.build(entry.toml_path; clean=clean)
     parent_mod.wrap(entry.toml_path)

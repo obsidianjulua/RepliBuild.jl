@@ -1579,6 +1579,11 @@ struct FFECallOpLowering : public ConversionPattern {
 // every struct; this op exists for a callee whose signature is already the
 // lowered one, because its own compiler wrote it (rustc's `define` line).
 // The identity is the whole of it: anything added here is a second ABI rule.
+//
+// With no `callee` attribute the first operand is the function's address and
+// the call goes through it: the same call, of a function the module does not
+// name. There is then no declaration to retype, and nothing for a loader or
+// a JIT to resolve.
 struct NativeCallOpLowering : public ConversionPattern {
     NativeCallOpLowering(LLVMTypeConverter& typeConverter, MLIRContext* ctx)
         : ConversionPattern(typeConverter, NativeCallOp::getOperationName(), 1,
@@ -1594,8 +1599,9 @@ struct NativeCallOpLowering : public ConversionPattern {
         Location loc = nativeCallOp.getLoc();
 
         auto calleeAttr = op->getAttrOfType<FlatSymbolRefAttr>("callee");
-        if (!calleeAttr)
-            return op->emitError("native_call requires a 'callee' symbol reference attribute");
+        if (!calleeAttr && (operands.empty() || !isa<LLVM::LLVMPointerType>(operands[0].getType())))
+            return op->emitError("native_call requires a 'callee' symbol reference attribute, or the "
+                                 "function's address as its first operand");
 
         SmallVector<Type, 1> resultTypes;
         for (Type t : nativeCallOp.getResults().getTypes()) {
@@ -1604,12 +1610,29 @@ struct NativeCallOpLowering : public ConversionPattern {
                 return op->emitError("native_call: could not convert result type");
             resultTypes.push_back(converted);
         }
+        // The arguments of the call: every operand, less the callee's address.
+        ArrayRef<Value> callArgs = calleeAttr ? operands : operands.drop_front();
         SmallVector<Type, 4> argTypes;
-        for (Value v : operands)
+        for (Value v : callArgs)
             argTypes.push_back(v.getType());
 
-        // One dictionary per operand (the verifier holds the shape).
+        // One dictionary per argument (the verifier holds the shape).
         ArrayAttr argAttrs = op->getAttrOfType<ArrayAttr>("arg_attrs");
+
+        if (!calleeAttr) {
+            auto fnType = LLVM::LLVMFunctionType::get(
+                resultTypes.empty() ? (Type)LLVM::LLVMVoidType::get(rewriter.getContext())
+                                    : resultTypes[0],
+                argTypes, /*isVarArg=*/false);
+            auto callOp = LLVM::CallOp::create(rewriter, loc, fnType, ValueRange(operands));
+            if (argAttrs)
+                callOp.setArgAttrsAttr(argAttrs);
+            if (resultTypes.empty())
+                rewriter.eraseOp(op);
+            else
+                rewriter.replaceOp(op, callOp.getResults());
+            return success();
+        }
 
         // The declaration takes exactly this signature and these attributes:
         // the call site is what the backend lowers, and the declaration is

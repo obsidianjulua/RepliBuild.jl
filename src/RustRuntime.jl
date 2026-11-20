@@ -12,14 +12,17 @@
 # types call the library's own drop functions (`drop!`, also their
 # finalizer), and a `Result`'s `Err` is thrown as a `RustError`.
 #
-# One `Library` per wrapped library. Its thunks are JIT'd the first time one
-# is needed, never when the wrapper is loaded: a wrapper whose every call is
-# a plain `ccall` needs no JIT at all, and a precompiling process must not
-# start one.
+# One `Library` per wrapped library. Its thunks are in a small library of
+# their own beside it when `wrap` could compile them (`RustThunks.aot_library`),
+# and otherwise are JIT'd the first time one is needed, never when the wrapper
+# is loaded: a wrapper whose every call is a plain `ccall` needs no JIT at
+# all, a wrapper with its thunks library needs none either, and a
+# precompiling process must not start one.
 
 module RustRuntime
 
 using Libdl
+import SHA
 
 import ..RustThunks
 import .._read_json
@@ -89,8 +92,9 @@ Base.showerror(io::IO, e::RustPanic) = print(io, "RustPanic: ", e.message)
 
 """
 A wrapped Rust library at run time: its file, its metadata, the two functions
-of the catching frame (`C_NULL` in a library built before there was one), and
-its thunk session once a thunk has been asked for.
+of the catching frame (`C_NULL` in a library built before there was one), its
+ahead-of-time thunks library when there is one (`thunks_handle`), and its
+thunk session once a thunk had to be JIT'd.
 """
 mutable struct Library
     path::String
@@ -100,19 +104,51 @@ mutable struct Library
     message_fp::Ptr{Cvoid}
     session::Union{Nothing,RustThunks.Session}
     lock::ReentrantLock
+    thunks_handle::Ptr{Cvoid}
 end
 
 """
-    Library(path; metadata = <beside the library>)
+    Library(path; metadata = <beside the library>, thunks = "", thunks_sha = "", convention = "rust-thunk-1")
 
 Open the library (its own handle, `RTLD_LOCAL`). Nothing is JIT'd here.
+
+`convention` is the thunk convention the calling wrapper was written for
+(what its slots hold). A wrapper written for another one than this
+RepliBuild's would hand its thunks the wrong slots, so it is refused here,
+before any call, and asked to be generated again.
+
+`thunks` is the library of thunks `wrap` compiled ahead of time, used when it
+is there and is the file the wrapper was generated with (`thunks_sha`). When
+it is not, the thunks are JIT'd from the metadata at the first call that
+needs one, as they are for a wrapper with no thunks library.
 """
-function Library(path::AbstractString; metadata::AbstractString = joinpath(dirname(path), "compilation_metadata.json"))
+function Library(path::AbstractString; metadata::AbstractString = joinpath(dirname(path), "compilation_metadata.json"),
+                 thunks::AbstractString = "", thunks_sha::AbstractString = "",
+                 convention::AbstractString = "rust-thunk-1")
+    convention == RustThunks.CONVENTION ||
+        error("RustRuntime: the wrapper of $(basename(path)) was generated for the thunk convention " *
+              "`$convention`, and this RepliBuild's is `$(RustThunks.CONVENTION)`: its calls would hand a " *
+              "thunk the wrong arguments. Run RepliBuild.wrap on the project again.")
     handle = Libdl.dlopen(String(path), Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
     return Library(String(path), String(metadata), handle,
                    something(Libdl.dlsym_e(handle, :__rb_catch), C_NULL),
                    something(Libdl.dlsym_e(handle, :__rb_panic_message), C_NULL),
-                   nothing, ReentrantLock())
+                   nothing, ReentrantLock(), _open_thunks(String(path), String(thunks), String(thunks_sha)))
+end
+
+# The ahead-of-time thunks library's handle, or `C_NULL` to JIT: no such
+# file, another file than the wrapper was generated with (its thunks may be
+# another build's), or one that does not load.
+function _open_thunks(library::String, thunks::String, sha::String)::Ptr{Cvoid}
+    (isempty(thunks) || !isfile(thunks)) && return C_NULL
+    if !isempty(sha) && bytes2hex(open(SHA.sha256, thunks)) != sha
+        @warn "RustRuntime: $(basename(thunks)) is not the thunks library the wrapper of $(basename(library)) " *
+              "was generated with; it is not used, and the thunks are compiled at first use instead. " *
+              "Run RepliBuild.wrap on the project again to have them match."
+        return C_NULL
+    end
+    handle = Libdl.dlopen(thunks, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL; throw_error = false)
+    return handle === nothing ? C_NULL : handle
 end
 
 # The thunks, JIT'd on first use, once.
@@ -135,10 +171,16 @@ end
 """
     thunk(lib, symbol) -> Ptr{Cvoid}
 
-The thunk for the function `symbol`. An error that says why when there is
-none: the function was refused, or its signature is one a thunk does not carry.
+The thunk for the function `symbol`: the one in the library's ahead-of-time
+thunks library when it has one, else JIT'd. An error that says why when there
+is none: the function was refused, or its signature is one a thunk does not
+carry.
 """
 function thunk(lib::Library, symbol::AbstractString)::Ptr{Cvoid}
+    if lib.thunks_handle != C_NULL
+        fp = something(Libdl.dlsym_e(lib.thunks_handle, RustThunks.thunk_name(symbol)), C_NULL)
+        fp == C_NULL || return fp
+    end
     s = _session(lib)
     fp = get(s.thunks, symbol, C_NULL)
     fp == C_NULL && error("RustRuntime: no thunk for `$symbol` in $(basename(lib.path))" *
@@ -166,9 +208,11 @@ end
 """
     invoke(lib, fp, guarded, slots, ret)
 
-Call the thunk `fp` with its argument slots and its result pointer. `guarded`
-says the function may panic: the call is then made inside the library's
-catching frame, and a panic is thrown as a `RustPanic`.
+Call the thunk `fp` with its slots and its result pointer. The slots are one
+per parameter the function is handed, then the function's own address, which
+the thunk calls (`RustThunks`). `guarded` says the function may panic: the
+call is then made inside the library's catching frame, and a panic is thrown
+as a `RustPanic`.
 """
 @inline function invoke(lib::Library, fp::Ptr{Cvoid}, guarded::Bool, slots::Vector{Ptr{Cvoid}}, ret::Ptr{Cvoid})
     if guarded
