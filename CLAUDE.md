@@ -432,7 +432,12 @@ If you are asked to work on it:
   branch; `main` keeps the release its own file names, so neither waits on
   the other. `deps/jlcs_jll/README.md` has the
   publishing and Yggdrasil steps; `yggdrasil/build_tarballs.jl` is the same
-  build as the local recipe from a pinned commit. (`test_jlcs_abi_version.jl`,
+  build as the local recipe from the dialect's release tag, and is the recipe
+  open as JuliaPackaging/Yggdrasil#15725. It is written to Yggdrasil's rules
+  (its `AGENTS.md` and review checklist: platforms by `filter!` with what
+  breaks, a `compat` on every dependency, GCC 10 as `LLVM_full_jll`'s), so a
+  change to one copy is a change to both and is checked against those rules
+  first. (`test_jlcs_abi_version.jl`,
   devtests `test_jlcs_abi_live.jl`.)
 - `Builder/SysConfigGen.jl`, `Builder/VisibilityProbe.jl` — probes, run once per
   package or version bump, not on the build path.

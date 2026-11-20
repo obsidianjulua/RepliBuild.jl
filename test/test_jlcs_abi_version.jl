@@ -102,10 +102,13 @@ end
     @test occursin("version = v\"$version\"", ygg)
     @test occursin("joinpath(REPO, \"src\", \"mlir\", \"VERSION\")", here)
 
-    # Yggdrasil builds from a pinned commit of the repository, never a path.
-    m = match(r"GitSource\(\"(https://github\.com/[^\"]+)\",\s*\"([0-9a-f]{40})\"\)", ygg)
+    # Yggdrasil builds from a pinned commit of the repository, never a path:
+    # the commit of the dialect's own release tag, which its build checks the
+    # hash against (`tag=`, computed from `version`, as Yggdrasil asks).
+    m = match(r"GitSource\(\"(https://github\.com/[^\"]+)\",\s*\"([0-9a-f]{40})\";\s*tag\s*=\s*\"jlcs-v\$\(version\)\"\)", ygg)
     @test m !== nothing
     @test m.captures[1] == "https://github.com/obsidianjulua/RepliBuild.jl.git"
+    @test m.captures[2] != "0"^40
     @test !occursin("@__DIR__", ygg)
     @test !occursin("DirectorySource", ygg)
     # This checkout's builds the working tree, laid out as a clone is.

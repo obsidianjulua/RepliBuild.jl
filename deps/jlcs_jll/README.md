@@ -47,20 +47,41 @@ build from the branch, publish, commit `Artifacts.toml` to the branch.
 ## Registering `JLCS_jll` in General
 
 A JLL is not a repository you write: Yggdrasil builds the recipe and
-publishes `JuliaBinaryWrappers/JLCS_jll.jl` for you.
+publishes `JuliaBinaryWrappers/JLCS_jll.jl` for you. The recipe is open there
+as JuliaPackaging/Yggdrasil#15725.
 
-1. Merge the dialect change to `main` here, and note the commit.
-2. In `yggdrasil/build_tarballs.jl`, set the `GitSource` commit to it (the
-   file in this repository carries a placeholder of zeros) and check `version`.
-3. Open a pull request to `JuliaPackaging/Yggdrasil` adding that file as
-   `J/JLCS/build_tarballs.jl`. Its CI builds both platforms; on merge
-   `JLCS_jll` is registered.
-4. Then, in RepliBuild: add `JLCS_jll` to `Project.toml` with a compat bound
-   on the version that carries this `ABI_VERSION`, and have
-   `Builder/JLCSLibrary.jl` take `JLCS_jll.libJLCS` where it takes the
-   artifact now (a local build still first). `Artifacts.toml` and the release
-   route can then go.
+`yggdrasil/build_tarballs.jl` is that recipe, kept here so the two builds
+stay one (`test_jlcs_abi_version.jl`). It is written to Yggdrasil's own rules
+(`AGENTS.md` and `.agents/skills/reviewing-prs/SKILL.md` in their
+repository; read them before changing it):
 
-For a later dialect change the loop is steps 1 to 3 again, then the compat
-bound. The ABI check is what catches a RepliBuild paired with the wrong
-`JLCS_jll` if a bound is ever set wrong.
+- The source is the commit of the dialect's release tag, with
+  `tag="jlcs-v$(version)"`, which their build checks the hash against. So a
+  new dialect version is tagged (the release above) before its recipe moves.
+- Platforms start from `supported_platforms()` and each exclusion is a
+  `filter!` with a comment saying what breaks. What builds: x86-64 and
+  AArch64 Linux, glibc and musl.
+- Every `Dependency` has a `compat` bound that the standard-library JLL of
+  the oldest Julia in `julia_compat` satisfies.
+- GCC 10, the version `LLVM_full_jll` 23 is built with.
+
+Before a recipe change goes to Yggdrasil, in a checkout of it, with its own
+environment:
+
+    cd J/JLCS
+    julia --project=../.. build_tarballs.jl --verbose --deploy=local
+
+then load `~/.julia/dev/JLCS_jll` in a fresh environment on Julia 1.10 (the
+`julia_compat` floor) and on a current one, and run RepliBuild's Tier 2 tests
+with `REPLIBUILD_JLCS=<JLCS_jll.libJLCS_path>`.
+
+When the JLL is registered: add `JLCS_jll` to RepliBuild's `Project.toml`
+with a compat bound on the version that carries this `ABI_VERSION`, and have
+`Builder/JLCSLibrary.jl` take `JLCS_jll.libJLCS` where it takes the artifact
+now (a local build still first). `Artifacts.toml` and the release route can
+then go.
+
+For a later dialect change the loop is: bump, tag and release here, move the
+recipe's `version` and commit, open the Yggdrasil PR, then the compat bound.
+The ABI check is what catches a RepliBuild paired with the wrong `JLCS_jll`
+if a bound is ever set wrong.
