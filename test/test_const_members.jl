@@ -126,7 +126,8 @@ _cm_marshal_sigs(ir) = [String(m.captures[1]) for m in eachmatch(r"jlcs\.marshal
         body = String(match(r"func\.func @narrow_thunk.*?\n\}"s, ir).match)
         @test [m.captures[1] for m in eachmatch(r"llvm\.(zext|sext) %val_\d", body)] == ["zext", "sext", "sext", "zext"]
         # A record qualified in a signature was right before and stays so.
-        rec = _CMFG.generate_function_thunks(Any[_cmfn("total", "long", "const Name"), _cmfn("make", "const Pair")], S; abi = :sysv)
+        # (`long long`, not `long`: `long` is 32 bits on Win64, and this pins a width.)
+        rec = _CMFG.generate_function_thunks(Any[_cmfn("total", "long long", "const Name"), _cmfn("make", "const Pair")], S; abi = :sysv)
         @test occursin("func.func private @total(!llvm.struct<packed (i32, i32, !llvm.ptr, i32, i32) >) -> i64", rec)
         @test occursin("func.func private @make() -> !llvm.struct<packed (i32, i32) >", rec)
     end
@@ -140,8 +141,8 @@ _cm_marshal_sigs(ir) = [String(m.captures[1]) for m in eachmatch(r"jlcs\.marshal
 
     @testset "B: a byte-region body crosses as its bytes, never through a marshal op" begin
         funcs = Any[_cmfn("make_odd", "Odd"), _cmfn("odd_sum", "int", "Odd"),
-                    _cmfn("make_name", "Name"), _cmfn("name_total", "long", "Name"),
-                    _cmfn("pair_of", "Pair", "int"), _cmfn("pair_sum", "long", "Pair"),
+                    _cmfn("make_name", "Name"), _cmfn("name_total", "long long", "Name"),
+                    _cmfn("pair_of", "Pair", "int"), _cmfn("pair_sum", "long long", "Pair"),
                     _cmfn("holder_sum", "int", "Holder")]
         ir = _CMFG.generate_function_thunks(funcs, S; abi = :sysv)   # the SysV statements, on every host
         decls = Dict(m.captures[1] => m.match for m in eachmatch(r"func\.func private @(\w+)\(.*", ir))
