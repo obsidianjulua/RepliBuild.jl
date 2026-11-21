@@ -35,6 +35,7 @@ makedocs(;
             "Debug it" => "debugging.md",
         ],
         "Troubleshooting" => "troubleshooting.md",
+        "Support and versions" => "support.md",
         "API" => "api.md",
         "Changelog" => "release-notes.md",
         "Internals (contributors)" => [

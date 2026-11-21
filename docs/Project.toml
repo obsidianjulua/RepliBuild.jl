@@ -2,5 +2,8 @@
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 RepliBuild = "4450f29b-7b71-45c6-8742-e7520a479938"
 
+[sources]
+RepliBuild = {path = ".."}
+
 [compat]
 Documenter = "1"

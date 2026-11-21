@@ -2629,13 +2629,16 @@ Where the time goes was measured on Jolt, the largest Hub package
   ways when measured. Disambiguating needs scoped names through `resolve_type`, the
   generators and the thunks, and C's case (two `.c` files, two `struct state`s) has
   no scope to qualify by.
-- **Registered 3.0–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
-  "9 - 10"` in `R/RepliBuild/Compat.toml`), although nothing before 4.2.1 handles
-  it: their Tier 1 code makes the reads 4.2.1 fixed. 4.2.0 is capped at `"9"`.
+- **Registered 3.2–4.1.x still allow LLVM.jl 10 in General** (`["3 - 4.1"] LLVM =
+  "9 - 10"` in `R/RepliBuild/Compat.toml`), although none of them handles it:
+  their static promotion and Tier 1 code makes the reads 4.2.1 fixed. 3.0–3.1
+  predate that code and call only what main still calls on LLVM.jl 10, so they
+  keep the range. 4.2.0 is capped at `"9"`.
   4.2.1 was never registered; its fixes ship in 4.3.0. 4.3.0 and later are
   registered, so the resolver prefers them, and the old versions are reached only when another
-  package holds RepliBuild back. Capping them is a
-  General PR (outward-facing, ask first).
+  package holds RepliBuild back. The fix is a General PR (outward-facing, John
+  opens it): split the entry into `["3 - 3.1"]` at `"9 - 10"` and `["3.2 - 4.1"]`
+  at `"9"`, which changes exactly the nine versions 3.2.0 to 4.1.1.
 
 ### Confirmed defects — 2026-09-26 audit
 
