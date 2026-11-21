@@ -23,6 +23,113 @@ registered release, which can be older than what is described here;
 - **On Windows**, build the JLCS dialect again: the new version lives in a new
   folder ([Set up](install.md#Building-libJLCS-yourself)).
 
+## v4.6.0 (2026-11-21)
+
+**Julia 1.13 is the oldest release supported; on Julia 1.12, `Pkg.add` keeps
+installing 4.5.1.** On Linux RepliBuild now brings its own tools and its own
+C++ support library, so there is much less to install, and it wraps Rust
+crates. After upgrading, every C project links again by itself, C++ projects
+should be rebuilt, and every wrapper should be generated again.
+
+- **Rust crates.** `discover`, `build`, `wrap` and `use` work on a Cargo crate
+  as it is, with no `extern "C"` and no `#[repr(C)]`: public functions
+  (`#[inline]` ones included), structs and enums, `String` and `Vec`, `Box`,
+  `Option`, `Result` as a value or a thrown error, a panic as a Julia
+  exception, trait objects, callbacks and statics. A generic function is
+  wrapped for the types the recipe names. It needs `cargo` and `rustc`, and
+  runs on Linux; Windows has not been run ([Rust crates](rust.md)).
+- **`libJLCS` is downloaded on Linux.** RepliBuild's C++ support library
+  comes ready-made, for x86-64 and AArch64, so a C++ library needs `clang++`
+  and LLVM but no MLIR packages and no build step. A library you built
+  yourself still wins, and one built before this release must be built again:
+  `check_environment()` says so. `REPLIBUILD_JLCS` chooses `local`, `artifact`
+  or a path. Windows builds its own, as before.
+- **The tools come with RepliBuild on Linux.** `readelf`, `nm`, `objdump`,
+  `c++filt`, `git`, `cmake`, `ninja` and the linker for C projects are the
+  package's own copies, with the system's used when one cannot start. A C
+  library needs only the C library's development files. `REPLIBUILD_TOOLS=system`
+  prefers your copies, and `REPLIBUILD_TOOL_<NAME>` names one program. On
+  Windows the system's copies stay first ([Set up](install.md)).
+- **`llvm-dwarfdump` is no longer required on a machine that only loads a C++
+  wrapper**: RepliBuild's own copy is used where the system has none.
+- **`check_environment()`** reports where each tool comes from, and has a
+  Rust section.
+- **The first `discover` of a session takes seconds.** It used to compile
+  `build`, `wrap` and `register` before it ran, for a minute and a half.
+- **[Support and versions](support.md)** is a new page: which releases get
+  fixes, where RepliBuild runs, and what a version number promises.
+- **Calls that were wrong, and are now right or refused.** Twenty-two small
+  libraries were wrapped and then called from Julia; what that found:
+  - Loading a C++ wrapper crashed when any function took, by value, a class
+    with a destructor. A move-only class passed by value was copied bytewise.
+  - A pointer or reference to an enum was passed as the enum's value.
+  - A C++ pointer parameter read whatever it was given as an address: a
+    struct value, a Julia function, a `Vector`. It now refuses what C++ would
+    not take there, with a `MethodError`.
+  - The constructor of a class with a virtual base crashed, and some virtual
+    methods were called statically (`Dog_name(puppy)` returned the base
+    class's answer).
+  - An `extern "C"` function in a C++ library that throws ended the process.
+    The exception now arrives in Julia.
+  - A signed bitfield read as unsigned; a `char` parameter refused a negative
+    value; a `SubString` passed as a C string was read to its parent's end;
+    a `signed char*` return came back as a `String`.
+  - One `unsigned __int128` in a library refused the whole wrap.
+  - A library function named `String`, `Cint`, `eval` or `include`, or a C++
+    class named `Bool` or `Integer`, changed Base or broke the module. Such a
+    name moves (`String_`, `c_Integer`), and `wrap` prints each move.
+- **Wrapper names and calls that change — re-wrap, and update callers:**
+  - C++ comparison, shift, arrow and array-`new`/`delete` operators have new
+    names (`operatorless`, `operatorlessless`, `operatorminusgreater`, …).
+    `operator()`, `operator[]` and `operator,` have their own names
+    (`operatorcall`, `operatorindex`, `operatorcomma`) and keep the old
+    shared one.
+  - Two factory functions that take the same arguments no longer share one
+    constructor, where one of them silently won. Each is called by name:
+    `Animal(Val(:make_animal), Cint(4))`.
+  - A global or a no-argument function named like its struct is `name_()`;
+    `name()` stays the zeroed struct.
+  - The constructor of an abstract class is refused, as C++ refuses it.
+  - A pure virtual method is callable on a pointer the library returns.
+  - C++ globals inside a namespace and public static members have accessors,
+    named by their scope (`cfg_depth()`).
+  - A C enum parameter takes an integer as well as the enum.
+- **Fixes in what `build` extracts — rebuild, then re-wrap:** an array of
+  65536 elements or more had no size; C++ globals outside the global
+  namespace; pure virtual methods; and the fact that lets a C++ library's
+  `extern "C"` functions be called directly again. Until a C++ package is
+  rebuilt, those functions go through call stubs, which is correct and slower.
+- **Debug information can be read in-process** on Linux with
+  `REPLIBUILD_DWARF=libdw`. It is opt-in and gives the same answer.
+
+## v4.5.1 (2026-11-17)
+
+**The last release for Julia 1.12.** It carries the C++ work that followed
+4.5.0; everything in it is in 4.6.0 too.
+
+- **A `std::string` parameter takes a Julia string**, `const&` or by value.
+- **Inline constructors and member functions are callable.** A constructor
+  or method that exists only in a header, which the library itself never
+  compiled, is compiled by the build. A constructor or method can also be
+  called with its default arguments left out.
+- **`[types] records`** names a header-only class nothing in the library
+  mentions, so it can be built and passed from Julia
+  ([Every key](config.md)).
+- **A class that adds only methods to its base** has its layout, so it can be
+  passed and returned by value.
+- **A class nested in another answers to its full name too**
+  (`Outer_Inner` beside `Inner`).
+- **A C function's `int` parameter takes an enum value**, as C does.
+- **One rename to check for in callers:** a class whose only destructor is
+  the deleting one is bound as `<X>_delete_<X>`, no longer `<X>_destroy_<X>`.
+- **Calls that crossed wrong:** a `uint8` or other narrow enum passed by
+  value to a C++ method read garbage in its upper bytes; a union of a SIMD
+  vector and the array of its lanes was refused.
+- Builds and wraps of large C++ packages are faster, with identical output.
+- **Rebuild, then re-wrap,** for the string parameters, the inline
+  constructors, methods and default arguments, `[types] records` and the
+  layouts; a re-wrap is enough for the rest.
+
 ## v4.5.0 (2026-11-14)
 
 **Every C++ wrapper must be generated again, and the project is rebuilt for

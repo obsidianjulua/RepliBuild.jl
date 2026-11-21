@@ -1,11 +1,14 @@
-# Build the JLCS MLIR dialect at install time, when the machine can.
+# Make the JLCS MLIR dialect available at install time, when the machine can.
 #
-# The dialect library (`libJLCS.so`, `libJLCS.dll` on Windows) is not shipped —
-# it links against the system MLIR and LLVM, so a prebuilt one would be wrong on
-# any box whose LLVM differs, which is most of them. Until now the consequence landed on the user at the worst possible
-# moment: `Pkg.add` succeeded, `using RepliBuild` succeeded, and the first call
-# that reached Tier 2 raised "JLCS dialect library not found — build it first"
-# from inside a read-only depot.
+# The dialect library (`libJLCS.so`, `libJLCS.dll` on Windows) is not in the
+# package's tree. On Linux a prebuilt one, with LLVM and MLIR linked in, is the
+# lazy `JLCS` artifact: this script fetches it, so the first Tier 2 call does
+# not stop to download. Where there is no prebuilt one (Windows, or a platform
+# with no entry) it is built here against the system MLIR and LLVM. Without
+# this script the gap landed on the user at the worst possible moment:
+# `Pkg.add` succeeded, `using RepliBuild` succeeded, and the first call that
+# reached Tier 2 raised "JLCS dialect library not found — build it first" from
+# inside a read-only depot.
 #
 # THIS SCRIPT MUST NOT THROW. A `deps/build.jl` that fails takes `Pkg.add` down
 # with it, and RepliBuild is perfectly usable without the dialect: Tier 3

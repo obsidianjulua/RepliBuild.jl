@@ -5,10 +5,10 @@
 [![Julia 1.13 | 1.14](https://img.shields.io/badge/julia-1.13%20%7C%201.14-9558B2?logo=julia)](https://julialang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Point RepliBuild at C or C++ source. It compiles the library, reads the ABI the
-compiler actually emitted, and writes a Julia module you can call. You drive it
-with a few verbs and a `replibuild.toml`. You do not write `ccall`s, and you do
-not maintain generated bindings.
+Point RepliBuild at C or C++ source, or at a Rust crate. It compiles the
+library, reads the ABI the compiler actually emitted, and writes a Julia module
+you can call. You drive it with a few verbs and a `replibuild.toml`. You do not
+write `ccall`s, and you do not maintain generated bindings.
 
 It wraps a library from its source, on your machine. It is not a replacement for
 BinaryBuilder and JLL packages, which ship prebuilt binaries for every platform.
@@ -54,6 +54,12 @@ into a system image
 And it can be debugged all the way down: a debugger stops in the library's own
 source and steps through the generated C++ call stubs
 ([Debug it](https://obsidianjulua.github.io/RepliBuild.jl/stable/debugging/)).
+
+A Rust crate is wrapped as it is, with no `extern "C"` and no `#[repr(C)]`:
+cargo builds it, and the module has its public functions, its structs and
+enums, `String` and `Vec` as Julia's own, `Option` as a value or `nothing`,
+and a `Result`'s error or a panic as a Julia exception
+([Rust crates](https://obsidianjulua.github.io/RepliBuild.jl/stable/rust/)).
 
 ## What you edit
 
@@ -117,6 +123,8 @@ Julia module with a submodule per library
 - **C++ libraries:** `clang++` and LLVM 21 or newer on `PATH`. RepliBuild's
   C++ support library, `libJLCS`, is downloaded ready-made on Linux and built
   by `Pkg.build("RepliBuild")` on Windows.
+- **Rust crates:** `cargo` and `rustc`, from [rustup](https://rustup.rs) or
+  your distribution. Linux only so far; Windows has not been run.
 
 `RepliBuild.check_environment()` checks all of it and prints the command that
 installs whatever is missing.
