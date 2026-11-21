@@ -47,8 +47,9 @@ Zlib_jll = "83775a58-1f1d-513f-b197-d71354ab007a"
 Zstd_jll = "3161d3a3-bdf6-5164-811a-617609db77b4"
 
 [extras]
+InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Logging", "Test"]
+test = ["InteractiveUtils", "Logging", "Test"]

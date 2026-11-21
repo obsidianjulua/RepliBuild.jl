@@ -84,6 +84,7 @@ const TESTS = TestFile[
     T("test_compile_visibility.jl", :unit, [:build]),
     T("test_c_generator_policies.jl", :unit, [:c]),
     T("test_cstring_params.jl", :unit, [:c, :cpp]),
+    T("test_cstring_arg_roots.jl", :unit, [:c, :cpp]),
     T("test_char_bitfield_emission.jl", :unit, [:c, :cpp]),
     T("test_c_sret_classification.jl", :unit, [:c]),
     T("test_record_natural_layout.jl", :unit, [:c, :cpp]),
@@ -276,6 +277,8 @@ const TESTS = TestFile[
     T("test_c_linkage_unwind_live.jl", :dev, [:build, :cpp, :dialect], locks = ["c_linkage_unwind_test"]),
     T("test_cstring_params_live.jl", :dev, [:build, :c, :cpp, :dialect],
       locks = ["cstring_param_c_test", "cstring_param_cpp_test"]),
+    # A callback that leaves through a wrapper by longjmp (Lua's error path).
+    T("test_longjmp_wrappers_live.jl", :dev, [:build, :c], locks = ["longjmp_wrapper_test"]),
     T("test_alias_signatures_live.jl", :dev, [:build, :c, :cpp],
       locks = ["alias_signature_test", "alias_signature_cpp_test"]),
     T("test_convenience_overloads.jl", :dev, [:cpp], locks = ["convenience_overload_test"]),

@@ -1361,6 +1361,25 @@ the test named when you touch the area.
   `c_type`, rewriting only a spelling that names `signed char`. A typedef of
   `char*` the metadata records under its own name keeps what it had.
   (`test_cstring_params.jl`, devtests `test_cstring_params_live.jl`.)
+- **A wrapper for a `const char*` holds no GC root when it is given a
+  `String`** (2026-11-21, `JITManager.cstring_arg(::String)`). Some C functions
+  never return to their caller: `luaL_error`, `png_error` and libjpeg's
+  `error_exit` leave by `longjmp`, and a Julia callback calls them to raise
+  the library's error. The Julia frames between the jump and its landing are
+  abandoned with their GC frames still linked, so a wrapper that rooted
+  anything across the call leaves the task's GC stack pointing into dead
+  stack memory, and the next collection reads it: the Hub's lua died in the
+  collector on every run of its deep test (found by the 4.6.0 release sweep;
+  #130's conversion had inlined Base's `Cstring` check, whose `throw` builds a
+  message, and that gave the whole wrapper a frame). So the `String` method
+  inlines to one `memchr` and the argument itself, with the refusal
+  (`_refuse_embedded_nul`) out of line. **Anything a generator adds to a
+  ccall wrapper's argument path must compile to no GC frame for the
+  argument types a C caller's idiom uses** (a `String`, a `Ptr`, an integer):
+  read `code_llvm` for `gcframe`, as the test does. A `SubString` is copied
+  and its copy rooted, and Base roots a `Vector`'s memory across any `ccall`,
+  so neither is safe at a function that longjmps. (`test_cstring_arg_roots.jl`,
+  devtests `test_longjmp_wrappers_live.jl`.)
 - Blob structs get `setproperty`/`setproperties` built in the same loop as the getters.
   `with()` forwards to them. C++ field structs get `setproperty` too
   (`_field_setter_chunk`), so a record keeps its setters when it stops being a blob.
@@ -2716,6 +2735,13 @@ struct. Still open:
   every other thread reads and writes that thread's instance (`tls_addr()`
   and `tls_counter_ptr()` differ on the main thread after another thread
   called it). C and C++; a task that migrates is wrong the same way.
+- **A `String` holding a NUL is refused at every `const char*`, including
+  one that travels with a length** (found 2026-11-21, the release sweep):
+  `mpack_write_str(w, "a\0b", 3)` and `lua_pushlstring(L, "a\0b\0c", 5)`
+  passed all their bytes before #130 and are an `ArgumentError` since. DWARF
+  cannot tell `(const char*, length)` from a C string. `codeunits(s)` or a
+  byte vector passes, and the error says so. Whether the refusal should stand
+  for that idiom is John's call.
 - **A `String` passed at a non-const `char*` the library writes into is
   written in place**: Julia's immutable `String`, possibly a shared literal.
   DWARF cannot tell an input `char*` from an output buffer, so refusing it is
