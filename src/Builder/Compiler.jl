@@ -4156,10 +4156,11 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
     # A header that DEFINES functions or variables with external linkage is an
     # implementation file: the library's own unit includes it once, and the
     # forced unit including it again defines each of them a second time
-    # (`_foreign_strong_definitions`). Each header is compiled alone to IR, an
-    # umbrella header by itself and a row's header beside the umbrella, in
-    # parallel; one that defines such a symbol leaves the umbrella or every
-    # row's list, and a row left with no header is skipped for that reason.
+    # (`_foreign_strong_definitions`). Each header is compiled to IR: an
+    # umbrella header after the umbrella headers kept before it, a row's
+    # header beside the umbrella that is left, in parallel; one that defines
+    # such a symbol leaves the umbrella or every row's list, and a row left
+    # with no header is skipped for that reason.
     # Asked only when the unit's own IR shows such a definition. True when a
     # header was dropped, so the rows are judged again without it.
     dropped_defining = Dict{String,String}()     # header => one symbol it defines
@@ -4174,11 +4175,19 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
             return isempty(found) ? nothing : first(found)
         end
         bad = Dict{String,String}()
+        # The umbrella in its own order, each header after the ones kept
+        # before it: an umbrella header may not compile by itself (clipper2's
+        # `clipper.export.h` uses what `clipper.h` declares), and judged alone
+        # it could not be judged at all, stayed in, and every row's header
+        # was then blamed for what it defines. The ones kept define nothing,
+        # so whatever this compile defines is the last header's.
+        kept = String[]
         for (i, h) in enumerate(copy(shim_headers))
-            d = defines([h], "u$(i)")
-            d === nothing || (bad[h] = d)
+            d = defines(vcat(kept, [h]), "u$(i)")
+            d === nothing ? push!(kept, h) : (bad[h] = d)
         end
-        filter!(h -> !haskey(bad, h), shim_headers)
+        empty!(shim_headers)
+        append!(shim_headers, kept)
         hs = sort!(unique(String[h for f in vcat(forced, mforced, dforced) for h in f["headers"]]))
         verdict = Vector{Union{Nothing,String}}(nothing, length(hs))
         Threads.@threads for i in eachindex(hs)

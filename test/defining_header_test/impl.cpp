@@ -1,8 +1,8 @@
 // The one unit meant to include the two defining headers.
+#include "widget.h"
 #include "exports.h"
 #include "impl.h"
 #include "shape.h"
-#include "widget.h"
 
 int widget_value(const Widget *w) { return w->v; }
 int gadget_value(const Gadget *x) { return x->g; }

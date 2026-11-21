@@ -8,9 +8,12 @@
 #   impl.h     declares a class AND defines a function and a variable with
 #              external linkage (fmt's `format-inl.h`). The forced unit
 #              includes it because the class is declared there.
-#   exports.h  declares no class and defines a C entry point (clipper2's
+#   exports.h  declares no class and defines C entry points (clipper2's
 #              `clipper.export.h`). The recipe lists it in `[wrap]
-#              shim_headers`, so it is first in every generated unit.
+#              shim_headers` after the header it needs, so both are first in
+#              every generated unit. It does not compile by itself, which is
+#              what made the first version of this fix blame the clean
+#              headers for it on the real clipper2.
 #
 # `impl.cpp` is the one unit meant to include them. With either in the forced
 # unit the relink is "multiple definition of", and the build failed.
@@ -66,7 +69,7 @@ function dh_project(dir)
 
     [wrap]
     language = "cpp"
-    shim_headers = ["exports.h"]
+    shim_headers = ["widget.h", "exports.h"]
 
     [types]
     strictness = "warn"
@@ -107,6 +110,8 @@ if requires("a header that defines functions and the forced unit, live", :clangx
         @test !occursin("exports.h", unit)
         @test !occursin("impl.h\"", unit)
         @test occursin("shape.h", unit) && occursin("widget.h", unit)
+        # The umbrella header before the export header stays, and stays first.
+        @test findfirst("widget.h", unit).start < findfirst("shape.h", unit).start
     end
 
     @testset "the class declared in the defining header is skipped with the reason" begin
