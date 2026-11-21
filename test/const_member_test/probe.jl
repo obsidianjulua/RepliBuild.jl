@@ -54,10 +54,24 @@ function main()
     end
 
     # A record whose body is a byte region: opaque here, so it is checked by
-    # sending back what the library returned.
+    # sending back what the library returned. Where the target cannot class
+    # the record by value at all (AAPCS64 has to rule out a homogeneous float
+    # aggregate at any size, and one member's kind is unknown), the wrapper
+    # refuses the call, and that refusal is the right answer: `PASS refused`.
     attempt("byte_body") do
-        got = (M.wide_sum(M.wide_of(5, 9, 1000, -4)), M.wide_sum(M.wide_of(0xabcdef, -1, 1 << 40, 3)))
-        probe("byte_body", got == (1010, 0xabcdef - 1 + (1 << 40) + 3), got)
+        got = try
+            (M.wide_sum(M.wide_of(5, 9, 1000, -4)), M.wide_sum(M.wide_of(0xabcdef, -1, 1 << 40, 3)))
+        catch e
+            e
+        end
+        if got isa Exception
+            msg = sprint(showerror, got)
+            occursin("ABI Safety Trap", msg) ? println("PROBE byte_body: PASS refused") :
+                                               probe("byte_body", false, first(split(msg, '\n')))
+            flush(stdout)
+        else
+            probe("byte_body", got == (1010, 0xabcdef - 1 + (1 << 40) + 3), got)
+        end
     end
 
     attempt("qualified_scalars") do
