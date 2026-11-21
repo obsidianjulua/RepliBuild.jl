@@ -4,6 +4,298 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v4.6.0 (2026-11-21)
+
+Version 4.5.1 → 4.6.0; Julia compat `1.13` (CI tests 1.13 and 1.14). Julia
+1.12 stays on the 4.5 line, whose last release is 4.5.1.
+
+Three things make this release:
+
+- **The dialect library is downloaded, not built.** On Linux (x86-64 and
+  AArch64) `libJLCS` is a lazy artifact built with BinaryBuilder, with LLVM
+  and MLIR 23 linked in, so C++ wrapping needs no system MLIR (#119). The
+  dialect has an ABI version, and a library of another number is refused
+  before it is called (#125); this release is ABI 3, published as
+  `jlcs-v3.0.0` (#132). A local build in `src/mlir/build` still wins, and
+  Windows still builds its own. The same recipe is open for Yggdrasil as
+  `JLCS_jll` (JuliaPackaging/Yggdrasil#15725).
+- **The tools come with the package.** `readelf`, `objdump`, `nm`, `c++filt`,
+  `git`, `cmake` and `ninja` resolve in one place, from their JLLs first off
+  Windows (#119); the C bucket links with the bundled LLD, so a C project on
+  Linux builds, wraps and runs with an empty `PATH` (#120); `llvm-dwarfdump`
+  falls back to a bundled copy where the system has none (#124); and DWARF can
+  be read in-process through libdw, opt-in (#121).
+- **A Rust front end.** `discover`, `build`, `wrap` and `use` on a Cargo
+  crate as it is, with no `extern "C"` and no `#[repr(C)]` (#132). Measured on
+  Linux x86-64, and on Linux AArch64 in CI; Windows is not run.
+
+The rest is the 2026-11-17 call-level audit: 22 small libraries wrapped and
+then called from Julia, and the defects that found, fixed in #127, #130 and
+#131. The user manual was rewritten around setup, the recipe and the wrapper
+(#128, which carried no changelog section of its own), and has a page on which
+releases get fixes and what a version number promises (#133).
+
+What a package needs to pick this release up:
+
+- **Every C project relinks once**, and its `LIBRARY_SHA` changes: the linker
+  is part of the toolchain identity, and LLD's output is not GNU ld's (#120).
+- **A rebuild** (delete `.replibuild_cache/project_hash`) for what lives in
+  the metadata: arrays of 65536 elements or more, which had no size (#121);
+  C++ globals outside the global namespace, pure virtual methods and an
+  operator template's class (#130); and the `nounwind` fact without which a
+  C++ library's C-linkage functions run through thunks (#127).
+- **A re-wrap** for the rest.
+- **A local `libJLCS` built before the ABI version must be built again**
+  (`src/mlir/build.sh` or `Pkg.build`); `check_environment()` says so (#125).
+- **Names and calls to check for in callers:**
+  - constructor and destructor thunks are the complete-object variants, so a
+    consumer that names a thunk reads the name from the wrapper (#127);
+  - `<`, `>`, `<=`, `>=`, `<<`, `>>`, `->`, `new[]` and `delete[]` operators
+    have new names; `()`, `[]` and `,` gain one and keep the old (#130);
+  - a Tier 2 pointer parameter refuses what C++ would not take there (#127);
+  - an abstract class's constructor is a refusal (#130);
+  - factories that share a constructor signature are called as
+    `X(Val(:<factory>), …)` (#130);
+  - a library name that is also a name of the wrapper's own text moves
+    (`String_`, `c_Integer`), and so does a function or global named like its
+    struct (`name_`) (#127, #131);
+  - `MLIRNative.libJLCS` is a `Libdl.LazyLibrary`; code that needs the file
+    calls `MLIRNative.libJLCS_path()` (#119).
+
+New dependencies: `Binutils_jll`, `Git_jll`, `CMake_jll`, `Ninja_jll`,
+`Zlib_jll`, `Zstd_jll`, `Artifacts`, `LazyArtifacts` (#119), `LLD_unified_jll`,
+`LLVM_unified_jll` (#120) and `Elfutils_jll` (#121).
+
+Two things landed on `main` after their pull requests and are not in the
+sections below: the Rust front end's three live tests pass on CI's Linux
+AArch64 cell, compiled and JIT'd, which #132's own text lists as not run; and
+`deps/jlcs_jll/yggdrasil/build_tarballs.jl` was rewritten to Yggdrasil's rules
+for the pull request named above.
+
+The sections below are compiled from the merged pull requests' `## Changelog`
+headings, newest first.
+
+### 2026-11-21: a "Support and versions" page in the manual (#133)
+
+- **Shipped:** `docs/src/support.md`: the supported release lines by Julia version, the platform table, what major, minor and patch releases may change, the rule for names a wrapper binds, the rebuild steps after an update (`clean(toml; deps=false)`, `use(name; force_rebuild=true)`), the Hub's pinning, and what a bug report needs. `docs/Project.toml` takes RepliBuild from the checkout through `[sources]`.
+- **Found:** nothing in the code. The page states a naming promise and a pre-release Hub sweep as policy. Against the first, 4.6.0 keeps the old shared name for `operator()`, `operator[]` and `operator,` and drops the old names of `<`, `>`, `<=`, `>=`, the shifts, `->`, `->*`, `new[]` and `delete[]` (#130). The Hub sweep had not been run on the 4.6.0 line when this merged.
+- **Tests:** none; the docs build.
+
+### 2026-11-19: Rust front end: a Cargo crate, wrapped as it is (#132)
+
+**Shipped.** `[rust]` projects: `build` has cargo and rustc compile and link a generated root crate around the wrapped one, and writes metadata from the build's IR and DWARF; `wrap` writes the Julia module and compiles its thunks into a library of their own; `register` and `use` work. Covered: scalars, strings, slices, records, enums, tuples, `Option`, `Result`, panics, ownership (`String`, `Vec`, `Box`, records that hold them), `#[inline]` functions, generic functions through `[rust] instantiate`, trait objects, callbacks, statics. `discover` writes the project file for a folder with a `Cargo.toml`, and the doctor reports cargo and rustc. New dialect op `jlcs.native_call`; dialect ABI version 3, with libJLCS 3.0.0 published as `jlcs-v3.0.0`. User guide: `docs/src/rust.md`.
+
+**Found.** rustc gives a small `pub fn` no symbol above opt-level 0 unless incremental compilation is on; LLVM merges functions with the same code and leaves one with no types of its own; a function pointer and the signature it points at shared one DWARF key, so every function taking a callback was refused; `core::cmp::Ordering` is a signed byte, and an unsigned enum of it made a module fail to load; the first `discover` of a session compiled all of `build`, `wrap` and `register` (87 s); cargo 1.100 changed where a build's files go; `CARGO_INCREMENTAL=0` in the environment overrides the build's profile.
+
+**Tests.** `test_rust_abi.jl`, `test_rust_dwarf.jl`, `test_rust_config.jl`, `test_rust_glue.jl`, `test_rust_thunks.jl`, `test_rust_wrap.jl`, `test_rust_discover.jl`, `test_doctor_rust.jl`; live `test_rust_build_live.jl`, `test_rust_thunks_live.jl`, `test_rust_wrap_live.jl` on `test/rust_test/`.
+
+### 2026-11-18: A function or global named like a struct no longer takes the struct's zero-initializer (#131)
+
+- C's separate namespace for struct tags let curl declare `const struct Curl_ssl *Curl_ssl;`. The struct's zero-initializer `Curl_ssl()` and the global's accessor `Curl_ssl()` were one Julia method. Included as a file, the accessor replaced the zero-initializer silently, a precompiled package refused to load, and since `_assert_no_duplicate_methods` the wrap was refused. A function with no arguments named like a struct (`struct pool *pool(void)`) had the same shape.
+- The name screen now moves such a function or accessor to `name_` (`_constructor_clashes`, reason `:type_constructor`) and reports it, so `T()` stays the zeroed record for every struct. GeneratorC and GeneratorCpp both, and unions, byte blobs and bitfield records.
+- A global's pointer accessor is named from the library's spelling and screened on its own: `conf_ptr()` stays `conf_ptr()`, and a global the screen moved for another reason gets `Dict_ptr` again instead of `Dict__ptr`.
+- curl's Hub wrapper, refused by the guard since #130, is accepted and loads when regenerated from its existing metadata.
+- Tests: `test_type_name_collisions.jl` (unit; the verdict, both generators, `[wrap.rename]`, a name Base also has), `test_type_name_collisions_live.jl` (dev; fixture `test/type_name_collision_test`, called in a child). `test_name_screen.jl` and the `name_screen_test` probe now expect `Dict_ptr`.
+
+### 2026-11-18: Signed bitfields read signed; `char` by value is the host's `char`; a C enum parameter takes an integer (audit B14, B15) (#130)
+
+- A signed bitfield (`int c:7`) was read as unsigned (-3 came back as 125) and its setter threw for a negative value. Both generators now read it sign-extended, typed as its declared C type: an enum's underlying type, plain `char` the host's `Cchar`. Its setter takes exactly the field's range and throws `InexactError` outside it (`_bitfield_signed_type`, `_bitfield_sign_extend`, `_bitfield_signed_store`). Unsigned and `bool` fields are unchanged.
+- A `char` parameter by value was typed and passed as `UInt8` (`zeroext`) while a `char` return is `Cchar`, so `f(Cchar(-5))` threw, and on x86-64 the callee saw 251. The Tier 2 thunk extended it by the metadata's `UInt8` the same way. A by-value `char` is now `Cchar` in both generators (`_char_param_ctype`). It takes any valid `char` or byte (-128..255, `_integer_arg_conversion`), dispatches on the host's concrete `char` inside a C++ overload set, and the thunk extends it by the host's `char`. `signed char` maps to `Int8` on every host. `char*` is unchanged.
+- A C open-enum parameter now takes an `Integer` too, converted by the enum (`Union{E, Integer}`), as C converts implicitly. Bitmask aliases are unchanged.
+- Tests: `test_char_bitfield_emission.jl` (unit), `test_char_bitfield_live.jl` (dev; fixtures `char_bitfield_c_test/`, `char_bitfield_cpp_test/`). `test_cpp_mutable_records.jl`, `test_type_mapping.jl` and `test_open_enums.jl` updated to the new emission.
+
+### 2026-11-18: A string at a pointer to plain `char` has `Cstring` semantics on the ccall paths; `signed char*` returns are bytes (audit B16, B18) (#130)
+
+- Every function of a C wrapper, a C++ wrapper's `noexcept` and proven-`nounwind` C-linkage functions, and the fixed parameters of `[wrap.varargs]` passed a `const char*` as `Ptr{UInt8}` with the argument as it came: `my_strlen(SubString("hello world", 1, 5))` was 11 and `my_strlen("ab\0cd")` was 2 with no error. Such an argument is now bound through `JITManager.cstring_arg` (the same string conversion `pointer_arg(Cstring, s)` gives Tier 2): a `SubString` is copied and NUL-terminated, an embedded NUL is an `ArgumentError`, and a `Ptr`, `C_NULL`, a `Ref`, a byte vector pass as before; a `Cstring`, which was a `MethodError` there, passes too. Which parameters: `Wrapper._points_to_plain_char`, also asked by Tier 2's `_pointer_arg_type`.
+- `const signed char*` returns came back as a `String` (`{-1, -2, 0}` → `"\xff\xfe"`). The build maps `signed char*` to `Ptr{Int8}` (no `_ptr` sibling); metadata written before is corrected at wrap from the return's `c_type` (`_signed_char_returns!`), which rewrites only a spelling naming `signed char`, so a `char*` return keeps the Cstring policy.
+- Tests: `test_cstring_params.jl` (unit), `test_cstring_params_live.jl` (dev) on `test/cstring_param_c_test` and `test/cstring_param_cpp_test`.
+
+### 2026-11-18: C++ globals outside the global namespace (audit B19) (#130)
+
+A namespace member (`cfg::depth`) and a static data member (`Stat::count`) are exported under mangled symbols, but the metadata keyed every global by its bare DWARF name, so the wrap dropped them as "not in the library's dynamic symbol table", and a static member's definition (`DW_AT_specification`, no name of its own) was not recorded at all. `parse_dwarf_dump` now reads each variable's `DW_AT_linkage_name`, specification, access and scope (`_library_variables`; DWARF 5's in-class `DW_TAG_variable` and DWARF 4's `DW_TAG_member` both), and `globals` is keyed by the symbol with `name`, `scope` and, when not public, `accessibility`. GeneratorCpp names the accessor by the qualified name (`cfg_depth`, `geo_Vec3_live_count`), binds the symbol, and gives a type it cannot hold by value (`std::string`) the `_ptr` accessor only. Private and protected static members get no accessor; `constexpr` members with no symbol are listed in the new `global_constants` metadata key; the wrap says how many of each. C wrappers are byte-identical. A package gets this on a rebuild, not a re-wrap. Tests: `test_cpp_globals.jl`, `test_cpp_globals_live.jl` (DWARF 5 and 4, libdw against readelf).
+
+### 2026-11-18: A pure virtual member function is called through the vtable (audit B21) (#130)
+
+`virtual const char *name() const = 0;` has no definition, so no symbol, and the wrap surface is built from the symbol table: an interface's own methods had no wrapper, and nothing could call `name()` on the `Animal*` a factory returned. No dialect change.
+
+- The parser records, on every member function a record declares, whether it is pure and its vtable slot (`DW_AT_vtable_elem_location`); libdw prints both as readelf does.
+- The build writes a function row marked `vtable_only` for every public pure virtual a library record declares and no symbol defines, with its DWARF signature and slot. Passed over, each with a reason in the metadata's `vtable_methods` and in the wrap report: a destructor, a private or protected member, a variadic one, a class with internal linkage.
+- Its thunk is one `jlcs.vcall` and declares no callee. The wrapper binds it like any Tier 2 method, JIT or AOT (`Animal_name(p)`, the `_ptr` sibling of a `char*` return, the factory struct's proxy), never through `ccall`. An override that throws arrives as `CxxException`.
+- A pure virtual that takes or returns a record by value is a refusal: a vtable call carries scalars and pointers only, and there is no symbol to call instead.
+- The constructor of an abstract class is a refusal. It was bound to the base-object constructor, which on storage of its own leaves an object whose pure slots hold `__cxa_pure_virtual`; `Animal_describe(p)` on such an object already ended the process.
+- `verify_wrap_surface`, the JIT's pre-flight and `VisibilityProbe` no longer take such a row's name for a symbol.
+- Tests: `test_pure_virtual_methods.jl`, devtests `test_pure_virtual_live.jl`; `test_libdw_dwarf_live.jl`, `test_virtual_classes_live.jl` and `test_visibility_probe.jl` updated.
+
+### 2026-11-18: Operator names are a function of the operator (audit B22) (#130)
+
+The build read the `<` of `operator<`, `<<`, `<=`, `<<=` and the `>` of `->`, `->*` as a template bracket, so those names kept their parameter list (`geo_Vec3_operator_geo_Vec3_constref_const`), and an operator template's class kept its return type (`bool geo::V`), which no receiver gate recognised. The curated list made `operator()`, `operator[]` and `operator,` all `Class_operator`, `->` the same as `-`, and `new[]` the same as `new`, so pugixml's `<`/`>` and `<=`/`>=` pairs derived alike and one of each was dropped.
+
+- The split steps over an operator's token (`Compiler._operator_token_at`), and the return-type strip handles operators.
+- `_julia_function_name` reads the operator from the symbol (`_operator_spelling`) and gives those operators words: `operatorless`, `operatorgreater`, `operatorlessassign`, `operatorgreaterassign`, `operatorlessless`, `operatorgreatergreater`, `operatorlesslessassign`, `operatorgreatergreaterassign`, `operatorminusgreater`, `operatorminusgreatermul`, `operatorcall`, `operatorindex`, `operatorcomma`, `operator_new_array`, `operator_delete_array`. Every other operator's name is unchanged.
+- `Class_operator` stays bound, with the methods it had, through copies placed before the dedup (`_operator_legacy_aliases`), and a `[wrap.rename]` key on it still matches.
+- Names reach a package on re-wrap; an operator template's class needs a rebuild.
+- Tests: `test_function_name_derivation.jl` ("operators"), `test_local_entity_names.jl`.
+
+### 2026-11-18: A record's field may point at a factory class (#130)
+
+- A C++ class with a factory and a deleter is emitted as an owning `mutable struct X` holding a handle. It was written after every record, but the struct loop counted it as defined at its DWARF position, so `struct Cage { Animal *pet; }` emitted `pet::Ptr{Animal}` above `Animal`, and the wrapper failed at include with `UndefVarError: Animal`.
+- Such a class is now defined ahead of every record when a record's field names it (`Ptr{X}`, `Ptr{Ptr{X}}`, `NTuple{N, Ptr{X}}`), with one inner constructor that stores the handle (`_idiomatic_early_type`). Its factory constructors follow every record as outer constructors, so a factory that takes the record holding the pointer, a later record, an enum or another factory class still loads. A record that a pointer cycle sorts ahead of the class keeps `Ptr{X}` instead of `Ptr{Cvoid}`.
+- Wrappers with no such field are byte-identical (stress_test, mi_test, vi_test, finalizer_test, pure_virtual_test).
+- New write-time guard `_assert_types_defined_before_use`: it refuses a name in a field type, a type-parameter bound or a method's argument types that the module binds only further down.
+- GeneratorC has no owning types and does not have the bug.
+- Tests: `test_factory_field_order.jl` (unit), `test_factory_field_order_live.jl` (dev, `test/factory_field_test/`).
+
+### 2026-11-18: Factories that share a constructor signature are called by name; no method is defined twice (#130)
+
+- A factory class's constructors were deduplicated by parameter text, names included, so two factories of one Julia signature defined it twice. `make_animal(int legs)` and `make_animal_doubled(int half)` both gave `Animal(::Cint)`: included as a file, the second replaced the first silently (`Animal(Cint(4))` made 8 legs), and a precompiled package refused to load. Text-identical parameters went the other way and silently dropped a factory: `finalizer_test`'s `Rect` lost `make_rect`, and `vi_test`'s `Left()` called `make_diamond_as_left`.
+- A signature one factory has keeps its plain constructor, byte for byte. A signature several share is none of theirs: each takes `Val(:<factory>)` first, in the inner and the early (outer) form (`_factory_ctor_plan`). The struct's docstring and a `wrap:` line name them.
+- Method proxies are keyed by dispatch signature.
+- `_assert_no_duplicate_methods` refuses any wrapper that defines one method twice. Every dev-suite wrap passes it; the Hub's curl wrapper would not (`Curl_ssl()`, a C global's accessor beside the struct's zero-initializer).
+- Tests: `test_factory_ctor_collisions.jl` (unit), `test_factory_ctor_collisions_live.jl` with `test/factory_ctor_test/` (dev). `test_cpp_finalizers.jl` and `finalizer_test/probe_finalizers.jl` now name the `Rect` factory.
+
+### 2026-11-18: `/stable/` is the released manual again (#129)
+
+The docs workflow's `/dev/` → `/stable/` mirror, meant only for a repository with no release tag, ran on every deploy: its tag test piped `git ls-remote` into `grep -q` under `pipefail`, and git's SIGPIPE read as "no tags". It replaced Documenter's link to the newest release with a copy of main's manual and cut the releases out of the version picker. The test no longer uses a pipe, and a failing `ls-remote` fails the step. No test in the suites covers a workflow file; the three cases above were run by hand.
+
+### 2026-11-18: a class passed by value: the thunk declares what it calls, and makes the temporary C++ would (#127)
+
+- `using` a wrapper died (SIGSEGV in MLIR's translation) when any wrapped function took, by value, a class with a destructor: the thunk module called the class's C1/D1 without declaring them, because their only declarations were their own thunks' and the manifest filter dropped those. The function-thunk pass now declares every constructor and destructor a scope names, once; the JIT pre-flights them; and a module that calls an undeclared symbol is refused by name before the JIT and the AOT stage see it.
+- A move-only class was duplicated bytewise and one copy destroyed. How the temporary is made is read from the declared constructors: copy; move where C++ has no copy; bytes only where the copy is trivial; otherwise an ABI trap that says why. The temporary is ended by D1, or D2 where it takes no VTT, never by the deleting destructor, and is aligned as an object.
+- A class in a namespace, a nested class and a template specialization were never found for their parameter and went as bytes; they take the same path now.
+- Tests: `test_byvalue_class_temporaries.jl`, `test_byvalue_class_live.jl`.
+
+### 2026-11-18: a pointer to an enum is a pointer, `unsigned __int128` is a type, the character types are scalars (#127)
+
+- `E*` and `E&` were mapped to the enum by value: `void out_enum(enum Small *out)` was `ccall(..., (Small,), out)` and C wrote through the value (SIGSEGV); in C++ `color_is(const Color&, Color)` returned false for equal values. They are `Ptr{E}` and `Ref{E}` in parameters, members, globals and returns.
+- One `unsigned __int128` refused the whole wrap. It is `UInt128`, and a parameter or return the map has no Julia type for is one trap stub naming the C type, on every ccall-emitting path of both generators.
+- `ccall` passes a 128-bit integer as two halves, which matches C only while both get registers (five `long`s and then an `unsigned __int128` read a wrong value; signed `__int128` had the same latent bug). The C generator refuses those positions; the C++ generator sends them to a thunk; a thunk refuses them under Win64.
+- `char8_t`, `char16_t`, `char32_t` are integers, and an enum defined with no enumerators (`std::byte`) has an entry.
+- Tests: `test_type_mapping.jl`, `test_type_mapping_live.jl`.
+
+### 2026-11-18: a Tier 2 call checks what it is given where C++ takes a pointer (#127)
+
+- A pointer parameter and every `this` is `::Any`, and `JITManager.invoke` boxed whatever arrived: a struct value as `this`, a Julia function for a function pointer, a `Vector` for `const std::vector<int>&` were each read as an address (SIGSEGV), and in an overload set a scalar no integer overload took fell into the `const char*` member. A Tier 2 body now converts every such argument with `JITManager.pointer_arg(<declared type>, x)`; anything it does not accept is a `MethodError` with a hint, before any C++ runs.
+- An STL container taken by value takes the value the library returned for one (`vec_sum_val(vec_iota(5))` segfaulted).
+- A `char*` takes a string with `Cstring` semantics: a `SubString` is copied and terminated (it was read past its end), an embedded NUL is an `ArgumentError`.
+- Changed for callers after a re-wrap: a Tier 2 pointer parameter no longer takes an array of another element type, a string for `void*`, a `Ref` to a Julia object, or a handle type with no `unsafe_convert(Ptr{Cvoid}, x)`.
+- Tests: `test_tier2_pointer_args.jl`, `test_tier2_pointer_args_live.jl`.
+
+### 2026-11-18: wrappers bind the complete-object constructor and destructor; every virtual method dispatches through the vtable (#127)
+
+- `<Class>_<Class>` is C1 and `<Class>_destroy_<Class>` is D1; `<Class>_delete_<Class>` is D0 with one parameter; no wrapper takes a VTT. `VBottom_VBottom(p)` ran the base-object constructor with no VTT and segfaulted. C2/D2 stand in only for a class with no virtual base.
+- Three causes of static calls for virtual methods: a class with no data members of its own (`Dog_name(puppy)` returned "dog"), a class a later compile unit only declares, and a `noexcept` virtual bound as a plain `ccall`.
+- For consumers: thunk names move from C2/D2 to C1/D1 on the next wrap, and `noexcept` virtuals from tier 3 to tier 2. A consumer that names a thunk must read the name from the wrapper.
+- Tests: `test_structor_variants.jl`, `test_virtual_dispatch.jl`, `test_virtual_classes_live.jl`.
+
+### 2026-11-18: C linkage that may throw takes a thunk; a symbol with no debug information is an alias or a refusal (#127)
+
+- In a C++ library a function with C linkage reaches `ccall` only when its definition is `nounwind` in the linked IR; any other takes a thunk and a throw arrives as `CxxException`. `extern "C" int f(int x) { if (x < 0) throw …; }` ended the process in `std::terminate`.
+- Cost, measured on the repo's fixtures: 36 C-linkage functions moved to thunks (stress_test 25 of 65; 12 with `-O2` in `[compile] flags`); a JIT thunk call is about 46 ns against 2 ns. Metadata without the `nounwind` key takes the thunk, so a C++ package's C API runs through thunks until the package is rebuilt.
+- A symbol with no DWARF entry takes the signature of the described exported function at its address (`int f(int) __attribute__((alias("g")))` was bound as `f()::Cint`); one with no such function is a refusal that says there is no debug information.
+- Tests: `test_c_linkage_unwind.jl`, `test_c_linkage_unwind_live.jl`, `test_alias_signatures.jl`, `test_alias_signatures_live.jl`.
+
+### 2026-11-18: one screen for every top-level name a wrapper binds (#127)
+
+- A library identifier that is also a name of the wrapper's own text changed what the text meant: `int String(int)` became a method of `Base.String` in every module (`String(1) == 101`); `int Cint(int)` made `Cint(::Enum)` a `MethodError`; `eval`, `include`, `ccall`, `Base`, `Libdl`, `RepliBuild` failed the load; `LIBRARY_PATH` and `METADATA` refused the wrap; C++ records `Bool`, `Cvoid`, `Int`, `Integer`, `Cstring`, `UInt8` segfaulted or failed to load.
+- `Wrapper/NameScreen.jl` asks Julia and the wrapper's text and keeps no list. Functions become `String_`, records `c_Integer`, enumerators `Kind_Symbol`; a module name the text uses is an error naming `[wrap] module_name`; `wrap` prints each move. `[wrap.rename]` wins. A wrap may generate twice.
+- Tests: `test_name_screen.jl`, `test_name_screen_live.jl`.
+
+### 2026-11-17: Julia 1.13 is the floor from 4.6.0 (#126)
+
+4.6.0 requires Julia 1.13. CI tests Julia 1.13 and 1.14 (LLVM 20 and 23). Julia 1.12 (LLVM 18) is supported by the 4.5 line, last released as 4.5.1 from branch `release-4.5`.
+
+### 2026-11-17: a dialect ABI version, and the recipe to register `JLCS_jll` (#125)
+
+**What shipped**
+
+- `src/mlir/ABI_VERSION`, compiled in by `CMakeLists.txt` and exported as `jlcs_abi_version()`; `JLCSLibrary.ABI_VERSION` reads the same file, so a build from the checkout always agrees.
+- `JLCSLibrary.library_abi_version`, `abi_problem`, `verify_abi!`: asked once per library per process, in `path()` (so before the `ccall`s' own open) and in `MLIRNative.check_library`. A library that does not load has no version to compare; that stays the loader's error. The doctor reports a mismatch for a local build and for the artifact.
+- `src/mlir/VERSION`: the binary's version. The local recipe reads it; `write_artifacts_toml.jl` takes only that version's tarballs.
+- `deps/jlcs_jll/yggdrasil/build_tarballs.jl`, and the local recipe restaged to the layout of a clone so both run the same script. `julia_compat` is 1.10.
+
+**What was found**
+
+- The probe opens the library with the flags the `ccall`s' own open uses: the first open of a library decides how its symbols bind.
+
+**Tests**
+
+- `test_jlcs_abi_version.jl` (unit): one number read by both sides and no second copy; the refusal and its advice per source; the two recipes being the same build, and the Yggdrasil one naming a pinned commit and no local path.
+- `test_jlcs_abi_live.jl` (dev): the library in use reports the version; libraries built in the test with another version, with none, and one that does not load.
+- An `abi` probe in `test_jlcs_artifact_live.jl`.
+- runtests, unit (6416) and devtests (4858) pass on Julia 1.13; the dialect area also with `REPLIBUILD_JLCS=artifact` (2928).
+
+### 2026-11-17: `llvm-dwarfdump` comes from the resolver, the system's first and a bundled one from LLVM 20 (#124)
+
+A JIT C++ wrapper needed `llvm-dwarfdump` on PATH every time it loaded. It now falls back to `LLVM_unified_jll`'s copy where there is no system one and Julia's LLVM is 20 or newer.
+
+- **Shipped:** `llvm-dwarfdump` in `Tools.PROVIDERS` with `sibling`, `min_llvm` and `system_first`; `Tools.order(name)`; `parse_vtables` and `Debug.dwarf` through `Tools.tool_cmd`; the doctor names a bundled copy.
+- **Found:** a tool that reads DWARF is not version-free because DWARF is. LLVM 18's dumper prints typedef names unqualified, which changed the classes on 11 of 42 Hub libraries and the thunk IR of 9 of 10 C++ packages; LLVM 20's matched LLVM 23's on all 42. A bundled copy is therefore never preferred to the system's, and never used below LLVM 20.
+- **Tests:** `test_tools_resolver.jl`, `test_bundled_dwarfdump_live.jl`.
+
+### 2026-11-17: the resolver test names the tool that did not start (#123)
+
+One Windows job on `main` failed in `test_tools_resolver.jl` when a tool's first `--version` took longer than the probe's 20-second limit on a loaded runner. The assertion now waits 180 seconds and reports the tool and its source. Test only.
+
+### 2026-11-17: libdw as a second DWARF reader, and two readelf misreads (#121)
+
+**What shipped**
+
+- `Builder/LibDW.jl`: `DumpLines(path)` walks the DIE tree through libdw and produces readelf's lines as the parser asks for them, once per parser pass; `file_tables` is `_dwarf_file_tables`' answer; `info_dump` writes the whole text for inspection. `Compiler._dwarf_reader` reads `REPLIBUILD_DWARF`; libdw asked for where it cannot work is an error, never the other reader. A library without debug info is an empty dump, as readelf's is.
+- `parse_dwarf_dump` iterates its input through `_dump_lines`, so the readelf path no longer builds a vector of lines either.
+- `test/tools/dwarf_readers_diff.jl`: both readers over existing libraries (`--hub <path>`), comparing the five parsed tables key by key.
+
+**What was found**
+
+- **An array of 65536 elements or more had no elements.** GNU readelf prints a constant stored in four or eight bytes in hex (`DW_AT_count : 0x10000`), and the bound was read with `(\d+)`, which took the `0`. `DW_AT_data_bit_offset` had the same read. Both go through `_dwarf_count`.
+- **A `-gdwarf-4` build's declaration files were garbage.** A DWARF 4 line table prints `Entry Dir Time Size Name` and was read as DWARF 5's layout, so every name came out as `0\t0\t<name>`. Each table is now read by its own column header, and a relative name is resolved against the unit's `DW_AT_comp_dir`. DWARF 5 output is unchanged.
+- With those fixed, the two readers give identical tables on 36 fixture libraries and 41 Hub libraries (oneDNN and llama.cpp left out for size).
+- Jolt and Bullet built and wrapped by `main`, by this stack, and by this stack with `REPLIBUILD_DWARF=libdw`, in one directory: the same `LIBRARY_SHA`, metadata and manifests, and the same wrapper apart from `generated_at`.
+
+**Tests**
+
+- `test_libdw_reader.jl` (unit): reader selection, the location-expression printer, and every tag and attribute name the parser matches being printable.
+- `test_libdw_dwarf_live.jl` (dev): equal tables from both readers at DWARF 4 and 5, C and C++; libdw with every GNU dumper removed; the 65536-element array from either reader.
+- runtests, unit and devtests pass on Julia 1.13; devtests also with `REPLIBUILD_DWARF=libdw`.
+
+### 2026-11-17: the C bucket's linker and fallback tools come from the package (#120)
+
+**What shipped**
+
+- `Compiler._bundled_linker` / `_bundled_linker_flags`: `ld.lld` through `Tools`, only for `language = c`, on Linux, beside the JLL clang, when `Tools` took the JLL's copy or `REPLIBUILD_TOOL_LD_LLD`. `REPLIBUILD_TOOLS=system` is the driver's own linker, never an `ld.lld` on PATH. `_toolchain_identity` names the choice.
+- `Tools.matched_llvm_bin`: LLVM_unified_jll's tools directory when its `llvm-link` and `opt` start and report `Base.libllvm_version`'s major; the last entry of `LLVMEnvironment.c_toolchain_bin_dir`. A program run from it gets its library path after the toolchain overlay (`Tools.with_dir_env`), and `_llvm_tool_major` starts it the same way.
+
+**What was found**
+
+- The driver starts LLD in the clang's own environment, which is what lets it find its libLLVM; that is why the bundled linker needs the JLL clang.
+- The rules a link must keep hold under LLD: `test_reproducible_link.jl` and `test_codegen_flags.jl` pass, and the live test checks `SYMBOLIC` on the result.
+- Jolt and Bullet (C++, so not linked by LLD) built and wrapped by `main` and by this stack in one directory give the same `LIBRARY_SHA`, metadata and manifests, and the same wrapper apart from `generated_at`.
+
+**Tests**
+
+- `test_bundled_linker.jl` (unit), `test_bundled_linker_live.jl` (dev).
+- `test_c_inprocess.jl`'s fallback case now runs: 17 of 17, none skipped.
+- runtests, unit and devtests pass on Julia 1.13.
+
+### 2026-11-17: a prebuilt libJLCS, and one resolver for the non-LLVM tools (#119)
+
+**What shipped**
+
+- `deps/jlcs_jll/build_tarballs.jl`: a BinaryBuilder recipe for libJLCS. `-DJLCS_STATIC_LLVM=ON` (new, off by default) links LLVM and MLIR as archives and exports only `mlir*`, `jlcs*` and `registerJLCSDialect` through `src/mlir/jlcs_exports.map`. `-DJLCS_MLIR_TABLEGEN` names a host `mlir-tblgen` for a cross build. `write_artifacts_toml.jl` writes the `Artifacts.toml` entries from the tarballs.
+- `Builder/JLCSLibrary.jl`: where libJLCS is, decided when the library is first needed and never at precompile. `deps/build.jl` fetches the artifact before trying a local build; `check_environment()` reports it without downloading and no longer requires `mlir-tblgen` and cmake for Tier 2 when the library is prebuilt.
+- `Builder/Tools.jl`: the tool resolver. A JLL copy counts only if it starts, and its environment rides on the `Cmd`. cmake and ninja get no library path, since they start the system compiler. `BuildBridge.execute` resolves a tool name itself; a command literal goes through `Tools.tool_cmd`.
+
+**What was found**
+
+- `LLVM_full_jll` exports MLIR's archives with the LLVM shared library as their dependency, so a static link has to repoint every imported MLIR target at LLVM's component archives.
+- Its archives are GCC-built: a clang build of the static library asks for a constructor variant (C2) they do not define. `-z defs` makes that a link error instead of a library that fails only under `RTLD_NOW`.
+- The toolchain overlay sets `PATH` and the loader path outright, so a JLL tool's environment has to go on after it.
+
+**Tests**
+
+- `test_tools_resolver.jl` (unit), including a walk of the parsed source for a command literal that names a resolved tool outside `Tools.tool_cmd`.
+- `test_jlcs_library.jl` (unit), `test_jlcs_artifact_live.jl` (dev).
+- runtests, unit and devtests pass on Julia 1.13, devtests also with `REPLIBUILD_JLCS=artifact`; the new unit tests and the artifact load pass on Julia 1.12.
+
 ## v4.5.1 (2026-11-17)
 
 Version 4.5.0 → 4.5.1; Julia compat `1.12` (CI tests 1.12 and 1.13).

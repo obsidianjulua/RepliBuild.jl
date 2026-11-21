@@ -2302,9 +2302,10 @@ outward-facing, so ask first.
   `PackageRegistry` is included after the Rust modules for this, so
   `RustBuild` takes the generator fingerprint from its caller.
 - **The dialect's ABI version is 3 (2 with `native_call`, 3 with its address
-  form); the published libJLCS artifact is version 1** and is refused. Until it is rebuilt and republished
-  (`deps/jlcs_jll/README.md`, outward-facing, ask first), Tier 2 on this
-  branch needs a local `src/mlir/build`.
+  form), and the published libJLCS is 3.0.0 at that number** (release
+  `jlcs-v3.0.0`, the one `Artifacts.toml` names; its two tarballs' hashes
+  are the file's). The next change to the dialect's ABI needs a new release
+  before its branch's CI can be green (`JLCSLibrary` above).
 - **`RustDWARF` builds a unit's DIE tree only when the unit names a wanted
   symbol**, and resolves after the tree is built, so DIE order cannot matter.
   Types are keyed by SCOPED name (`core::option::Option<i32>::Some`); two
