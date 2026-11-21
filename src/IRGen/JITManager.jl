@@ -521,14 +521,42 @@ copied, which NUL-terminates it, and an embedded NUL is an `ArgumentError`. The
 A `Cstring` passes as its pointer. Anything else (a `Ptr`, `C_NULL`, a `Ref`,
 a byte vector, a `Symbol`) is returned as it came, for `ccall` to convert as
 it always did.
+
+**A `String` is returned as the same object, and the call site must hold
+nothing new for it.** Some C functions never return to their caller: Lua's
+`luaL_error`, libpng's `png_error` and their like leave by `longjmp`, and are
+called from a Julia callback to raise the library's error. The Julia frames
+between the jump and its landing are abandoned without their GC frames being
+popped, so a wrapper that rooted anything across the call leaves the task's
+GC stack pointing into dead stack memory, and the next collection reads it
+(the Hub's lua, 2026-11-21: a segfault in the collector). So for a `String`
+this method inlines to a scan and the argument itself: the check's `throw`
+is out of line, in a function that takes the caller's own argument, and the
+wrapper compiles to what a bare `ccall` on the string did. A string of any
+other type is copied and its copy has to be rooted; pass a `String` to a
+function that leaves by `longjmp`.
 """
 cstring_arg(x) = x
+@inline function cstring_arg(x::String)
+    _has_nul(x) && _refuse_embedded_nul(x)
+    return x
+end
 function cstring_arg(x::AbstractString)
-    cx = Base.cconvert(Cstring, x)
-    GC.@preserve cx Base.unsafe_convert(Cstring, cx)   # refuses an embedded NUL
+    cx = String(x)
+    _has_nul(cx) && _refuse_embedded_nul(cx)
     return cx
 end
 cstring_arg(x::Cstring) = pointer(x)
+
+# One `memchr` over the string's bytes, as Base's own `Cstring` conversion does.
+@inline _has_nul(s::String) =
+    ccall(:memchr, Ptr{Cvoid}, (Ptr{UInt8}, Cint, Csize_t), s, 0, sizeof(s)) != C_NULL
+
+# Out of line on purpose: building the message allocates, and inlined into a
+# wrapper that would give the wrapper a GC frame on every path (see above).
+@noinline _refuse_embedded_nul(s::String) = throw(ArgumentError(
+    "embedded NULs are not allowed in C strings: $(repr(s)). " *
+    "For bytes passed with their length, pass `codeunits(s)` or a byte vector."))
 
 function _pointer_arg(::Type{P}, x::AbstractString) where {P}
     if P === Cstring
