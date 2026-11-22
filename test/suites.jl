@@ -103,6 +103,7 @@ const TESTS = TestFile[
     T("test_inline_constructors.jl", :unit, [:build, :dwarf, :cpp]),
     T("test_nested_type_aliases.jl", :unit, [:cpp]),
     T("test_inline_methods.jl", :unit, [:build, :dwarf, :cpp]),
+    T("test_forced_unit_definitions.jl", :unit, [:build, :cpp]),
     T("test_default_args.jl", :unit, [:build, :cpp]),
     T("test_visible_records.jl", :unit, [:build, :cpp]),
     T("test_std_strings.jl", :unit, [:dwarf, :cpp]),
@@ -215,6 +216,8 @@ const TESTS = TestFile[
     T("test_wide_enums_live.jl", :dev, [:dwarf, :cpp], locks = ["wide_enum_test"]),
     T("test_nested_type_aliases_live.jl", :dev, [:dwarf, :cpp], locks = ["nested_type_test"]),
     T("test_inline_methods_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["inline_method_test"]),
+    # A header that defines functions (fmt's format-inl.h, clipper2's clipper.export.h) and the forced unit.
+    T("test_defining_headers_live.jl", :dev, [:build, :cpp], locks = ["defining_header_test"]),
     T("test_fragment_header_live.jl", :dev, [:build, :cpp], locks = ["fragment_header_test"]),
     T("test_default_args_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["default_arg_test"]),
     T("test_visible_records_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["visible_record_test"]),

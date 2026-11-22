@@ -725,6 +725,36 @@ the test named when you touch the area.
     methods on a rebuild, not a re-wrap.
 
   (`test_inline_methods.jl`, devtests `test_inline_methods_live.jl`.)
+- **The forced unit includes headers, and a header can define things**
+  (2026-11-21). An implementation header defines functions or variables with
+  external linkage and is meant for ONE translation unit: fmt's
+  `format-inl.h` without `FMT_HEADER_ONLY` (a forced record is declared
+  there), clipper2's `clipper.export.h` (in the recipe's `[wrap]
+  shim_headers`, so first in every generated unit). The library's own unit
+  includes it; the forced unit including it again defined each symbol twice,
+  the relink was "multiple definition of", and neither package BUILT on the
+  4.6.0 release sweep. Every compile of the unit had succeeded: nothing read
+  what it defined.
+  - **The unit's IR is read for strong definitions that are not its own**
+    (`_foreign_strong_definitions`: external linkage, not `linkonce_odr`,
+    `weak_odr`, `internal` or a declaration; the unit's own are the
+    `replibuild_default::` entry points). Only when there is one, each
+    header is compiled alone to IR (an umbrella header by itself, a row's
+    header beside the umbrella), the ones that define such a symbol leave
+    the umbrella or every row's list (`drop_defining_headers!`), a row left
+    with no header is skipped with that reason, and the rows are judged
+    once more. A unit that still defines one is not linked at all.
+  - **A relink that fails with the forced unit falls back to the library
+    without it** (`_forced_unit_refused`): the unit is RepliBuild's own
+    addition, and the project's library builds without it. Every row is
+    reported with the linker's line. The FIRST link is the project's own
+    and stays a hard error.
+  - A new kind of row, or anything else the unit includes, must keep the
+    unit free of strong definitions other than `replibuild_default::`, or
+    `_is_forced_unit_own` has to learn it.
+
+  (`test_forced_unit_definitions.jl`, devtests
+  `test_defining_headers_live.jl`.)
 - **A call that leaves default arguments out is a function the forced unit
   compiles** (2026-11-15, `_default_argument_plan`). A default exists only in
   the header (no `DW_AT_default_value` from clang, and the mangled name
