@@ -3971,6 +3971,63 @@ function _ir_defined_declared(ir_path::AbstractString)
     return (defined, declared)
 end
 
+# Linkages under which a second definition of the same name is merged or
+# invisible, never a link error.
+const _MERGEABLE_LINKAGES = ("private", "internal", "available_externally", "linkonce", "linkonce_odr",
+                             "weak", "weak_odr", "common", "appending", "extern_weak")
+_has_mergeable_linkage(head::AbstractString) =
+    any(w -> occursin(Regex("(?:^|\\s)" * w * "(?:\\s|\$)"), head), _MERGEABLE_LINKAGES)
+
+"""
+    _strong_definitions(ir_path) -> Vector{String}
+
+The functions and variables an IR file defines with external linkage and no
+ODR merging (`define void @f(`, `@g = global`): a second definition of one of
+these anywhere in the link is "multiple definition of", an error. An inline
+function, a template instantiation, a `static` and a declaration are none of
+them (`linkonce_odr`, `weak_odr`, `internal`, `declare`, `external global`).
+"""
+function _strong_definitions(ir_path::AbstractString)::Vector{String}
+    out = String[]
+    name = raw"((?:[\w\.\$]|\\[0-9a-fA-F]{2})+|\"[^\"]*\")"
+    fn = Regex("@" * name * raw"\(")
+    var = Regex("^@" * name * raw" = (.*?)\b(?:global|constant)\b")
+    for line in eachline(ir_path)
+        if startswith(line, "define ")
+            m = match(fn, line)
+            m === nothing && continue
+            _has_mergeable_linkage(SubString(line, 8, m.offset - 1)) && continue
+            push!(out, String(strip(m.captures[1], '"')))
+        elseif startswith(line, "@")
+            m = match(var, line)
+            m === nothing && continue
+            head = m.captures[2]
+            (occursin(r"(?:^|\s)external(?:\s|$)", head) || _has_mergeable_linkage(head)) && continue
+            push!(out, String(strip(m.captures[1], '"')))
+        end
+    end
+    return sort!(unique!(out))
+end
+
+# The forced unit's own definitions with external linkage: the default-argument
+# entry points (`namespace replibuild_default`). Everything else it writes is a
+# template instantiation or a `static`.
+_is_forced_unit_own(symbol::AbstractString) = startswith(symbol, "_ZN18replibuild_default")
+
+"""
+    _foreign_strong_definitions(ir_path) -> Vector{String}
+
+The strong definitions (`_strong_definitions`) in the forced unit's IR that
+are not the unit's own. The unit only INCLUDES the library's headers, so each
+of these was defined by a header: an implementation file meant for one
+translation unit (fmt's `format-inl.h` without `FMT_HEADER_ONLY`, clipper2's
+`clipper.export.h`). The library's own unit already defines them, and linking
+the forced unit beside it fails with "multiple definition of" (fmt and
+clipper2 did not build, 2026-11-21).
+"""
+_foreign_strong_definitions(ir_path::AbstractString)::Vector{String} =
+    filter!(!_is_forced_unit_own, _strong_definitions(ir_path))
+
 """
     generate_inline_definitions(config, cpp_files, plan, mplan) -> (cpp_files, plan, mplan)
 
@@ -4025,7 +4082,11 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
 
     probe = joinpath(cache_dir, "replibuild_ctors_probe.cpp")
     probe_ir = joinpath(cache_dir, "replibuild_ctors_probe.ll")
+    # The umbrella: `[wrap] shim_headers`, included first in the unit and
+    # beside every header probed. A local copy, because one of them can turn
+    # out to be a header the unit must not include (`drop_defining_headers!`).
     shim_headers = String[String(h) for h in config.wrap.shim_headers]
+    unit_headers(rows) = unique(vcat(shim_headers, sort!(unique(String[String(h) for f in rows for h in f["headers"]]))))
     row(f) = Dict{String,Any}("class" => f["class"], "symbol" => f["symbol"])
     # Keep the rows `reason_of` answers `nothing` for; skip the rest, named.
     function drop!(rows, into, reason_of)
@@ -4036,14 +4097,14 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
         end
         return keep
     end
-    unit_text() = _inline_ctor_unit_text(_inline_ctor_headers(config, vcat(forced, mforced, dforced)),
+    unit_text() = _inline_ctor_unit_text(unit_headers(vcat(forced, mforced, dforced)),
                                          forced, mforced, dforced)
     # Each row of `rows` compiled alone (`-fsyntax-only`): the compiler's first
     # error line per row, or `nothing`. The rows are tried in groups first
     # (`_alone_verdicts`); a row's verdict and its text are still its own
     # compile's, from the same file name (the error line can name it).
     function alone(rows, ctors::Bool)
-        all_headers = _inline_ctor_headers(config, vcat(forced, mforced))
+        all_headers = unit_headers(vcat(forced, mforced))
         kind = ctors ? "c" : "m"
         return _alone_verdicts(length(rows)) do g, round, k
             path = joinpath(cache_dir, length(g) == 1 ? "replibuild_ctors_probe_$(kind)_$(g[1]).cpp" :
@@ -4092,6 +4153,67 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
         foreach(f -> delete!(f, "was_headers"), vcat(forced, mforced, dforced))
         return
     end
+    # A header that DEFINES functions or variables with external linkage is an
+    # implementation file: the library's own unit includes it once, and the
+    # forced unit including it again defines each of them a second time
+    # (`_foreign_strong_definitions`). Each header is compiled to IR: an
+    # umbrella header after the umbrella headers kept before it, a row's
+    # header beside the umbrella that is left, in parallel; one that defines
+    # such a symbol leaves the umbrella or every row's list, and a row left
+    # with no header is skipped for that reason.
+    # Asked only when the unit's own IR shows such a definition. True when a
+    # header was dropped, so the rows are judged again without it.
+    dropped_defining = Dict{String,String}()     # header => one symbol it defines
+    function drop_defining_headers!()
+        function defines(headers, tag)
+            path = joinpath(cache_dir, "replibuild_ctors_probe_d_$(tag).cpp")
+            ir = joinpath(cache_dir, "replibuild_ctors_probe_d_$(tag).ll")
+            (dok, _) = _unit_probe(config, path, _inline_ctor_unit_text(headers, Any[]); ir = ir)
+            found = dok && isfile(ir) ? _foreign_strong_definitions(ir) : String[]
+            rm(path; force = true)
+            rm(ir; force = true)
+            return isempty(found) ? nothing : first(found)
+        end
+        bad = Dict{String,String}()
+        # The umbrella in its own order, each header after the ones kept
+        # before it: an umbrella header may not compile by itself (clipper2's
+        # `clipper.export.h` uses what `clipper.h` declares), and judged alone
+        # it could not be judged at all, stayed in, and every row's header
+        # was then blamed for what it defines. The ones kept define nothing,
+        # so whatever this compile defines is the last header's.
+        kept = String[]
+        for (i, h) in enumerate(copy(shim_headers))
+            d = defines(vcat(kept, [h]), "u$(i)")
+            d === nothing ? push!(kept, h) : (bad[h] = d)
+        end
+        empty!(shim_headers)
+        append!(shim_headers, kept)
+        hs = sort!(unique(String[h for f in vcat(forced, mforced, dforced) for h in f["headers"]]))
+        verdict = Vector{Union{Nothing,String}}(nothing, length(hs))
+        Threads.@threads for i in eachindex(hs)
+            verdict[i] = defines(vcat(shim_headers, [hs[i]]), "h$(i)")
+        end
+        for i in eachindex(hs)
+            verdict[i] === nothing || (bad[hs[i]] = verdict[i])
+        end
+        isempty(bad) && return false
+        merge!(dropped_defining, bad)
+        for f in vcat(forced, mforced, dforced)
+            f["was_headers"] = f["headers"]
+            f["headers"] = String[h for h in f["headers"] if !haskey(bad, h)]
+        end
+        function no_header(_, f)
+            isempty(f["headers"]) || return nothing
+            h = first(sort!(String[x for x in f["was_headers"] if haskey(bad, x)]))
+            return "its header defines functions the library's own unit defines ($(basename(h)): " *
+                   "$(_demangle(bad[h]))), and a second inclusion would define them twice"
+        end
+        forced = drop!(forced, skipped, no_header)
+        mforced = drop!(mforced, mskipped, no_header)
+        dforced = Dict{String,Any}[f for f in dforced if !isempty(f["headers"])]
+        foreach(f -> delete!(f, "was_headers"), vcat(forced, mforced, dforced))
+        return true
+    end
     # The include block by itself, before any row is judged: a header that
     # is half of a pair (Jolt's `WrapShaderBegin.h` opens namespaces its
     # partner closes) leaves every header after it inside its scope, and the
@@ -4100,7 +4222,7 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
     # constructors, every one its HelloWorld needs) before the per-header
     # check, which ran only once no row was named, could see the culprit.
     let (inc_ok, _) = _unit_probe(config, probe, _inline_ctor_unit_text(
-            _inline_ctor_headers(config, vcat(forced, mforced, dforced)), Any[]))
+            unit_headers(vcat(forced, mforced, dforced)), Any[]))
         inc_ok || check_headers!()
     end
     text = unit_text()
@@ -4109,6 +4231,9 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
     # What was tried once no diagnostic named a row: 0 nothing yet, 1 the
     # headers and each constructor alone, 2 each member function alone.
     stage = 0
+    # Judged twice at most: once as planned, and once more without the headers
+    # the first unit showed to be implementation files.
+    for pass in 1:2
     for _ in 1:12
         (isempty(forced) && isempty(mforced) && isempty(dforced)) && break
         (ok, out) = _unit_probe(config, probe, text; ir = probe_ir)
@@ -4159,10 +4284,31 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
         end
         text = unit_text()
     end
+        (ok && pass == 1 && isfile(probe_ir) && !isempty(_foreign_strong_definitions(probe_ir))) || break
+        drop_defining_headers!() || break
+        ok = false
+        text = unit_text()
+    end
     if !ok
         forced = drop!(forced, skipped, (_, _) -> "the unit did not compile: $msg")
         mforced = drop!(mforced, mskipped, (_, _) -> "the unit did not compile: $msg")
         dforced = Dict{String,Any}[]
+    end
+    if ok && isfile(probe_ir)
+        # Whatever the header check could not attribute: a unit that still
+        # defines a function of the library's is not linked into it.
+        left = _foreign_strong_definitions(probe_ir)
+        if !isempty(left)
+            why = "the unit would define a function the library's own unit defines ($(_demangle(first(left))))"
+            forced = drop!(forced, skipped, (_, _) -> why)
+            mforced = drop!(mforced, mskipped, (_, _) -> why)
+            dforced = Dict{String,Any}[]
+        end
+    end
+    if !isempty(dropped_defining)
+        println("  forced unit: left out $(length(dropped_defining)) header(s) that define functions with external linkage " *
+                "(implementation files, for one translation unit): " *
+                join(sort!(String[basename(h) for h in keys(dropped_defining)]), ", "))
     end
     if ok && !isempty(mforced)
         # A member the unit only declares has no body in its header.
@@ -4210,6 +4356,35 @@ function generate_inline_definitions(config::RepliBuildConfig, cpp_files::Vector
         JSON.print(io, symbols)
     end
     return (vcat(cpp_files, [unit_path]), result()...)
+end
+
+"The line of a failed build's error that says why, for the wrap report."
+function _forced_unit_link_reason(e)::String
+    text = sprint(showerror, e)
+    lines = split(text, '\n')
+    k = something(findfirst(l -> occursin("multiple definition", l) || occursin("duplicate symbol", l), lines),
+                  findfirst(l -> occursin("undefined", l), lines),
+                  findfirst(l -> occursin("error", l), lines), 1)
+    return String(strip(first(String(lines[k]), 300)))
+end
+
+"""
+    _forced_unit_refused(plan, mplan, dplan, why) -> (plan, mplan, dplan)
+
+The three plans of a forced unit the library did not build with: every row
+the unit kept is moved to `skipped` with the reason, and no default-argument
+entry point is bound.
+"""
+function _forced_unit_refused(plan::AbstractDict, mplan::AbstractDict, dplan::AbstractDict, why::AbstractString)
+    reason = "the library did not link with the forced unit: $why"
+    function refuse(p)
+        skipped = Any[x for x in get(p, "skipped", Any[])]
+        for f in get(p, "forced", Any[])
+            push!(skipped, Dict{String,Any}("class" => f["class"], "symbol" => f["symbol"], "reason" => reason))
+        end
+        return Dict{String,Any}("forced" => Any[], "skipped" => skipped)
+    end
+    return (refuse(plan), refuse(mplan), Dict{String,Any}("candidates" => Any[], "bound" => Any[]))
 end
 
 """
@@ -5575,10 +5750,32 @@ function compile_project(config::RepliBuildConfig)
             ndef > 0 &&
                 println("  defaults: $(ndef) call(s) of $(length(unique(String[f["symbol"] for f in dplan["bound"]]))) function(s) " *
                         "with default arguments left out: compiling their entry points")
-            cpp_files = cpp_files_b
-            ir_files = compile_to_ir(config, cpp_files)
-            linked_ir = link_optimize_ir(config, ir_files, output_name)
-            binary_path = create_library(config, linked_ir; per_tu_ir=ir_files)
+            # The forced unit is RepliBuild's own addition to the library. If
+            # the library does not build with it, the library the project's
+            # sources make still does: it is linked again without the unit, and
+            # every row is reported with the reason. The first link above is
+            # the project's own and stays a hard error.
+            relinked = try
+                ir_b = compile_to_ir(config, cpp_files_b)
+                linked_b = link_optimize_ir(config, ir_b, output_name)
+                (ir_b, linked_b, create_library(config, linked_b; per_tu_ir=ir_b))
+            catch e
+                e isa InterruptException && rethrow()
+                e
+            end
+            if relinked isa Tuple
+                cpp_files = cpp_files_b
+                (ir_files, linked_ir, binary_path) = relinked
+            else
+                why = _forced_unit_link_reason(relinked)
+                @warn "The library did not build with RepliBuild's forced unit (the inline constructors, " *
+                      "member functions and default-argument calls it defines); it is built without it." reason = why
+                (plan, mplan, dplan) = _forced_unit_refused(plan, mplan, dplan, why)
+                rm(_forced_symbols_path(config); force = true)
+                ir_files = compile_to_ir(config, cpp_files)
+                linked_ir = link_optimize_ir(config, ir_files, output_name)
+                binary_path = create_library(config, linked_ir; per_tu_ir=ir_files)
+            end
             nounwind = _nounwind_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
             byval = _byval_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
         end
