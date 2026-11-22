@@ -725,6 +725,36 @@ the test named when you touch the area.
     methods on a rebuild, not a re-wrap.
 
   (`test_inline_methods.jl`, devtests `test_inline_methods_live.jl`.)
+- **The forced unit includes headers, and a header can define things**
+  (2026-11-21). An implementation header defines functions or variables with
+  external linkage and is meant for ONE translation unit: fmt's
+  `format-inl.h` without `FMT_HEADER_ONLY` (a forced record is declared
+  there), clipper2's `clipper.export.h` (in the recipe's `[wrap]
+  shim_headers`, so first in every generated unit). The library's own unit
+  includes it; the forced unit including it again defined each symbol twice,
+  the relink was "multiple definition of", and neither package BUILT on the
+  4.6.0 release sweep. Every compile of the unit had succeeded: nothing read
+  what it defined.
+  - **The unit's IR is read for strong definitions that are not its own**
+    (`_foreign_strong_definitions`: external linkage, not `linkonce_odr`,
+    `weak_odr`, `internal` or a declaration; the unit's own are the
+    `replibuild_default::` entry points). Only when there is one, each
+    header is compiled alone to IR (an umbrella header by itself, a row's
+    header beside the umbrella), the ones that define such a symbol leave
+    the umbrella or every row's list (`drop_defining_headers!`), a row left
+    with no header is skipped with that reason, and the rows are judged
+    once more. A unit that still defines one is not linked at all.
+  - **A relink that fails with the forced unit falls back to the library
+    without it** (`_forced_unit_refused`): the unit is RepliBuild's own
+    addition, and the project's library builds without it. Every row is
+    reported with the linker's line. The FIRST link is the project's own
+    and stays a hard error.
+  - A new kind of row, or anything else the unit includes, must keep the
+    unit free of strong definitions other than `replibuild_default::`, or
+    `_is_forced_unit_own` has to learn it.
+
+  (`test_forced_unit_definitions.jl`, devtests
+  `test_defining_headers_live.jl`.)
 - **A call that leaves default arguments out is a function the forced unit
   compiles** (2026-11-15, `_default_argument_plan`). A default exists only in
   the header (no `DW_AT_default_value` from clang, and the mangled name
@@ -1475,6 +1505,39 @@ the test named when you touch the area.
   record). `stl_container_size`, `_scope_suffixes` and `_outside_template_args`
   live at package level because the Builder asks them too.
   (`test_toolchain_records.jl`, devtests 8g `test_toolchain_byvalue_live.jl`.)
+- **A qualifier is cut before a C spelling reaches `map_cpp_type`**
+  (2026-11-21). `map_cpp_type` is a table of exact spellings, and anything it
+  has no entry for is `!llvm.ptr`: `const int`, `const double`, `const Kind`
+  and `volatile int` all were. Three places handed it a qualified spelling,
+  and each was a different failure:
+  - a record MEMBER (`StructGen._member_mlir_type`, which cut the qualifiers
+    for its template checks and then passed the uncut spelling on): eight
+    bytes for a four-byte member, so the body failed its own size check and
+    the record fell to a byte region. 70 of llama.cpp's 951 records.
+  - a by-value PARAMETER and a RETURN (`generate_function_thunks`): a
+    definition's DWARF keeps the qualifier (`double scaled(const double x,
+    const int n)`), the callee was declared `(ptr, ptr) -> f64`, the double
+    went to an integer register, and `scaled(2.5, 4)` was 0.0 with no error.
+  A pointer's or reference's spelling maps the same with or without them, so
+  the cut is `_strip_top_cv` at the call, never inside the table: the
+  `jlcs.type_info` bodies (`JLCSIRGenerator`, dumper names) still pass
+  qualified names and get `!llvm.ptr`, and a named ref there with no
+  definition would not parse. **A new caller of `map_cpp_type` with a C
+  spelling from the metadata cuts the qualifiers first.**
+  (`test_const_members.jl`, devtests `test_const_members_live.jl`.)
+- **A field-by-field crossing asks what StructGen emitted, not what the
+  metadata says** (2026-11-21). `is_struct_packed` reads the metadata (the
+  members tile the record). The body can still be a byte region: StructGen
+  measures what it emitted, and one member it cannot type (a bit-precise
+  integer, anything the table lacks) sends the whole record there. Both
+  crossing paths took the body as the "packed" type and emitted
+  `jlcs.marshal_arg` / `jlcs.marshal_ret` on it; on `!llvm.array<N x i8>`
+  neither verifies, and one such thunk loses the library's whole module:
+  llama.cpp's Tier 2 did not initialise on the 4.6.0 release sweep
+  (`LLM_TN::operator()` returning `LLM_TN_IMPL`, an inline method the forced
+  unit defines). A byte-region body crosses as `_byte_blob_type(N)` on the
+  packed branch too, as it always did on the other.
+  (`test_const_members.jl` "B", devtests `test_const_members_live.jl`.)
 - **A byte region never crosses a thunk as an array.** A record with no
   field-by-field body (a union, a bitfield record, overlapping members) is
   `!llvm.array<N x i8>` to StructGen, and LLVM splits an array argument into one

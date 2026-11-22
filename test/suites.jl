@@ -103,6 +103,7 @@ const TESTS = TestFile[
     T("test_inline_constructors.jl", :unit, [:build, :dwarf, :cpp]),
     T("test_nested_type_aliases.jl", :unit, [:cpp]),
     T("test_inline_methods.jl", :unit, [:build, :dwarf, :cpp]),
+    T("test_forced_unit_definitions.jl", :unit, [:build, :cpp]),
     T("test_default_args.jl", :unit, [:build, :cpp]),
     T("test_visible_records.jl", :unit, [:build, :cpp]),
     T("test_std_strings.jl", :unit, [:dwarf, :cpp]),
@@ -154,6 +155,7 @@ const TESTS = TestFile[
     T("test_by_value_crossing.jl", :unit, [:dialect, :cpp]),
     T("test_packed_layout.jl", :unit, [:dialect, :cpp]),
     T("test_thunk_byte_regions.jl", :unit, [:dialect, :cpp]),
+    T("test_const_members.jl", :unit, [:cpp, :dialect]),
     T("test_sysv_record_abi.jl", :unit, [:dialect, :cpp]),
     T("test_aapcs64_record_abi.jl", :unit, [:dialect, :c, :cpp]),
     T("test_simd_vectors.jl", :unit, [:dwarf, :c, :cpp]),
@@ -214,6 +216,8 @@ const TESTS = TestFile[
     T("test_wide_enums_live.jl", :dev, [:dwarf, :cpp], locks = ["wide_enum_test"]),
     T("test_nested_type_aliases_live.jl", :dev, [:dwarf, :cpp], locks = ["nested_type_test"]),
     T("test_inline_methods_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["inline_method_test"]),
+    # A header that defines functions (fmt's format-inl.h, clipper2's clipper.export.h) and the forced unit.
+    T("test_defining_headers_live.jl", :dev, [:build, :cpp], locks = ["defining_header_test"]),
     T("test_fragment_header_live.jl", :dev, [:build, :cpp], locks = ["fragment_header_test"]),
     T("test_default_args_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["default_arg_test"]),
     T("test_visible_records_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["visible_record_test"]),
@@ -223,6 +227,8 @@ const TESTS = TestFile[
       locks = ["conflict_trap_test", "conflict_trap_c_test"]),
     T("test_cpp_finalizers_live.jl", :dev, [:cpp], locks = ["finalizer_test"]),
     T("test_toolchain_byvalue_live.jl", :dev, [:dwarf, :cpp], locks = ["toolchain_byvalue_test"]),
+    # Records whose members are const-qualified, by value (llama.cpp's LLM_TN_IMPL).
+    T("test_const_members_live.jl", :dev, [:build, :cpp, :dialect], locks = ["const_member_test"]),
     T("test_convenience_overloads.jl", :dev, [:cpp], locks = ["convenience_overload_test"]),
     T("test_anonymous_unions.jl", :dev, [:c], locks = ["c_abomination_test"], after = ["fixture:c_abomination_test"]),
     # Graph mode.

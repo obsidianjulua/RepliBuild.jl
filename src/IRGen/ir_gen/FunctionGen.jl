@@ -766,7 +766,14 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
             end
 
             t = get(p, "c_type", "void*")
-            mlir_t = map_cpp_type(t)
+            # The qualifiers of a by-value parameter are cut before the table:
+            # a definition's DWARF keeps them (`const double x`), `map_cpp_type`
+            # has no entry for a qualified spelling, and its `!llvm.ptr`
+            # fallback passed the value in an integer register where the
+            # callee reads a floating one (`scaled(2.5, 4)` was 0.0,
+            # 2026-11-21). A pointer's or reference's spelling maps the same
+            # with or without them.
+            mlir_t = map_cpp_type(_strip_top_cv(t))
             s_name = nothing
             lookup_key = nothing
             is_packed_param = false
@@ -837,7 +844,20 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 elseif StructGen.is_struct_packed(structs[lookup_key])
                     # For packed structs, use LLVM packed type to avoid type mismatch with thunk marshalling
                     mlir_t = StructGen.get_llvm_equivalent_type_string(s_name, structs[lookup_key], structs)
-                    is_packed_param = true
+                    # `is_struct_packed` reads the METADATA (the members tile
+                    # the record). The body StructGen emits can still be a
+                    # byte region: it measures what it emitted, and a member
+                    # it could not type sends the record there. A byte region
+                    # has no fields to marshal, and `jlcs.marshal_arg` on one
+                    # does not verify, which loses the library's whole thunk
+                    # module (llama.cpp, 2026-11-21). It crosses as its bytes,
+                    # like any byte region (`_byte_blob_type`).
+                    br = match(r"^!llvm\.array<(\d+) x i8>$", mlir_t)
+                    if br === nothing
+                        is_packed_param = true
+                    else
+                        mlir_t = _byte_blob_type(parse(Int, br.captures[1]))
+                    end
                     kind === :layout && (sysv_fact = record_statement(lookup_key, structs; ret = false, abi))
                 else
                     # Use FULL definition string to avoid alias parser issues in function signatures
@@ -865,7 +885,8 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
         has_raii = any(!isnothing, raii_specs)
 
         ret_c_type = get(ret_info, "c_type", "void")
-        ret_type = map_cpp_type(ret_c_type)
+        # Qualifiers cut, as for a parameter: `const double f()` returns a double.
+        ret_type = map_cpp_type(_strip_top_cv(ret_c_type))
 
         # Track packed struct return for thunk conversion
         is_packed_ret = false
@@ -924,7 +945,14 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                     aligned = StructGen.get_llvm_aligned_type_string(s_name, ret_struct_info, structs)
                     lay = StructGen._mlir_layout(aligned, structs)
                     c_size = try _parse_byte_size(string(get(ret_struct_info, "byte_size", "0"))) catch; 0 end
-                    if lay !== nothing && lay[1] == c_size
+                    # The emitted body can be a byte region although the
+                    # metadata tiles (see the parameter path above): it comes
+                    # back as its bytes, never through `jlcs.marshal_ret`,
+                    # which takes a struct.
+                    br = match(r"^!llvm\.array<(\d+) x i8>$", ret_type)
+                    if br !== nothing
+                        ret_type = _byte_blob_type(parse(Int, br.captures[1]))
+                    elseif lay !== nothing && lay[1] == c_size
                         # Padding-free and naturally aligned: the two spellings
                         # are one layout, and the aligned one is what this
                         # thunk has always returned.
@@ -1133,7 +1161,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 body = match(r"^!llvm\.struct<packed \((.*)\)\s*>$", llvm_t)
                 body_types = body === nothing ? String[] : StructGen._split_type_list(body.captures[1])
                 member_types_strs = length(body_types) == length(members) ? body_types :
-                    [map_cpp_type(get(m, "c_type", "void*")) for m in members]
+                    [StructGen._member_mlir_type(String(get(m, "c_type", "void*"))) for m in members]
 
                 member_types_attr = "[" * join(member_types_strs, ", ") * "]"
                 offsets_attr = "[" * join(["$(o) : i64" for o in offsets], ", ") * "]"
