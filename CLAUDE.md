@@ -110,6 +110,20 @@ skill drives adding a package.
   A rebuild or re-wrap sweep is never routine verification of a change. Use the
   change's own regression test plus runtests and devtests. A sweep costs hours of
   wall-clock time, and outside those cases its wrappers come back byte-identical.
+- **oneDNN is out of sweeps, coverage readings and release verdicts** (John,
+  2026-11-21; he tests it in isolation himself). Its build needs most of a
+  64 GB box (the `parse_dwarf_dump` item under Not Yet Built, with the forced
+  unit's parallel compiles on top). Do not retry it unasked, and do not take
+  the package out of the Hub or its `index.toml` on this rule.
+- **A sweep saves every package's `julia/` folder first.** A `test.jl`
+  cleans before it builds, so a build that then fails leaves the package with
+  no wrapper (fmt, clipper2 and oneDNN on the 4.6.0 sweep); the saved folder
+  is what puts it back.
+- **A wrap that cannot compile its thunks library still succeeds, as a JIT
+  wrapper.** After a sweep, check that every recipe with `aot_thunks = true`
+  still has its `lib<name>_thunks` file: llama.cpp lost its on the 4.6.0
+  sweep, one invalid thunk having failed the module, and only its deep test
+  showed that anything was wrong.
 - **Dev loop: build + wrap in place, never `discover`.** Hub tomls are hand-rolled
   (varargs, macros, excludes) and discover would strip them.
 - **`test.jl` REBUILDS, `test_deep.jl` verifies.** `test.jl` calls `RepliBuild.clean`,
@@ -1410,6 +1424,14 @@ the test named when you touch the area.
   and its copy rooted, and Base roots a `Vector`'s memory across any `ccall`,
   so neither is safe at a function that longjmps. (`test_cstring_arg_roots.jl`,
   devtests `test_longjmp_wrappers_live.jl`.)
+- **A `String` holding a NUL is refused at every `const char*`, one that
+  travels with a length included** (John, 2026-11-21: "Keep refusing").
+  `mpack_write_str(w, "a\0b", 3)` and `lua_pushlstring(L, "a\0b\0c", 5)`
+  passed all their bytes before #130 and are an `ArgumentError` since: DWARF
+  cannot tell `(const char*, length)` from a C string. `codeunits(s)` or a
+  byte vector passes, the error says so, and a Hub test that sends bytes with
+  a NUL spells them that way. Do not relax the refusal for a parameter that
+  looks like it has a length beside it.
 - Blob structs get `setproperty`/`setproperties` built in the same loop as the getters.
   `with()` forwards to them. C++ field structs get `setproperty` too
   (`_field_setter_chunk`), so a record keeps its setters when it stops being a blob.
@@ -2660,10 +2682,13 @@ Where the time goes was measured on Jolt, the largest Hub package
 
 - **C ccall coverage** is measured by `test/tools/c_ccall_coverage.jl` (reads the
   Hub's wrappers and `.so`s as they are; rebuilds nothing; pass the Hub's path
-  from a worktree). 2026-11-10, 4.4.0 wrappers, 26 C packages: 99.97% net of
-  recipe exclusions, 100% with the two sibling-reached names counted (zlib's
-  `gzgetc` and mpack's `mpack_expect_cstr_match`, callable under their names
-  through a sibling symbol); 98.6% over 17 in August. The varargs misses went
+  from a worktree). 2026-11-22, 4.6.0 wrappers after the release sweep, 30 C
+  packages: 99.97% net of recipe exclusions, 99.99% with the two
+  sibling-reached names counted (zlib's `gzgetc` and mpack's
+  `mpack_expect_cstr_match`, callable under their names through a sibling
+  symbol), the one miss left being micropython's `mp_decimal_exp`, a trap;
+  the same as the 4.5.0 wrappers before it, and 98.6% over 17 packages in
+  August. The varargs misses went
   with `[wrap.varargs]` (`@ccall` is a call) and mpack's 31 `mpack_tag_t` stubs
   with the register-class rule (the record's eightbyte classes, not the
   presence of a float). Count `ccall` targets in parsed code, not emitted
@@ -2675,24 +2700,31 @@ Where the time goes was measured on Jolt, the largest Hub package
   `thunk_manifest.json` and the graph manifests as they are; rebuilds
   nothing; pass the Hub's path). The surface is one function per mangled
   symbol net of `exclude_symbols`; bound means a `ccall` target or an invoked
-  thunk in the PARSED code (`_mlir_ciface_<m>_thunk`, an AOT slot through
-  `_THUNK_SLOTS`, an AOT virtual `thunk_<m>`), never the manifest alone;
+  thunk in the PARSED code (`_mlir_ciface_<m>_thunk` or `…_thunk_inplace`, an
+  AOT slot through `_THUNK_SLOTS`, an AOT virtual `thunk_<m>`), never the
+  manifest alone;
   every miss is a trap split by the generator's reason text or a drop split
   by what the generator did, or set aside as expected when several C++ entry
   points stand behind one Julia method by design (destructor variants,
   `const`/non-`const` pairs, an rvalue overload beside its twin, two C
   spellings of one integer width), measured over the callable surface.
-  2026-11-13, 4.4.0 wrappers, 12 C++ libraries, after the typed Tier 2
-  dispatch (the invariant above) with pugixml and tinyxml2 re-wrapped: 99.4%,
-  6 traps, 21 drops, 60 expected. The drops left: 11 imgui and msdfgen
-  overload sets the generator now separates and their next wrap recovers;
-  pugixml's `operator<`/`operator>` and `<=`/`>=`, which
-  `_julia_function_name` spelled alike and its next wrap separates (the
-  operator invariant, 2026-11-18); tinyxml2's `~XMLComment`/`~XMLUnknown`/
-  `~XMLDeclaration` entries whose metadata carries `XMLNode`'s D2 symbol
-  (attribution to check in the DWARF parser); imgui's two undeclared
-  varargs. The 6 traps are fmt's `long double` and `allocator<char>` and
-  clipper2's `std::function`, all by value.
+  2026-11-22, 4.6.0 wrappers after the release sweep, the Hub's indexed C++
+  libraries (oneDNN's row is still its 4.5.0 wrapper): 99.64% of 13,210
+  callable, the forced unit's functions and the pure virtual rows included,
+  40 traps, 7 drops, 725 expected. The traps: 19 pure virtuals with a record
+  by value, 16 `long double` by value (13 of them in boostmath's detail
+  classes), 4 records with no layout (`std::function`, Vulkan-Hpp's
+  `ArrayProxy`), and fmt's `format_error` constructor. The drops: four
+  functions in clipper2 and fmt whose overload set collapses to one `::Any`
+  signature, imgui's two undeclared varargs, and pugixml's
+  `xml_text::data()`, whose Julia name another function has. Jolt is not in
+  `index.toml`; `--all` counts it (97.5%, 122 traps, 211 drops). **The tool
+  must know every spelling of a thunk's name**: until 2026-11-22 it matched
+  only `<m>_thunk`, so every function whose return is built in the caller's
+  buffer (`<m>_thunk_inplace`) was counted as dropped, 59 on this
+  measurement, under a cause ("dispatch collision") that sent the reader to
+  the generator's dedup. Its "thunks in a manifest nothing invokes" line is
+  the check: it is 0 when the tool and the generator agree.
 - **Over-aligned records, what the C sret and byval fixes do not cover**
   (2026-10-18, narrowed 2026-10-25 and 2026-11-10). GeneratorCpp's own ccall
   path has no aligned buffer, and every alignment DWARF records (the record's,
@@ -2798,13 +2830,18 @@ struct. Still open:
   every other thread reads and writes that thread's instance (`tls_addr()`
   and `tls_counter_ptr()` differ on the main thread after another thread
   called it). C and C++; a task that migrates is wrong the same way.
-- **A `String` holding a NUL is refused at every `const char*`, including
-  one that travels with a length** (found 2026-11-21, the release sweep):
-  `mpack_write_str(w, "a\0b", 3)` and `lua_pushlstring(L, "a\0b\0c", 5)`
-  passed all their bytes before #130 and are an `ArgumentError` since. DWARF
-  cannot tell `(const char*, length)` from a C string. `codeunits(s)` or a
-  byte vector passes, and the error says so. Whether the refusal should stand
-  for that idiom is John's call.
+- **A C++ wrapper types a `const unsigned char` or `const signed char`
+  parameter strictly** (found 2026-11-21): `a::UInt8`, `b::Int8`, where the
+  unqualified spelling is `::Integer`. The list of relaxed C spellings is
+  matched before the qualifier is cut. A `MethodError` for an `Int`, never a
+  wrong call.
+- **The forced unit exports constructors of records a recipe keeps out of its
+  surface** (found 2026-11-21, the release sweep): boostmath hides everything
+  but its shim, and its dynamic table now has 19 constructors of
+  `boost::math::detail::` classes, so the package's own export-table check
+  fails. The engine does what the inline-constructor pass says. Whether
+  `surface_types_only` should keep such records out of the forced unit, or
+  the recipe should exclude them, is John's call.
 - **A `String` passed at a non-const `char*` the library writes into is
   written in place**: Julia's immutable `String`, possibly a shared literal.
   DWARF cannot tell an input `char*` from an output buffer, so refusing it is

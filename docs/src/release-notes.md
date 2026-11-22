@@ -78,6 +78,20 @@ should be rebuilt, and every wrapper should be generated again.
   - A library function named `String`, `Cint`, `eval` or `include`, or a C++
     class named `Bool` or `Integer`, changed Base or broke the module. Such a
     name moves (`String_`, `c_Integer`), and `wrap` prints each move.
+- **Found by rebuilding the Hub's packages before this release:**
+  - A C++ function written with a `const` number parameter
+    (`double scaled(const double x, const int n)`) could return a wrong
+    number with no error: `scaled(2.5, 4)` gave `0.0`.
+  - A struct whose members are `const`, returned by value, could make every
+    call stub of its library fail to load. llama.cpp lost all its C++ calls
+    that way.
+  - A library with a header meant for one source file only, because it
+    defines functions (fmt's `format-inl.h`, clipper2's `clipper.export.h`),
+    did not build: the code the build adds for inline constructors and
+    methods included that header a second time. The build now leaves such a
+    header out, prints its name, and carries on.
+
+  All three are in 4.5.1 as well.
 - **Wrapper names and calls that change — re-wrap, and update callers:**
   - C++ comparison, shift, arrow and array-`new`/`delete` operators have new
     names (`operatorless`, `operatorlessless`, `operatorminusgreater`, …).
@@ -94,6 +108,11 @@ should be rebuilt, and every wrapper should be generated again.
   - C++ globals inside a namespace and public static members have accessors,
     named by their scope (`cfg_depth()`).
   - A C enum parameter takes an integer as well as the enum.
+  - A `String` that holds a NUL byte is refused, with an `ArgumentError`,
+    wherever a C function takes a `const char*`; it used to be cut short at
+    the NUL. That includes a function that takes the length as well, such as
+    `lua_pushlstring(L, s, n)`, which used to get every byte. Pass
+    `codeunits(s)` or a byte vector there.
 - **Fixes in what `build` extracts — rebuild, then re-wrap:** an array of
   65536 elements or more had no size; C++ globals outside the global
   namespace; pure virtual methods; and the fact that lets a C++ library's
@@ -129,6 +148,14 @@ should be rebuilt, and every wrapper should be generated again.
 - **Rebuild, then re-wrap,** for the string parameters, the inline
   constructors, methods and default arguments, `[types] records` and the
   layouts; a re-wrap is enough for the rest.
+- **Known problems in 4.5.1, fixed in 4.6.0:**
+  - A C++ function written with a `const` number parameter
+    (`double scaled(const double x, const int n)`) can return a wrong number
+    with no error.
+  - A struct whose members are `const`, returned by value, can make every
+    call stub of its library fail to load.
+  - A library with a header that defines functions for one source file only
+    (fmt's `format-inl.h`, clipper2's `clipper.export.h`) does not build.
 
 ## v4.5.0 (2026-11-14)
 
