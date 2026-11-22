@@ -176,6 +176,7 @@ const TESTS = TestFile[
     T("test_byvalue_class_temporaries.jl", :unit, [:dialect, :cpp]),
     T("test_packed_layout.jl", :unit, [:dialect, :cpp]),
     T("test_thunk_byte_regions.jl", :unit, [:dialect, :cpp]),
+    T("test_const_members.jl", :unit, [:cpp, :dialect]),
     T("test_sysv_record_abi.jl", :unit, [:dialect, :cpp]),
     T("test_aapcs64_record_abi.jl", :unit, [:dialect, :c, :cpp]),
     T("test_simd_vectors.jl", :unit, [:dwarf, :c, :cpp]),
@@ -272,6 +273,8 @@ const TESTS = TestFile[
     T("test_virtual_classes_live.jl", :dev, [:dwarf, :cpp, :dialect], locks = ["virtual_class_test"]),
     T("test_pure_virtual_live.jl", :dev, [:build, :dwarf, :cpp, :dialect], locks = ["pure_virtual_test"]),
     T("test_toolchain_byvalue_live.jl", :dev, [:dwarf, :cpp], locks = ["toolchain_byvalue_test"]),
+    # Records whose members are const-qualified, by value (llama.cpp's LLM_TN_IMPL).
+    T("test_const_members_live.jl", :dev, [:build, :cpp, :dialect], locks = ["const_member_test"]),
     # Which functions a call may reach at all: C linkage that may throw, and
     # symbols with no debug information.
     T("test_c_linkage_unwind_live.jl", :dev, [:build, :cpp, :dialect], locks = ["c_linkage_unwind_test"]),
