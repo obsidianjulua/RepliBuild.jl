@@ -35,6 +35,31 @@ then called from Julia, and the defects that found, fixed in #127, #130 and
 (#128, which carried no changelog section of its own), and has a page on which
 releases get fixes and what a version number promises (#133).
 
+Before registration the Hub was rebuilt and wrapped on this line and its
+tests run: 46 packages, every one but oneDNN, whose build does not fit the dev
+box's memory and which John took out of sweeps. It found one crash new on this
+line and three defects older than it, fixed in #135, #136 and #137:
+
+- a wrapper for a `const char*` held a GC root across the call since #130, so
+  a Julia callback that left through `luaL_error` (a `longjmp`) crashed the
+  collector (#135);
+- a C++ function defined with a `const` scalar parameter was called with the
+  wrong registers through a thunk (`scaled(2.5, 4)` was 0.0, with no error),
+  and a record of const members returned by value took its library's whole
+  thunk module with it, as llama.cpp's did (#136);
+- fmt and clipper2 did not build: the forced unit (4.5.1) included a header
+  that defines functions, and the relink defined them twice (#137).
+
+One thing the sweep found is left as it is: the forced unit exports 19
+constructors of `boost::math::detail::` classes from boostmath, whose recipe
+means to export only its shim. The wrapper works; the package's own check of
+its export table fails.
+
+Measured on the Hub's wrappers after the sweep, by `test/tools/`'s two
+coverage tools: 99.99% of the C packages' exported functions are callable
+(10,315 of 10,316, 30 packages), and 99.64% of the indexed C++ libraries'
+(13,163 of 13,210).
+
 What a package needs to pick this release up:
 
 - **Every C project relinks once**, and its `LIBRARY_SHA` changes: the linker
@@ -44,7 +69,9 @@ What a package needs to pick this release up:
   C++ globals outside the global namespace, pure virtual methods and an
   operator template's class (#130); and the `nounwind` fact without which a
   C++ library's C-linkage functions run through thunks (#127).
-- **A re-wrap** for the rest.
+- **A re-wrap** for the rest. A wrapper with a compiled thunks library
+  (`aot_thunks`) gets #136's thunks on that re-wrap; a JIT wrapper gets them
+  with the update.
 - **A local `libJLCS` built before the ABI version must be built again**
   (`src/mlir/build.sh` or `Pkg.build`); `check_environment()` says so (#125).
 - **Names and calls to check for in callers:**
@@ -59,6 +86,10 @@ What a package needs to pick this release up:
   - a library name that is also a name of the wrapper's own text moves
     (`String_`, `c_Integer`), and so does a function or global named like its
     struct (`name_`) (#127, #131);
+  - a `String` holding a NUL is an `ArgumentError` at every `const char*`
+    parameter. It was cut at the NUL before, or passed whole to a function
+    that also takes its length (`lua_pushlstring`, `mpack_write_str`): there,
+    pass `codeunits(s)` or a byte vector (#130, #135);
   - `MLIRNative.libJLCS` is a `Libdl.LazyLibrary`; code that needs the file
     calls `MLIRNative.libJLCS_path()` (#119).
 
@@ -74,6 +105,30 @@ for the pull request named above.
 
 The sections below are compiled from the merged pull requests' `## Changelog`
 headings, newest first.
+
+### 2026-11-22: the release sweep's entries, and a coverage tool that counts a return built in the caller's buffer (#138)
+
+- **Shipped:** this section's paragraph on the release sweep and its entries for #135, #136 and #137; in `docs/src/release-notes.md`, what the sweep found, the rule for a `String` that holds a NUL, and the three problems 4.5.1 keeps; `test/tools/cpp_thunk_coverage.jl` matches `<m>_thunk_inplace` beside `<m>_thunk`.
+- **Found:** the coverage tool counted every C++ function whose return is built in the caller's buffer as dropped, 59 across the Hub's indexed libraries, under the cause "dispatch collision". Registered 4.5.1 has the three older defects the sweep found (checked on Julia 1.12.7: a `const` scalar parameter is declared a pointer, a record of const members is marshalled as a byte array, and a project with a defining header fails its relink). llama.cpp's wrapper from the sweep had no compiled thunks library, because a wrap whose thunk module does not lower still succeeds as a JIT wrapper; re-wrapped on the merged `main` it has one again.
+- **Tests:** none new; the docs build. On the merged `main` (#135, #136 and #137 together) the Hub packages the three fixes touch pass their verifier tests: clipper2 233 and llama.cpp 33 after a re-wrap, lua 191, mpack 172, blake3 654, bullet3 45, imgui 202, jolt 151, boostmath 70, msdfgen 26, stl 35, tinyxml2 11, pugixml 13, box2d 15; fmt, which has no test, loads.
+
+### 2026-11-21: the forced unit leaves out a header that defines functions, and a failed relink falls back (#137)
+
+- **Shipped:** the forced unit's IR is read for definitions with external linkage that are not its own (`_foreign_strong_definitions`); a header that brings one is left out of the unit (from `[wrap] shim_headers`' place in it, or from every row's list), the rows declared only there are skipped with that reason, and the build names the headers. A relink that still fails with the forced unit falls back to the library without it, with every row reported; the first link stays a hard error.
+- **Found:** fmt and clipper2 did not build. The forced unit included fmt's `format-inl.h` (an implementation file a forced record is declared in) and clipper2's `clipper.export.h` (in the recipe's `shim_headers`), each meant for one translation unit, and the relink was "multiple definition of". Every compile of the unit had succeeded; nothing read what it defined. Both wrappers dated from 4.5.0, before the forced unit.
+- **Tests:** `test_forced_unit_definitions.jl` (unit), `test_defining_headers_live.jl` (dev, fixture `test/defining_header_test/`, both shapes and the fallback).
+
+### 2026-11-21: const-qualified types in the thunk generator, and a byte-bodied record on the marshal path (#136)
+
+- **Shipped:** a record member, a by-value parameter and a return spelled with `const` or `volatile` are typed as the type they qualify (`StructGen._member_mlir_type`, `_strip_top_cv` at the two signature sites). A record whose emitted body is a byte region crosses a thunk as its bytes on the tiled branch too, for a parameter and for a return. A JIT wrapper gets both when RepliBuild updates; a wrapper with a compiled thunks library needs a re-wrap. No rebuild.
+- **Found:** `map_cpp_type` has no entry for a qualified spelling and answers `!llvm.ptr`. For a member that degraded the record to bytes (70 of llama.cpp's 951 records). For a parameter it passed a `const double` in an integer register: `scaled(2.5, 4)` was 0.0 with no error. And the tiled crossing path marshalled field by field without looking at the body, so a byte-bodied record made a thunk that did not verify and took the library's whole module: llama.cpp's Tier 2 did not initialise on the release sweep. All three are older than 4.6.0.
+- **Tests:** `test_const_members.jl` (unit), `test_const_members_live.jl` (dev, fixture `test/const_member_test/`, callees built by clang++).
+
+### 2026-11-21: a String at a `const char*` leaves the wrapper holding no GC root (#135)
+
+- **Shipped:** `JITManager.cstring_arg(::String)` inlines to one `memchr` and the argument itself, with the refusal of an embedded NUL out of line (`_refuse_embedded_nul`), so a wrapper given a `String` has no GC frame, as before #130. The refusal's message says to pass `codeunits(s)` or a byte vector for bytes that travel with their length. Wrappers already written by 4.6.0 need no re-wrap.
+- **Found:** the Hub's lua segfaulted in the collector on every run of its deep test. A callback that leaves through `luaL_error` abandons the Julia frames between the `longjmp` and `lua_pcall`; #130's conversion had inlined Base's `Cstring` check, whose `throw` builds a message, which gave the wrapper a GC frame that was then never popped. Found by the release sweep, not by the suites: nothing in them left a wrapper by `longjmp`.
+- **Tests:** `test_cstring_arg_roots.jl` (unit: the compiled wrapper has no GC frame for a `String`, and has one for a `SubString`), `test_longjmp_wrappers_live.jl` (dev, fixture `test/longjmp_wrapper_test/`: 200 jumps per call shape in a child, the abandoned stack overwritten and the collector run inside the frame that made the protected call).
 
 ### 2026-11-21: a "Support and versions" page in the manual (#133)
 

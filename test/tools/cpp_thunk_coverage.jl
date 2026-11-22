@@ -34,7 +34,8 @@
 #             the wrapper's PARSED code, as the C tool counts them: a
 #             docstring never counts, a trap stub calls nothing.
 #   tier 2    surface symbols whose thunk the parsed code invokes:
-#             `JITManager.invoke("_mlir_ciface_<m>_thunk", …)`, an AOT slot
+#             `JITManager.invoke("_mlir_ciface_<m>_thunk", …)` (or
+#             `…_thunk_inplace`, a return built in the caller's buffer), an AOT slot
 #             (`invoke_aot_ptr(_FPTR_x[], …)`, resolved through the emitted
 #             `_THUNK_SLOTS` table) or an AOT virtual `ccall((:thunk_<m>,
 #             THUNKS_LIBRARY_PATH), …)`. A thunk listed in
@@ -124,7 +125,10 @@ _callee(x) = x isa QuoteNode ? string(x.value) : x isa Symbol ? string(x) : x is
 _lit(x) = x isa String ? x :
           x isa Expr && x.head == :string ? join(a for a in x.args if a isa String) : nothing
 
-const _THUNK_RE = r"^_mlir_ciface_(.+)_thunk$"
+# Both spellings of a thunk's name: `<m>_thunk`, and `<m>_thunk_inplace` for a
+# return built in the caller's buffer (`FunctionGen.thunk_symbol(m, true)`).
+# Matching only the first counted every such function as dropped.
+const _THUNK_RE = r"^_mlir_ciface_(.+)_thunk(?:_inplace)?$"
 
 """
 What one function body does: the `ccall` targets it names (with the library
