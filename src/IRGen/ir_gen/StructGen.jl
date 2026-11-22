@@ -190,7 +190,13 @@ function _member_mlir_type(c_type::AbstractString)::String
             return r
         end
     end
-    return map_cpp_type(String(c_type))
+    # The spelling handed on is the one with its qualifiers cut:
+    # `map_cpp_type` is a table of exact spellings, so `const int`,
+    # `const Kind` and `volatile int` matched nothing and came back as its
+    # `!llvm.ptr` fallback, eight bytes for a four-byte member. The body then
+    # failed its own size check and the whole record fell to a byte region
+    # (llama.cpp's `LLM_TN_IMPL`, five const members, 2026-11-21).
+    return map_cpp_type(t)
 end
 
 """
