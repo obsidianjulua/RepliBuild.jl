@@ -4,6 +4,40 @@ All notable changes to RepliBuild.jl are documented in this file.
 
 ## Unreleased
 
+## v4.5.2 (2026-11-22)
+
+Version 4.5.1 → 4.5.2; Julia compat `1.12` (tested on 1.12 and 1.13). A patch
+release of the Julia 1.12 line: the defects the 4.6.0 release sweep of the Hub
+found on 2026-11-21 that are older than 4.6.0, each confirmed on 4.5.1 with
+Julia 1.12 before it was ported. Nothing else moves; the fixes are the ones
+`main` carries as #136 and #137.
+
+What a package needs to pick this release up:
+
+- **Nothing** for a wrapper that calls through the JIT: the thunks are
+  generated when the wrapper loads, so a C++ function with a `const` scalar
+  parameter or return, and a record with `const` members, are right once
+  RepliBuild is updated.
+- **A re-wrap** for a wrapper with a compiled thunks library (`aot_thunks`).
+- **A build** for a package that failed on 4.5.1 with "multiple definition of"
+  at the relink: it builds now.
+
+A third fix of that sweep (#135, a GC root held across a `longjmp`) is for a
+regression that entered `main` after 4.5.1 and does not exist on this line.
+The sections below are the two pull requests' `## Changelog` headings.
+
+### 2026-11-21: the forced unit leaves out a header that defines functions, and a failed relink falls back (#137, ported 2026-11-22)
+
+- **Shipped:** the forced unit's IR is read for definitions with external linkage that are not its own (`_foreign_strong_definitions`); a header that brings one is left out of the unit (from `[wrap] shim_headers`' place in it, or from every row's list), the rows declared only there are skipped with that reason, and the build names the headers. A relink that still fails with the forced unit falls back to the library without it, with every row reported; the first link stays a hard error.
+- **Found:** fmt and clipper2 did not build. The forced unit (new in 4.5.1) included fmt's `format-inl.h` (an implementation file a forced record is declared in) and clipper2's `clipper.export.h` (in the recipe's `shim_headers`), each meant for one translation unit, and the relink was "multiple definition of". Every compile of the unit had succeeded; nothing read what it defined. Both wrappers dated from 4.5.0, before the forced unit.
+- **Tests:** `test_forced_unit_definitions.jl` (unit), `test_defining_headers_live.jl` (dev, fixture `test/defining_header_test/`, both shapes and the fallback).
+
+### 2026-11-21: const-qualified types in the thunk generator, and a byte-bodied record on the marshal path (#136, ported 2026-11-22)
+
+- **Shipped:** a record member, a by-value parameter and a return spelled with `const` or `volatile` are typed as the type they qualify (`StructGen._member_mlir_type`, `_strip_top_cv` at the two signature sites). A record whose emitted body is a byte region crosses a thunk as its bytes on the tiled branch too, for a parameter and for a return. A JIT wrapper gets both when RepliBuild updates; a wrapper with a compiled thunks library needs a re-wrap. No rebuild.
+- **Found:** `map_cpp_type` has no entry for a qualified spelling and answers `!llvm.ptr`. For a member that degraded the record to bytes (70 of llama.cpp's 951 records). For a parameter it passed a `const double` in an integer register: `scaled(2.5, 4)` was 0.0 with no error. And the tiled crossing path marshalled field by field without looking at the body, so a byte-bodied record made a thunk that did not verify and took the library's whole module: llama.cpp's Tier 2 did not initialise on the release sweep.
+- **Tests:** `test_const_members.jl` (unit), `test_const_members_live.jl` (dev, fixture `test/const_member_test/`, callees built by clang++).
+
 ## v4.5.1 (2026-11-17)
 
 Version 4.5.0 → 4.5.1; Julia compat `1.12` (CI tests 1.12 and 1.13).
