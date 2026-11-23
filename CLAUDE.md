@@ -115,15 +115,28 @@ skill drives adding a package.
   64 GB box (the `parse_dwarf_dump` item under Not Yet Built, with the forced
   unit's parallel compiles on top). Do not retry it unasked, and do not take
   the package out of the Hub or its `index.toml` on this rule.
-- **A sweep saves every package's `julia/` folder first.** A `test.jl`
-  cleans before it builds, so a build that then fails leaves the package with
-  no wrapper (fmt, clipper2 and oneDNN on the 4.6.0 sweep); the saved folder
-  is what puts it back.
-- **A wrap that cannot compile its thunks library still succeeds, as a JIT
-  wrapper.** After a sweep, check that every recipe with `aot_thunks = true`
-  still has its `lib<name>_thunks` file: llama.cpp lost its on the 4.6.0
-  sweep, one invalid thunk having failed the module, and only its deep test
-  showed that anything was wrong.
+- **A sweep is one command: `julia --project=. test/tools/hub_sweep.jl <hub>`**
+  (2026-11-23; `--plan` prints what would run, `--only a,b` narrows it). Per
+  package it saves `julia/`, rebuilds, checks, and runs every
+  `test_deep*.jl`; the table is `<out>/summary.md`. What it does for you, and
+  why:
+  - **It saves every package's `julia/` folder first** and puts it back when
+    a rebuild leaves no wrapper. A `test.jl` cleans before it builds, so a
+    build that then fails left the package with nothing (fmt, clipper2 and
+    oneDNN on the 4.6.0 sweep).
+  - **It checks the compiled thunks library.** A wrap that cannot compile its
+    thunks still succeeds, as a JIT wrapper: llama.cpp lost its library on
+    the 4.6.0 sweep, one invalid thunk having failed the module, and only its
+    deep test showed that anything was wrong.
+  - **It rebuilds through a package's own `test.jl` where that script cleans
+    and builds** (read off the parsed script), else with `clean(toml; deps =
+    false)`, `build`, `wrap`. `--tool-rebuild` never uses `test.jl`.
+  - `--verify` runs the tests on what is there and `--rewrap` wraps again
+    first: the two modes for checking an engine change against packages
+    without rebuilding them. The `--project` is the RepliBuild being judged.
+
+  (`test_hub_sweep_tool.jl`, devtests `test_hub_sweep_live.jl`, which sweeps
+  a three-package Hub made in a temporary directory.)
 - **Dev loop: build + wrap in place, never `discover`.** Hub tomls are hand-rolled
   (varargs, macros, excludes) and discover would strip them.
 - **`test.jl` REBUILDS, `test_deep.jl` verifies.** `test.jl` calls `RepliBuild.clean`,
