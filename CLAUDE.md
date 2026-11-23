@@ -121,16 +121,18 @@ skill drives adding a package.
   `test_deep*.jl`; the table is `<out>/summary.md`. What it does for you, and
   why:
   - **It saves every package's `julia/` folder first** and puts it back when
-    a rebuild leaves no wrapper. A `test.jl` cleans before it builds, so a
-    build that then fails left the package with nothing (fmt, clipper2 and
-    oneDNN on the 4.6.0 sweep).
+    a rebuild leaves no wrapper. A rebuild cleans first, so a build that then
+    fails left the package with nothing (fmt, clipper2 and oneDNN on the
+    4.6.0 sweep).
   - **It checks the compiled thunks library.** A wrap that cannot compile its
     thunks still succeeds, as a JIT wrapper: llama.cpp lost its library on
     the 4.6.0 sweep, one invalid thunk having failed the module, and only its
     deep test showed that anything was wrong.
-  - **It rebuilds through a package's own `test.jl` where that script cleans
-    and builds** (read off the parsed script), else with `clean(toml; deps =
-    false)`, `build`, `wrap`. `--tool-rebuild` never uses `test.jl`.
+  - **It is the one thing that rebuilds**: `clean(toml; deps = false)`,
+    `build`, `wrap`, from the sources already there. It then looks at every
+    dependency checkout: one cloned or fetched again under an unchanged pin
+    fails its package (`sweep_sources`: a clone has a new `.git`, a fetch
+    rewrites `FETCH_HEAD`).
   - `--verify` runs the tests on what is there and `--rewrap` wraps again
     first: the two modes for checking an engine change against packages
     without rebuilding them. The `--project` is the RepliBuild being judged.
@@ -139,12 +141,21 @@ skill drives adding a package.
   a three-package Hub made in a temporary directory.)
 - **Dev loop: build + wrap in place, never `discover`.** Hub tomls are hand-rolled
   (varargs, macros, excludes) and discover would strip them.
-- **`test.jl` REBUILDS, `test_deep.jl` verifies.** `test.jl` calls `RepliBuild.clean`,
-  which deletes `build/`, `julia/` and `.replibuild_cache/` including the vendored
-  clone, then rebuilds from cold (minutes, needs network); `clean(toml;
-  deps=false)` keeps the clone and re-checks its pin instead. To check a wrapper
-  works, use `test_deep.jl`. Read a test script before running it.
-  (box2d/tinyxml2/pugixml `test.jl` are exceptions — verifiers only.)
+- **Nothing pulls sources that have not changed, and a Hub test script never
+  cleans** (John, 2026-11-23: "I dont like git pulls unless sources are new,
+  the test.jl shouldn't clean or pull").
+  - A bare `RepliBuild.clean(toml)` deletes `.replibuild_cache/` with the
+    dependency checkout in it, and the next build clones again. `clean(toml;
+    deps = false)` keeps the checkout; a build then runs only `git rev-parse`
+    on it. The resolver fetches by itself when the recipe's pin, tag, URL or
+    submodule list changes, and only then. Use `deps = false` whenever a
+    rebuild from cold is wanted.
+  - A `test.jl` calls `RepliBuild.build` (nothing to do when the package is
+    built and unchanged), wraps, and asserts about the build; `test_deep.jl`
+    verifies behaviour. Neither calls `clean`. The sweep tool refuses to run
+    a script that does and fails its package, so a new one is caught.
+  - A rebuild from cold is the sweep tool's job (`--only <pkg>`), never a
+    test script's.
 - Julia block-buffers redirected stdout: an empty log from a running or killed job is
   normal. Judge progress from artifacts on disk and `pgrep`.
 - **A fix computed at build time needs a rebuild, not a re-wrap.** `class`, signatures

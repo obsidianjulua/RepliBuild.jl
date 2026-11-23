@@ -15,22 +15,29 @@
 # `replibuild.toml` is a package, indexed or not. Per package, in order:
 #
 #   save      `julia/` is copied to `<out>/before/<pkg>/julia` before anything
-#             touches it. A `test.jl` cleans before it builds, so a build that
-#             then fails leaves a package with no wrapper; the copy is what
-#             puts it back.
-#   rebuild   by the package's own `test.jl` when that script cleans and
-#             builds (it is parsed for calls of `clean`/`build`; such a script
-#             also asserts things about its build), else by this tool:
-#             `clean(toml; deps = false)`, `build`, `wrap`. Never `discover`:
-#             Hub recipes are hand-written. A rebuild that fails gets its
-#             saved `julia/` back, and the failed state is kept under
-#             `<out>/failed/<pkg>/`.
+#             touches it. A rebuild cleans first, so a build that then fails
+#             leaves a package with no wrapper; the copy is what puts it back.
+#   rebuild   `clean(toml; deps = false)`, `build`, `wrap`: from the sources
+#             already there. Never `discover`: Hub recipes are hand-written.
+#             A rebuild that fails gets its saved `julia/` back, and the
+#             failed state is kept under `<out>/failed/<pkg>/`.
+#   verify    every `test_deep*.jl`, then `test.jl`.
 #   check     the wrapper says it was written by this RepliBuild
-#             (`BUILD_GENERATOR`), and a recipe with `aot_thunks = true`, or a
-#             package that had a compiled thunks library before, has one now.
-#             A wrap that cannot compile its thunks still succeeds as a JIT
-#             wrapper, so nothing else would say.
-#   verify    every `test_deep*.jl`, then a `test.jl` that only verifies.
+#             (`BUILD_GENERATOR`); a recipe with `aot_thunks = true`, or a
+#             package that had a compiled thunks library before, has one now
+#             (a wrap that cannot compile its thunks still succeeds as a JIT
+#             wrapper, so nothing else would say); and no source was fetched
+#             again.
+#
+# NOTHING HERE PULLS SOURCES THAT HAVE NOT CHANGED (John, 2026-11-23). The
+# rebuild keeps the dependency checkouts, and RepliBuild fetches only when a
+# recipe's pin is new. Two things hold that:
+#   - A test script that calls `clean` is not run, and its package fails: a
+#     bare `clean` deletes the checkout and the next build clones it again. A
+#     test script builds what is missing, wraps, and asserts; this tool is
+#     what rebuilds.
+#   - Each checkout is looked at before and after the package's steps. One
+#     that was cloned or fetched again under the same pin is a failure.
 #
 # Each step is a child Julia with a time limit and its own log. One line per
 # step goes to `<out>/status.tsv`, the table to `<out>/summary.md`, and the
@@ -42,7 +49,6 @@
 #   --only a,b         these packages only     --skip a,b   leave these out
 #   --verify           rebuild nothing: run the verify steps on what is there
 #   --rewrap           `wrap` only (after an engine change), then verify
-#   --tool-rebuild     never rebuild through a package's `test.jl`
 #   --jobs N           packages at a time (default 2; a build is parallel itself)
 #   --timeout S        seconds per step (default 3600); `--timeout pkg=S` for one
 #   --arg pkg=VALUE    an argument for that package's `test_deep*.jl`
@@ -103,7 +109,6 @@ Base.@kwdef mutable struct SweepOptions
     only::Vector{String} = String[]
     skip::Vector{String} = String[]
     mode::Symbol = :rebuild            # :rebuild, :rewrap or :verify
-    tool_rebuild::Bool = false
     jobs::Int = 2
     timeout::Int = 3600
     timeouts::Dict{String,Int} = Dict{String,Int}()
@@ -130,7 +135,6 @@ function sweep_parse_args(args::Vector{String})::SweepOptions
         elseif a == "--skip";          append!(o.skip, names(value()))
         elseif a == "--verify";        o.mode = :verify
         elseif a == "--rewrap";        o.mode = :rewrap
-        elseif a == "--tool-rebuild";  o.tool_rebuild = true
         elseif a == "--jobs";          o.jobs = parse(Int, value())
         elseif a == "--resume";        o.resume = true
         elseif a == "--restore";       o.restore = true
@@ -184,11 +188,12 @@ function sweep_select(o::SweepOptions, all::Vector{String})::Vector{String}
 end
 
 """
-Does this script rebuild its package? It does when it calls `clean` or `build`
-(bare, or qualified as in `RepliBuild.clean`). Read off the parsed code, so a
-comment or a string that mentions one does not count.
+Does this script call `clean` (bare, or qualified as in `RepliBuild.clean`,
+with any arguments)? Read off the parsed code, so a comment or a string that
+mentions it does not count. A script that does is never run by a sweep: a bare
+`clean` deletes the dependency checkout, and the next build clones it again.
 """
-function sweep_rebuilds_itself(path::AbstractString)::Bool
+function sweep_cleans(path::AbstractString)::Bool
     isfile(path) || return false
     ast = try
         Meta.parseall(read(path, String))
@@ -202,12 +207,61 @@ function sweep_rebuilds_itself(path::AbstractString)::Bool
             f = ex.args[1]
             name = f isa Symbol ? f :
                    (f isa Expr && f.head == :. && f.args[end] isa QuoteNode) ? f.args[end].value : nothing
-            name in (:clean, :build) && (found[] = true; return)
+            name === :clean && (found[] = true; return)
         end
         foreach(walk, ex.args)
     end
     walk(ast)
     return found[]
+end
+
+"""
+What identifies each dependency checkout of a package: the pin its marker
+records (`<name>.resolved`: url, tag, commit), and a signature that moves when
+the checkout is cloned or fetched again. A clone makes a new `.git` (another
+inode, a new `config`); a fetch rewrites `.git/FETCH_HEAD`; nothing a build
+does locally (`rev-parse`, a checkout) touches either. An unpacked archive has
+no `.git` and is replaced whole when it is fetched.
+"""
+function sweep_sources(pkgdir::AbstractString)::Dict{String,Tuple{String,String}}
+    deps = joinpath(pkgdir, ".replibuild_cache", "deps")
+    out = Dict{String,Tuple{String,String}}()
+    isdir(deps) || return out
+    for name in readdir(deps)
+        d = joinpath(deps, name)
+        isdir(d) || continue
+        marker = joinpath(deps, name * ".resolved")
+        pin = isfile(marker) ? read(marker, String) : ""
+        git = joinpath(d, ".git")
+        stamp(f) = isfile(f) ? string(mtime(f)) : "-"
+        sig = isdir(git) ?
+              string(stat(git).inode, " ", stamp(joinpath(git, "config")), " ", stamp(joinpath(git, "FETCH_HEAD"))) :
+              string(stat(d).inode)
+        out[name] = (pin, sig)
+    end
+    return out
+end
+
+"""
+The table's word for a package's sources, and the problem when one was pulled:
+cloned or fetched again while its pin stayed what it was. A checkout that was
+not there before is new, and one whose pin moved was meant to be fetched.
+"""
+function sweep_sources_verdict(before::AbstractDict, after::AbstractDict)
+    isempty(after) && return ("", String[])
+    pulled = String[]; moved = String[]; fresh = String[]
+    for name in sort!(collect(keys(after)))
+        (pin, sig) = after[name]
+        if !haskey(before, name)
+            push!(fresh, name)
+        elseif sig != before[name][2]
+            push!(pin == before[name][1] ? pulled : moved, name)
+        end
+    end
+    cell = !isempty(pulled) ? "PULLED" : !isempty(moved) ? "new pin" : !isempty(fresh) ? "fetched (new)" : "kept"
+    problems = isempty(pulled) ? String[] :
+               ["sources fetched again though their pin did not change: " * join(pulled, ", ")]
+    return (cell, problems)
 end
 
 "Does the recipe ask for a compiled thunks library, in any table of it?"
@@ -394,11 +448,12 @@ end
 
 mutable struct SweepResult
     pkg::String
-    rebuilt_by::String                  # "test.jl", "tool", "wrap" or "" (verify only)
+    rebuilt_by::String                  # "rebuild", "wrap" or "" (verify only)
     steps::Vector{SweepStep}
     generators_before::Vector{String}
     generators_after::Vector{String}
     thunks::String                      # "", "yes", "MISSING"
+    sources::String                     # "", "kept", "fetched (new)", "new pin", "PULLED"
     problems::Vector{String}
     restored::Bool
 end
@@ -407,13 +462,11 @@ sweep_ok(r::SweepResult) = isempty(r.problems)
 
 "What a sweep of `pkgdir` would run, without running it."
 function sweep_plan(o::SweepOptions, pkgdir::AbstractString)
-    test = joinpath(pkgdir, "test.jl")
-    self = sweep_rebuilds_itself(test)
-    rebuild = o.mode == :verify ? "" :
-              o.mode == :rewrap ? "wrap" :
-              (self && !o.tool_rebuild) ? "test.jl" : "tool"
-    deep = sort!(String[f for f in readdir(pkgdir) if occursin(r"^test_deep.*\.jl$", f)])
-    return (; rebuild, deep, verifier = isfile(test) && !self,
+    rebuild = o.mode == :verify ? "" : o.mode == :rewrap ? "wrap" : "rebuild"
+    scripts = sort!(String[f for f in readdir(pkgdir) if occursin(r"^test_deep.*\.jl$", f)])
+    isfile(joinpath(pkgdir, "test.jl")) && push!(scripts, "test.jl")
+    refused = filter(f -> sweep_cleans(joinpath(pkgdir, f)), scripts)
+    return (; rebuild, scripts = filter(f -> !(f in refused), scripts), refused,
             wants_thunks = sweep_wants_thunks(joinpath(pkgdir, "replibuild.toml")))
 end
 
@@ -424,8 +477,12 @@ function sweep_package(o::SweepOptions, pkg::String, record)::SweepResult
     logs = joinpath(o.out, "logs")
     limit = get(o.timeouts, pkg, o.timeout)
     plan = sweep_plan(o, pkgdir)
-    r = SweepResult(pkg, plan.rebuild, SweepStep[], sweep_generators(julia_dir), String[], "", String[], false)
+    r = SweepResult(pkg, plan.rebuild, SweepStep[], sweep_generators(julia_dir), String[], "", "", String[], false)
     had_thunks = !isempty(sweep_thunks_libraries(julia_dir))
+    sources_before = sweep_sources(pkgdir)
+    for f in plan.refused
+        push!(r.problems, "$f calls `clean`: not run (a test script must not clean or pull)")
+    end
 
     function step!(name, cmd)
         (status, secs) = sweep_run(cmd, pkgdir, joinpath(logs, "$pkg.$name.log"), limit)
@@ -446,20 +503,8 @@ function sweep_package(o::SweepOptions, pkg::String, record)::SweepResult
     end
 
     if plan.rebuild != ""
-        before = sweep_wrapper_digest(julia_dir)
         sweep_backup!(pkgdir, save)
-        tool_cmd(mode) = `$(sweep_julia()) -e $SWEEP_CHILD -- replibuild.toml $mode`
-        if plan.rebuild == "test.jl"
-            step!("test", `$(sweep_julia()) test.jl`)
-            if !isempty(sweep_wrappers(julia_dir)) && sweep_wrapper_digest(julia_dir) == before
-                # Parsed as a rebuilder and it wrote no wrapper: rebuild here.
-                r.rebuilt_by = "tool"
-                step!("rebuild", tool_cmd("rebuild"))
-            end
-        else
-            step!(plan.rebuild == "wrap" ? "wrap" : "rebuild",
-                  tool_cmd(plan.rebuild == "wrap" ? "wrap" : "rebuild"))
-        end
+        step!(plan.rebuild, `$(sweep_julia()) -e $SWEEP_CHILD -- replibuild.toml $(plan.rebuild)`)
         if isempty(sweep_wrappers(julia_dir))
             # The build took the wrapper and gave none back.
             r.restored = sweep_restore!(pkgdir, save, joinpath(o.out, "failed", pkg))
@@ -475,8 +520,18 @@ function sweep_package(o::SweepOptions, pkg::String, record)::SweepResult
         end
     end
 
-    # Checked in every mode: a wrap that could not compile its thunks library
-    # succeeds as a JIT wrapper, and only this says so.
+    if !r.restored && !isempty(sweep_wrappers(julia_dir))
+        for f in plan.scripts
+            extra = startswith(f, "test_deep") ? get(o.args, pkg, String[]) : String[]
+            step!(splitext(f)[1], `$(sweep_julia()) $f $extra`)
+        end
+    elseif plan.rebuild == ""
+        push!(r.problems, "no wrapper to verify")
+    end
+    isempty(plan.scripts) && isempty(plan.refused) && record(pkg, SweepStep("note", 0, 0.0, "no test script"))
+
+    # Judged at the end, after every step: a test script wraps again, and any
+    # step could have gone back to the network.
     if !r.restored && !isempty(sweep_wrappers(julia_dir))
         r.generators_after = sweep_generators(julia_dir)
         if plan.wants_thunks || had_thunks
@@ -486,18 +541,8 @@ function sweep_package(o::SweepOptions, pkg::String, record)::SweepResult
                           (plan.wants_thunks ? "the recipe sets aot_thunks" : "it had one before") * ")")
         end
     end
-
-    if !r.restored && !isempty(sweep_wrappers(julia_dir))
-        for f in plan.deep
-            extra = get(o.args, pkg, String[])
-            step!(splitext(f)[1], `$(sweep_julia()) $f $extra`)
-        end
-        plan.verifier && step!("test", `$(sweep_julia()) test.jl`)
-    elseif plan.rebuild == ""
-        push!(r.problems, "no wrapper to verify")
-    end
-    isempty(plan.deep) && !plan.verifier && plan.rebuild != "test.jl" &&
-        record(pkg, SweepStep("note", 0, 0.0, "no test script"))
+    (r.sources, pulled) = sweep_sources_verdict(sources_before, sweep_sources(pkgdir))
+    append!(r.problems, pulled)
     return r
 end
 
@@ -511,10 +556,10 @@ function sweep_summary(results::Vector{SweepResult}, left_out::Vector{String})::
     println(io, length(results), " package(s): ", length(results) - bad, " clean, ", bad, " with a problem.",
             isempty(left_out) ? "" : " Left out: " * join(left_out, ", ") * ".")
     println(io)
-    println(io, "| Package | Rebuilt by | Seconds | Generator | Thunks library | Tests | Verdict |")
-    println(io, "|:--|:--|--:|:--|:--|:--|:--|")
+    println(io, "| Package | Rebuild s | Generator | Sources | Thunks library | Tests | Verdict |")
+    println(io, "|:--|--:|:--|:--|:--|:--|:--|")
     for r in results
-        build = filter(s -> s.name in ("rebuild", "wrap") || (s.name == "test" && r.rebuilt_by == "test.jl"), r.steps)
+        build = filter(s -> s.name in ("rebuild", "wrap"), r.steps)
         secs = isempty(build) ? "" : string(round(Int, sum(s.seconds for s in build)))
         # Before → after, or the one there is (a package never built, or one put back).
         gen = isempty(r.generators_after) ? join(r.generators_before, ", ") :
@@ -522,7 +567,7 @@ function sweep_summary(results::Vector{SweepResult}, left_out::Vector{String})::
               join(r.generators_after, ", ") :
               join(r.generators_before, ", ") * " → " * join(r.generators_after, ", ")
         tests = join(("$(s.name) $(s.note)" for s in r.steps if !isempty(s.note)), "; ")
-        println(io, "| ", r.pkg, " | ", r.rebuilt_by, " | ", secs, " | ", gen, " | ", r.thunks, " | ",
+        println(io, "| ", r.pkg, " | ", secs, " | ", gen, " | ", r.sources, " | ", r.thunks, " | ",
                 tests, " | ", sweep_ok(r) ? "ok" : "**FAIL**", " |")
     end
     if bad > 0
@@ -578,8 +623,8 @@ function sweep_main(args::Vector{String})::Int
     if o.plan
         for p in pkgs
             plan = sweep_plan(o, joinpath(sweep_packages_dir(o.hub), p))
-            println(rpad(p, 18), " rebuild: ", rpad(isempty(plan.rebuild) ? "-" : plan.rebuild, 8),
-                    " verify: ", join(vcat(plan.deep, plan.verifier ? ["test.jl"] : String[]), ", "),
+            println(rpad(p, 18), isempty(plan.rebuild) ? "" : plan.rebuild * ", then ", join(plan.scripts, ", "),
+                    isempty(plan.refused) ? "" : "   [NOT RUN, calls clean: " * join(plan.refused, ", ") * "]",
                     plan.wants_thunks ? "   [thunks library expected]" : "")
         end
         isempty(left_out) || println("left out: ", join(left_out, ", "))
@@ -619,7 +664,7 @@ function sweep_main(args::Vector{String})::Int
                 sweep_package(o, p, record)
             catch e
                 e isa InterruptException && rethrow()
-                x = SweepResult(p, "", SweepStep[], String[], String[], "", String[], false)
+                x = SweepResult(p, "", SweepStep[], String[], String[], "", "", String[], false)
                 push!(x.problems, "the sweep itself failed here: " * first(split(sprint(showerror, e), '\n')))
                 x
             end
