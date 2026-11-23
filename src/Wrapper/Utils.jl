@@ -938,7 +938,7 @@ function _surface_type_keys_impl(metadata::Dict{String,Any},
     if globals isa Dict
         for (gname, g) in globals
             g isa Dict || continue
-            if runtime_defined !== nothing && !(_global_symbol(gname, g) in runtime_defined)
+            if runtime_defined !== nothing && !(_global_runtime_symbol(gname, g) in runtime_defined)
                 continue
             end
             for k in ("julia_type", "c_type", "type"), r in resolve(get(g, k, nothing))
@@ -1005,7 +1005,7 @@ function _drop_unresolvable_globals!(metadata::Dict{String,Any},
     globals isa Dict || return 0
     dropped = 0
     for k in collect(keys(globals))
-        if !(_global_symbol(k, globals[k]) in runtime_defined)
+        if !(_global_runtime_symbol(k, globals[k]) in runtime_defined)
             delete!(globals, k)
             dropped += 1
         end
@@ -1022,6 +1022,99 @@ metadata older than the field and the DWARF name of a C global.
 """
 _global_symbol(key, entry) =
     (s = entry isa AbstractDict ? get(entry, "symbol", nothing) : nothing; s isa AbstractString ? String(s) : string(key))
+
+"""
+    _global_runtime_symbol(key, entry) -> String
+
+The symbol a wrapper's accessors for a `globals` entry bind: a thread-local
+global's accessor function (`tls_accessor`), else the variable's own symbol
+(`_global_symbol`).
+"""
+_global_runtime_symbol(key, entry) =
+    (a = entry isa AbstractDict ? get(entry, "tls_accessor", nothing) : nothing;
+     a isa AbstractString ? String(a) : _global_symbol(key, entry))
+
+"""
+    _is_thread_local_global(entry) -> Bool
+
+The build marked the global thread-local (`Compiler._thread_local_definitions`).
+Metadata without the mark predates the question, and its globals keep the
+`cglobal` accessors they always had.
+"""
+_is_thread_local_global(entry) = entry isa AbstractDict && get(entry, "thread_local", false) == true
+
+"""
+    _thread_local_global_chunk(value_name, ptr_name, label, julia_type, entry) -> String
+
+The accessors of a thread-local global, for both generators. A thread-local
+variable has one instance per thread, and `cglobal` resolves once, in the
+thread that calls first, so every other thread read and wrote that thread's
+instance. These call the function the build compiled into the library
+(`tls_accessor`), which returns the calling thread's instance, on every use.
+`value_name === nothing` emits the pointer accessor alone (a type the module
+cannot hold by value), typed `Ptr{Cvoid}`.
+
+A global with no accessor (`tls_refused` says why: a static data member, a
+build that compiled none) gets both names as refusals that say so, never a
+`cglobal` that answers for another thread.
+"""
+function _thread_local_global_chunk(value_name::Union{Nothing,AbstractString}, ptr_name::AbstractString,
+                                    label::AbstractString, julia_type::AbstractString,
+                                    entry::AbstractDict)::String
+    acc = get(entry, "tls_accessor", nothing)
+    if !(acc isa AbstractString)
+        reason = String(something(get(entry, "tls_refused", nothing), "no accessor was compiled for it"))
+        msg = "RepliBuild: `$label` is a thread-local global, one instance per thread, and the wrapper " *
+              "has no way to reach the calling thread's: $reason."
+        out = ""
+        for n in (value_name === nothing ? (ptr_name,) : (value_name, ptr_name))
+            out *= """
+            \"""
+                $(n)()
+
+            Not callable: `$label` is thread-local and has no accessor ($reason).
+            \"""
+            function $(n)()
+                Base.error($(repr(msg)))
+            end
+
+            """
+        end
+        return out
+    end
+    acc_expr = Base.isidentifier(acc) ? ":$acc" : "Symbol($(repr(acc)))"
+    ptr_t = value_name === nothing ? "Ptr{Cvoid}" : "Ptr{$julia_type}"
+    out = ""
+    if value_name !== nothing
+        out *= """
+        \"""
+            $(value_name)()
+
+        Value of thread-local global `$label` in the calling thread: each thread
+        has its own instance.
+        \"""
+        function $(value_name)()::$julia_type
+            return unsafe_load(ccall(($acc_expr, LIBRARY_PATH), $ptr_t, ()))
+        end
+
+        """
+    end
+    out *= """
+    \"""
+        $(ptr_name)()
+
+    Pointer to the calling thread's instance of thread-local global `$label`.
+    Valid only on the thread that called: every other thread has an instance
+    of its own, and a task can move to another thread wherever it yields, so
+    use the pointer before the task yields.
+    \"""
+    function $(ptr_name)()::$ptr_t
+        return ccall(($acc_expr, LIBRARY_PATH), $ptr_t, ())
+    end
+
+    """
+    return out
+end
 
 """
     _drop_nonpublic_globals!(metadata) -> Int

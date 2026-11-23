@@ -2717,6 +2717,16 @@ function generate_introspective_module_c(config::RepliBuildConfig, lib_path::Str
             _type_usable = julia_type != "Any" && julia_type != "_UnsafeUnknown" &&
                            !occursin(r"[^A-Za-z0-9_{}, ]", julia_type)
 
+            # A thread-local global is read through the accessor the build
+            # compiled for it, in the calling thread (`_thread_local_global_chunk`).
+            if _is_thread_local_global(var_info)
+                push!(func_chunks, _thread_local_global_chunk(_type_usable ? safe_name : nothing, ptr_name,
+                                                              var_name, julia_type, var_info))
+                _type_usable && push!(exports, safe_name)
+                push!(exports, ptr_name)
+                continue
+            end
+
             if _type_usable
                 push!(func_chunks, """
                 \"""

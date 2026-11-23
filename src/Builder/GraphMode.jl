@@ -375,8 +375,12 @@ function build_graph_project(config::RepliBuildConfig; force::Bool = false)::Str
         println("  metadata: $(lib.name)")
         nounwind = Compiler._nounwind_definitions(r.linked_ir)
         byval = Compiler._byval_definitions(r.linked_ir)
+        # A thread-local global is marked and, with no accessor compiled for
+        # it here (compile_project's step 4c), refused by the wrapper.
+        thread_locals = Compiler._thread_local_definitions(r.linked_ir)
         metadata = Compiler.save_compilation_metadata(cfg, r.sources, r.library;
-                                                      nounwind = nounwind, byval = byval)
+                                                      nounwind = nounwind, byval = byval,
+                                                      thread_locals = thread_locals)
         Compiler.verify_wrap_surface(cfg, r.library, metadata)
         write(mkey, key)
         extracted += 1

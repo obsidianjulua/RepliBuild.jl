@@ -3366,6 +3366,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # this module does not emit, `Any`) gets the raw pointer only: a
             # value accessor typed with it threw on the call, or read the
             # bytes as a Julia object.
+            # A thread-local global is read through the accessor the build
+            # compiled for it, in the calling thread (`_thread_local_global_chunk`).
+            if _is_thread_local_global(var_info)
+                value = all(m -> m.match in holdable, eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", julia_type))
+                push!(func_chunks, _thread_local_global_chunk(value ? safe_name : nothing, ptr_name,
+                                                              qualified, julia_type, var_info))
+                value && push!(exports, safe_name)
+                push!(exports, ptr_name)
+                continue
+            end
+
             if !all(m -> m.match in holdable, eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", julia_type))
                 push!(func_chunks, """
                 \"""

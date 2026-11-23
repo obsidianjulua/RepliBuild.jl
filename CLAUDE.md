@@ -697,6 +697,24 @@ the test named when you touch the area.
   variable whose scope chain is unknown is skipped, never bound by its bare
   name. C keys are already the symbol and C wrappers are unchanged. Needs a
   rebuild. (`test_cpp_globals.jl`, devtests `test_cpp_globals_live.jl`.)
+- **A thread-local global is read through an accessor the build compiles**
+  (2026-11-23, `compile_project`'s step 4c). `cglobal` resolves once, in the
+  thread that calls first. The linked IR says which variables are
+  `thread_local` (`_thread_local_definitions`: the same on every target; `nm`
+  prints `D`/`B`, and clang writes no DWARF location for one on COFF), and a
+  generated unit (`replibuild_tls.<ext>`, `_tls_unit_text`) declares each
+  with an incomplete type of its own in its namespace and exports
+  `replibuild_tls_<symbol>` returning its address: the compiler computes it,
+  and a C++ use goes through the variable's wrapper, which runs a dynamic
+  initializer. The unit's IR must name each symbol (`_tls_rows_checked`).
+  The wrapper calls the accessor on every use (`_thread_local_global_chunk`,
+  both generators); a static data member (`record_member`), a variable the
+  library does not export, and graph mode get refusals naming the reason
+  (`tls_refused`). Metadata without `thread_local` keeps `cglobal`. The
+  accessors, `_ZTH` and `_ZTW` are not API (`extract_symbols_from_binary`);
+  on PE the accessors are `dllexport` and count as shims in
+  `_pe_export_intent`. Needs a rebuild. (`test_tls_globals.jl`, devtests
+  `test_tls_globals_live.jl`.)
 - `extract_symbols_from_binary` filters `__rb_*`, Itanium adjustor thunks
   (`_is_itanium_thunk`: `_ZTh`/`_ZTv`/`_ZTc`, while keeping `_ZTV`/`_ZTI`/`_ZTS`/`_ZTT`)
   and the templates TU's own `replibuild_force::` helpers (`ref<T>`, `tag<T, N>`),
@@ -2825,11 +2843,6 @@ struct. Still open:
   `Integer`. Relaxing it changes every factory class's text and makes
   collisions more frequent; `_factory_ctor_plan` must then key on the relaxed
   spelling.
-- **A thread-local global gets a `cglobal` accessor** (found 2026-11-18).
-  `cglobal` resolves once, in whichever thread calls the accessor first, so
-  every other thread reads and writes that thread's instance (`tls_addr()`
-  and `tls_counter_ptr()` differ on the main thread after another thread
-  called it). C and C++; a task that migrates is wrong the same way.
 - **A C++ wrapper types a `const unsigned char` or `const signed char`
   parameter strictly** (found 2026-11-21): `a::UInt8`, `b::Int8`, where the
   unqualified spelling is `::Integer`. The list of relaxed C spellings is
@@ -2953,6 +2966,12 @@ DWARF-resolved destructors — **is** built.)
 - A value for a `constexpr` or in-class `static const` member with no symbol
   (2026-11-18): the metadata lists it in `global_constants`; decoding
   `DW_AT_const_value` is not built.
+- Thread-local globals without an accessor (2026-11-23): a static
+  `thread_local` data member (the unit would need its class's definition,
+  as the forced unit includes record headers), a graph-mode library (no
+  step 4c), and an ingested library (no IR to read, nothing can be added to
+  it: its thread-local globals keep `cglobal`). The accessors' PE path
+  (`dllexport`, the export gate) has not run on a Windows host.
 - `[wrap.rename]` does not reach a global's accessor, and a scoped accessor
   name that equals another top-level binding (`cfg_depth()` beside
   `cfg::depth`) refuses the wrapper (2026-11-18).

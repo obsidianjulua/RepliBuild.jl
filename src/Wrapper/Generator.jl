@@ -1506,6 +1506,21 @@ function wrap_introspective(config::RepliBuildConfig, library_path::String, head
                   "($remaining kept)"
         end
     end
+    # Thread-local globals: read in the calling thread through the accessor
+    # the build compiled, or refused (`_thread_local_global_chunk`).
+    let globals = get(metadata, "globals", nothing)
+        if globals isa AbstractDict
+            tls = sort!([String(k) for (k, v) in globals if _is_thread_local_global(v)])
+            refused = [k for k in tls if !haskey(globals[k], "tls_accessor")]
+            bound = length(tls) - length(refused)
+            bound > 0 && println("  wrap: $bound thread-local global(s), read in the calling thread through an accessor")
+            if !isempty(refused)
+                why(k) = string(get(globals[k], "name", k), " (", get(globals[k], "tls_refused", "no accessor"), ")")
+                println("  wrap: $(length(refused)) thread-local global(s) have no accessor and refuse: ",
+                        join(why.(first(refused, 4)), ", "), length(refused) > 4 ? ", …" : "")
+            end
+        end
+    end
 
     # [wrap] surface_types_only — emit only the types the wrap surface reaches.
     # AFTER exclude_symbols on purpose: a dropped symbol must not seed the walk,

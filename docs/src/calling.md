@@ -220,6 +220,14 @@ protected static member has no accessor, and neither does a `constexpr`
 member, which has no storage to read. A global whose type is a C++ library
 type (`std::string`) has the `_ptr` accessor only.
 
+A thread-local global (`_Thread_local`, `__thread`, C++ `thread_local`) has
+one instance per thread, and its accessors read the instance of the thread
+that calls them. An address from `<name>_ptr()` belongs to that thread: use
+it before your task yields, since a task can move to another thread there. A
+C++ static member declared `thread_local` has accessors that raise an error
+saying so. A library built with an older RepliBuild gives every thread the
+first caller's instance; [build it again](support.md#After-you-update-RepliBuild).
+
 ## Sizes and offsets
 
 ```julia

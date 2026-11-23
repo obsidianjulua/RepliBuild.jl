@@ -1755,7 +1755,8 @@ function _pe_export_intent(ir_files::Vector{String})
         io = open(f)
         try
             for line in eachline(io)
-                is_shim = occursin("replibuild_shim_", line)
+                # The macro shims and the thread-local accessors are ours.
+                is_shim = occursin("replibuild_shim_", line) || occursin("replibuild_tls_", line)
                 is_shim && (saw_shim = true)
                 if occursin("dllexport", line) && !is_shim
                     saw_foreign_export = true
@@ -2068,7 +2069,10 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     # export intent is read BEFORE the rewrite adds our own `dllexport`, so a
     # library that relied on auto-export keeps it (below).
     forced = _forced_constructor_symbols(config)
-    pe_intent = (Sys.iswindows() && (!isempty(config.wrap.macros) || !isempty(forced))) ?
+    # The thread-local accessor unit (step 4c) is in this link when its file
+    # exists: `compile_project` removes it before the first.
+    tls_unit = isfile(_tls_unit_path(config))
+    pe_intent = (Sys.iswindows() && (!isempty(config.wrap.macros) || !isempty(forced) || tls_unit)) ?
                 _pe_export_intent(files) : nothing
     if !isempty(forced)
         (files, n) = _forced_exportable_ir(files, forced, joinpath(get_build_path(config), "ctors_exported");
@@ -2127,7 +2131,8 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     #
     # The forced inline constructors are ours too (`_forced_exportable_ir`
     # marks them `dllexport` on PE), so they ask for the flag on the same
-    # terms as the shims.
+    # terms as the shims, and so do the thread-local accessors
+    # (`_tls_unit_text`), which `_pe_export_intent` counts as shims.
     if pe_intent !== nothing && (pe_intent.saw_shim || !isempty(forced)) && !pe_intent.saw_foreign_export
         push!(cmd_tail, "-Wl,--export-all-symbols")
     end
@@ -5664,8 +5669,10 @@ function compile_project(config::RepliBuildConfig)
     cpp_files = generate_visible_records(config, cpp_files)
 
     # The forced-constructor sidecar belongs to THIS build's second link (step
-    # 4b); a stale one must not shape the first.
+    # 4b); a stale one must not shape the first. So does the thread-local
+    # accessor unit (step 4c), whose presence `create_library` asks about.
     rm(_forced_symbols_path(config); force=true)
+    rm(_tls_unit_path(config); force=true)
 
     # Generate macro shims
     cpp_files = generate_macro_shims(config, cpp_files)
@@ -5712,8 +5719,13 @@ function compile_project(config::RepliBuildConfig)
     nounwind = _nounwind_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
     # So is each definition's `byval` slot alignment (`_byval_definitions`).
     byval = _byval_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
+    # ...and which variables are thread-local (`_thread_local_definitions`).
+    thread_locals = _thread_local_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
     metadata_path = save_compilation_metadata(config, cpp_files, binary_path;
-                                              nounwind=nounwind, byval=byval)
+                                              nounwind=nounwind, byval=byval,
+                                              thread_locals=thread_locals)
+    # The plans step 4b settled, for any extraction after it.
+    forced_plans = nothing
 
     # Step 4b: the inline constructors the library declares and no translation
     # unit of it defined (`inline_constructors` in the metadata, computed from
@@ -5783,8 +5795,60 @@ function compile_project(config::RepliBuildConfig)
         # the rows the unit refused, which the wrap report names.
         metadata_path = save_compilation_metadata(config, cpp_files, binary_path;
                                                   nounwind=nounwind, byval=byval,
+                                                  thread_locals=thread_locals,
                                                   inline_constructors=plan, inline_methods=mplan,
                                                   default_arguments=dplan)
+        forced_plans = (; inline_constructors = plan, inline_methods = mplan, default_arguments = dplan)
+    end
+
+    # Step 4c: one accessor per thread-local global (`_tls_accessor_plan`),
+    # compiled into the library: a thread-local variable's address depends on
+    # the thread that asks, and the compiler computes it. The unit is compiled
+    # beside the others (every other IR is a cache hit), the library relinked
+    # and the metadata extracted again with each row's outcome; with no unit
+    # to compile, nothing is done again. A library that does not build with
+    # the unit is built without it, every row refused.
+    if config.binary.type != :executable && !isempty(thread_locals)
+        tls_rows = _tls_accessor_plan(get(_read_json(metadata_path), "globals", Dict{String,Any}()),
+                                      config.wrap.language; exported = _runtime_defined_names(binary_path))
+        (cpp_files_t, tls_rows) = generate_tls_accessors(config, cpp_files, tls_rows)
+        # No unit (every row refused): the metadata has each reason already.
+        if length(cpp_files_t) > length(cpp_files)
+            n = count(r -> haskey(r, "accessor"), tls_rows)
+            println("  tls: $n thread-local global(s): compiling an accessor for each")
+            relinked = try
+                ir_t = compile_to_ir(config, cpp_files_t)
+                _tls_rows_checked(tls_rows, _ir_output_path(get_build_path(config), _tls_unit_path(config)))
+                linked_t = link_optimize_ir(config, ir_t, output_name)
+                (ir_t, linked_t, create_library(config, linked_t; per_tu_ir=ir_t))
+            catch e
+                e isa InterruptException && rethrow()
+                e
+            end
+            if relinked isa Tuple
+                cpp_files = cpp_files_t
+                (ir_files, linked_ir, binary_path) = relinked
+            else
+                why = _forced_unit_link_reason(relinked)
+                @warn "The library did not build with RepliBuild's thread-local accessors; it is " *
+                      "built without them, and their globals get no accessor." reason = why
+                _tls_unit_refused(tls_rows, why)
+                rm(_tls_unit_path(config); force = true)
+                ir_files = compile_to_ir(config, cpp_files)
+                linked_ir = link_optimize_ir(config, ir_files, output_name)
+                binary_path = create_library(config, linked_ir; per_tu_ir=ir_files)
+            end
+            nounwind = _nounwind_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
+            byval = _byval_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
+            metadata_path = forced_plans === nothing ?
+                save_compilation_metadata(config, cpp_files, binary_path;
+                                          nounwind=nounwind, byval=byval,
+                                          thread_locals=thread_locals, tls_accessors=tls_rows) :
+                save_compilation_metadata(config, cpp_files, binary_path;
+                                          nounwind=nounwind, byval=byval,
+                                          thread_locals=thread_locals, tls_accessors=tls_rows,
+                                          forced_plans...)
+        end
     end
 
     # A `[types] records` entry the DWARF still does not define is named.
@@ -6116,6 +6180,280 @@ function _byval_definitions(ir_files)::Dict{String,Vector{Dict{String,Any}}}
         end
     end
     return out
+end
+
+"""
+    _thread_local_definitions(ir_files) -> Set{String}
+
+Every variable `ir_files` DEFINE as thread-local with a linkage another
+module can name: the compiler's own statement, `@x = thread_local global`
+(or `thread_local(initialexec)`, `dso_local`, `hidden`, `linkonce_odr`, …).
+A declaration (`external thread_local global`) and a variable the unit keeps
+to itself (`internal`, `private`: clang's `__tls_guard`) are not.
+
+Read from the linked IR because it is the same statement on every target.
+The symbol table says it on ELF only (`readelf --dyn-syms` types such a
+symbol `TLS`; `nm` prints `D` or `B` as for any variable), and DWARF only
+where the target can describe a thread-local location (clang writes the
+TLS operator on ELF and no location at all on COFF).
+"""
+function _thread_local_definitions(ir_files)::Set{String}
+    unquote(n) = startswith(n, "\"") ?
+        replace(n[2:end-1], r"\\([0-9A-Fa-f]{2})" => h -> string(Char(parse(UInt8, h[2:3], base=16)))) : n
+    out = Set{String}()
+    for f in ir_files
+        isfile(f) || continue
+        for line in eachline(f)
+            startswith(line, "@") || continue
+            m = match(r"^@(\"(?:[^\"\\]|\\.)*\"|[-a-zA-Z$._][-a-zA-Z$._0-9]*) = ((?:[a-z_]+(?:\([a-z]+\))? )*?)thread_local(?:\([a-z]+\))? (?:[a-z_]+ )*?(?:global|constant) ", line)
+            m === nothing && continue
+            head = split(m.captures[2])
+            any(w -> w in ("internal", "private", "external", "extern_weak", "available_externally"), head) && continue
+            push!(out, unquote(String(m.captures[1])))
+        end
+    end
+    return out
+end
+
+# =============================================================================
+# THREAD-LOCAL ACCESSORS
+# =============================================================================
+#
+# A thread-local variable has one instance per thread, and its address is a
+# question about the thread that asks. `cglobal` asks the loader once and
+# keeps the answer, so every other thread read and wrote the first caller's
+# instance (2026-11-17 audit). How to compute a thread-local address is the
+# compiler's business (a `__tls_get_addr` call, the TEB, a C++ variable's
+# wrapper function that also runs its initializer in each new thread), so the
+# build compiles one function per such variable into the library, which
+# returns the address, and the wrapper calls it on every use.
+
+"The generated unit holding the thread-local accessors of this build, if it writes one."
+_tls_unit_path(config::RepliBuildConfig) =
+    joinpath(get_cache_path(config), "replibuild_tls.$(config.wrap.language == :c ? "c" : "cpp")")
+
+"""
+    _tls_accessor_name(symbol) -> String
+
+The exported function that returns the calling thread's instance of the
+thread-local variable `symbol`. `extract_symbols_from_binary` keeps the
+prefix out of the function list: it is a global's accessor, not API.
+"""
+_tls_accessor_name(symbol::AbstractString) = "replibuild_tls_" * symbol
+
+const _C_IDENTIFIER = r"^[A-Za-z_][A-Za-z0-9_]*$"
+
+"""
+    _tls_accessor_plan(globals, language) -> Vector{Dict{String,Any}}
+
+One row per thread-local global (`thread_local` in the metadata, set from
+`_thread_local_definitions`): `symbol` and either `accessor` with the
+declaration the unit writes for it (`scope`, `name`), or `reason` when no
+unit can name it. Sorted by symbol.
+
+A unit declares the variable itself with a type of its own
+(`struct replibuild_tls_opaque`, incomplete) rather than including the
+header that declares it: DWARF names where a variable is DEFINED, which is
+a source file, and the address of an object does not depend on its type.
+The declaration has the variable's name in its scope, so it names the same
+symbol (a C variable's symbol is its name; a C++ variable's mangling does
+not include its type), and a C++ use goes through the variable's
+thread-local wrapper, which runs a dynamic initializer in a thread that has
+not used the variable yet. The unit's IR is checked for each symbol
+afterwards (`_tls_unit_names`).
+
+Refused: a variable the library does not export (`exported`, its runtime
+symbol names; `nothing` is "could not look" and refuses none), which gets
+no accessor as no other such global does; a static data member
+(`record_member`: it can be declared only inside its class, and the unit
+has no class definition); a scope that is no namespace a unit can open
+(template arguments, an anonymous namespace); a name or symbol that is not
+an identifier; and a C variable whose symbol is not its name. A private or
+protected member has no row (no accessor either way).
+"""
+function _tls_accessor_plan(globals::AbstractDict, language::Symbol;
+                            exported::Union{Nothing,Set{String}} = nothing)::Vector{Dict{String,Any}}
+    rows = Dict{String,Any}[]
+    for key in sort!(collect(keys(globals)); by = string)
+        g = globals[key]
+        (g isa AbstractDict && get(g, "thread_local", false) == true) || continue
+        get(g, "constant", false) == true && continue
+        get(g, "accessibility", "public") in ("private", "protected") && continue
+        symbol = String(something(get(g, "symbol", nothing), string(key)))
+        name = String(get(g, "name", symbol))
+        scope = String(something(get(g, "scope", ""), ""))
+        row = Dict{String,Any}("symbol" => symbol)
+        reason = if exported !== nothing && !(symbol in exported)
+            "the library does not export it"
+        elseif !occursin(_C_IDENTIFIER, symbol) || !occursin(_C_IDENTIFIER, name)
+            "its name or symbol is not an identifier a unit can declare"
+        elseif get(g, "record_member", false) == true
+            "it is a static data member, which can be declared only inside its class"
+        elseif language == :c && (symbol != name || !isempty(scope))
+            "its symbol is not its name"
+        elseif !all(c -> occursin(_C_IDENTIFIER, c), filter(!isempty, split(scope, "::")))
+            "its scope is not a namespace a unit can open: $scope"
+        else
+            nothing
+        end
+        if reason === nothing
+            row["accessor"] = _tls_accessor_name(symbol)
+            row["name"] = name
+            row["scope"] = scope
+        else
+            row["reason"] = reason
+        end
+        push!(rows, row)
+    end
+    return rows
+end
+
+"""
+    _tls_unit_text(rows, language) -> String
+
+The unit for the rows of `_tls_accessor_plan` that have an `accessor`: one
+declaration and one exported function per variable, each on a line of its
+own. `RB_SHIM_EXPORT`'s reasoning holds for the export macro: on ELF
+`visibility("default")` survives `-fvisibility=hidden`, on PE `dllexport`
+puts the function in the export directory (`create_library` then asks for
+`--export-all-symbols` where the library relied on auto-export, as for the
+macro shims; `_pe_export_intent`).
+"""
+function _tls_unit_text(rows::AbstractVector, language::Symbol)::String
+    io = IOBuffer()
+    println(io, "// Auto-generated by RepliBuild: one function per thread-local variable,")
+    println(io, "// returning the calling thread's instance (_tls_accessor_plan).")
+    println(io, "#if defined(_WIN32)")
+    println(io, "#  define RB_TLS_EXPORT __attribute__((used)) __declspec(dllexport)")
+    println(io, "#else")
+    println(io, "#  define RB_TLS_EXPORT __attribute__((used, visibility(\"default\")))")
+    println(io, "#endif")
+    println(io, "struct replibuild_tls_opaque;")
+    for r in rows
+        haskey(r, "accessor") || continue
+        name = r["name"]
+        acc = r["accessor"]
+        if language == :c
+            println(io, "extern _Thread_local struct replibuild_tls_opaque $name;")
+            println(io, "RB_TLS_EXPORT void *$acc(void) { return (void *)&$name; }")
+        else
+            parts = filter(!isempty, split(r["scope"], "::"))
+            decl = "extern thread_local ::replibuild_tls_opaque $name;"
+            for p in reverse(parts)
+                decl = "namespace $p { $decl }"
+            end
+            println(io, decl)
+            println(io, "extern \"C\" RB_TLS_EXPORT void *$acc(void) { return (void *)__builtin_addressof(",
+                    isempty(parts) ? "::" : "::" * join(parts, "::") * "::", name, "); }")
+        end
+    end
+    return String(take!(io))
+end
+
+"""
+    _tls_unit_names(ir_path) -> (accessors, thread_locals)
+
+What the compiled unit defines (its functions) and the thread-local
+variables it names (`external thread_local global` declarations): a row
+whose declaration did not come out as the variable's own symbol is refused
+rather than bound to some other variable.
+"""
+function _tls_unit_names(ir_path::AbstractString)
+    (defined, _) = _ir_defined_declared(ir_path)
+    unquote(n) = startswith(n, "\"") ? String(n[2:end-1]) : String(n)
+    tls = Set{String}()
+    for line in eachline(ir_path)
+        m = match(r"^@(\"[^\"]*\"|[-a-zA-Z$._][-a-zA-Z$._0-9]*) = (?:[a-z_]+ )*?external (?:[a-z_]+ )*?thread_local(?:\([a-z]+\))? (?:[a-z_]+ )*?global ", line)
+        m === nothing || push!(tls, unquote(m.captures[1]))
+    end
+    return (defined, tls)
+end
+
+"""
+    generate_tls_accessors(config, cpp_files, rows) -> (cpp_files, rows)
+
+Writes `_tls_unit_text` for the rows with an `accessor` and returns the
+source list with the unit added. With none, the unit is removed and the
+list returned as it was.
+"""
+function generate_tls_accessors(config::RepliBuildConfig, cpp_files::Vector{String}, rows::AbstractVector)
+    path = _tls_unit_path(config)
+    if !any(r -> haskey(r, "accessor"), rows)
+        rm(path; force = true)
+        return (cpp_files, rows)
+    end
+    mkpath(dirname(path))
+    write(path, _tls_unit_text(rows, config.wrap.language))
+    return (vcat(cpp_files, [path]), rows)
+end
+
+"""
+    _tls_rows_checked(rows, ir_path) -> rows
+
+Each row with an `accessor` that the compiled unit at `ir_path` does not
+define, or whose declaration does not name the row's symbol as a
+thread-local variable, moves to `reason`.
+"""
+function _tls_rows_checked(rows::AbstractVector, ir_path::AbstractString)
+    (defined, tls) = isfile(ir_path) ? _tls_unit_names(ir_path) : (Set{String}(), Set{String}())
+    for r in rows
+        haskey(r, "accessor") || continue
+        if !(r["accessor"] in defined) || !(r["symbol"] in tls)
+            delete!(r, "accessor")
+            r["reason"] = "the unit's declaration of it did not name the symbol $(r["symbol"])"
+        end
+    end
+    return rows
+end
+
+"Every row with an `accessor` refused with `why`: the library was built without the unit."
+function _tls_unit_refused(rows::AbstractVector, why::AbstractString)
+    for r in rows
+        haskey(r, "accessor") || continue
+        delete!(r, "accessor")
+        r["reason"] = "the library did not build with its thread-local accessors: $why"
+    end
+    return rows
+end
+
+"""
+    _mark_thread_locals!(globals, thread_locals, rows, runtime; language) -> globals
+
+Marks every global whose symbol is in `thread_locals` with `thread_local`,
+and gives it `tls_accessor` or `tls_refused`. `rows` are step 4c's, with the
+accessors it compiled into the library: a row's accessor binds when the
+library's runtime symbols (`runtime`; `nothing` is "could not look") have
+it. `rows === nothing` is an extraction no unit was compiled for (the one
+before step 4c, or graph mode): the plan is made here
+(`_tls_accessor_plan`), a refused row gets its reason, and one a unit could
+serve gets "no accessor was compiled for it". So a build whose thread-local
+globals are all refused has their reasons without a second extraction.
+"""
+function _mark_thread_locals!(globals::AbstractDict, thread_locals::Set{String},
+                              rows::Union{Nothing,AbstractVector}, runtime; language::Symbol = :c)
+    for (k, g) in globals
+        g isa AbstractDict || continue
+        String(something(get(g, "symbol", nothing), string(k))) in thread_locals && (g["thread_local"] = true)
+    end
+    compiled = rows !== nothing
+    compiled || (rows = _tls_accessor_plan(globals, language; exported = runtime))
+    by_symbol = Dict{String,Any}()
+    for r in rows
+        r isa AbstractDict && (by_symbol[String(r["symbol"])] = r)
+    end
+    for (k, g) in globals
+        (g isa AbstractDict && get(g, "thread_local", false) == true) || continue
+        r = get(by_symbol, String(something(get(g, "symbol", nothing), string(k))), nothing)
+        acc = r === nothing ? nothing : get(r, "accessor", nothing)
+        if compiled && acc !== nothing && (runtime === nothing || acc in runtime)
+            g["tls_accessor"] = String(acc)
+        else
+            g["tls_refused"] = r === nothing || (acc !== nothing && !compiled) ? "no accessor was compiled for it" :
+                               acc === nothing ? String(r["reason"]) :
+                               "its accessor $acc is not in the library's dynamic symbol table"
+        end
+    end
+    return globals
 end
 
 # The record an LLVM struct type name spells: `%struct.D4A` is `D4A`,
@@ -6575,6 +6913,17 @@ function extract_symbols_from_binary(binary_path::String)
             continue
         end
 
+        # A thread-local global's accessor (`_tls_accessor_name`) is read
+        # through the global, never offered as a function of its own; and C++'s
+        # own helpers for a thread-local variable (`_ZTH`, "TLS init function
+        # for x", and `_ZTW`, "TLS wrapper function for x") exist for the
+        # compiler to call, the first one exported by every unit that
+        # initializes such a variable dynamically. Wrapped, it was a refusal
+        # stub named `_ZTH3dyn`.
+        if startswith(mangled_name, "replibuild_tls_") || _is_tls_helper(mangled_name, demangled_name)
+            continue
+        end
+
         push!(symbols, Dict(
             "mangled" => mangled_name,
             "demangled" => demangled_name,
@@ -6611,6 +6960,19 @@ function _is_itanium_thunk(mangled::AbstractString, demangled::AbstractString)::
     startswith(demangled, "virtual thunk to ") && return true
     startswith(demangled, "covariant return thunk to ") && return true
     return false
+end
+
+"""
+    _is_tls_helper(mangled, demangled) -> Bool
+
+C++'s functions for a thread-local variable: `_ZTH<x>`, which initializes it
+in the calling thread, and `_ZTW<x>`, which returns its address after that.
+Both `<special-name>`s of the Itanium grammar (no ordinary function's name
+begins `_ZT`), the compiler's to call.
+"""
+function _is_tls_helper(mangled::AbstractString, demangled::AbstractString)::Bool
+    (startswith(mangled, "_ZTH") || startswith(mangled, "_ZTW")) && return true
+    return startswith(demangled, "TLS init function for ") || startswith(demangled, "TLS wrapper function for ")
 end
 
 """
@@ -10232,6 +10594,7 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
             "scope" => v["scope"]
         )
         v["accessibility"] == "public" || (entry["accessibility"] = v["accessibility"])
+        get(v, "record_member", false) == true && (entry["record_member"] = true)
         constant && (entry["constant"] = true)
         key = constant ? (isempty(v["scope"]) ? v["name"] : v["scope"] * "::" * v["name"]) : v["symbol"]
         push!(get!(() -> Dict{String,Any}[], global_candidates, key), entry)
@@ -10779,8 +11142,10 @@ end
 Every external variable the dump defines, as the loader binds it: `symbol`
 (the DIE's `DW_AT_linkage_name`, else its declaration's, else its DWARF
 name, which is a C variable's symbol), `name`, `type` (a DIE offset),
-`scope` (`_variable_scope`: `""`, `"cfg"`, `"geo::Vec3"`), `accessibility`
-and `decl_file_path`. A definition that names its declaration through
+`scope` (`_variable_scope`: `""`, `"cfg"`, `"geo::Vec3"`), `accessibility`,
+`decl_file_path`, and `record_member` for a static data member (its
+declaration's parent is a record: `geo::Vec3` is a class, `cfg` a
+namespace, and the scope string alone does not say which). A definition that names its declaration through
 `DW_AT_specification` takes the name, type, scope and access from it: a
 static data member is declared in its class (a `DW_TAG_variable` there in
 DWARF 5, a `DW_TAG_member` with `DW_AT_external` in DWARF 4,
@@ -10822,9 +11187,12 @@ function _library_variables(die_order, type_refs::AbstractDict,
         _is_stdlib_internal(symbol, "") && continue
         scope = _variable_scope(at, type_refs)
         scope === nothing && continue
-        push!(out, Dict{String,Any}("symbol" => symbol, "name" => String(name), "type" => type,
-                                    "scope" => scope, "accessibility" => access_of(at),
-                                    "decl_file_path" => String(get(info, "decl_file_path", ""))))
+        row = Dict{String,Any}("symbol" => symbol, "name" => String(name), "type" => type,
+                               "scope" => scope, "accessibility" => access_of(at),
+                               "decl_file_path" => String(get(info, "decl_file_path", "")))
+        # A static data member: declared in its class and nowhere else.
+        get(at, "parent_tag", nothing) in _RECORD_TAGS && (row["record_member"] = true)
+        push!(out, row)
     end
     # A member another unit defines out of line is no constant here either.
     qualified = Set{String}(isempty(v["scope"]) ? v["name"] : v["scope"] * "::" * v["name"] for v in out)
@@ -11247,7 +11615,9 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
                                       byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing,
                                       inline_constructors::Union{Nothing,AbstractDict}=nothing,
                                       inline_methods::Union{Nothing,AbstractDict}=nothing,
-                                      default_arguments::Union{Nothing,AbstractDict}=nothing)::Dict{String,Any}
+                                      default_arguments::Union{Nothing,AbstractDict}=nothing,
+                                      thread_locals::Union{Nothing,Set{String}}=nothing,
+                                      tls_accessors::Union{Nothing,AbstractVector}=nothing)::Dict{String,Any}
     # Extract compilation metadata
     symbols = extract_symbols_from_binary(binary_path)
 
@@ -11504,6 +11874,13 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
     # bind: it is named for the wrap report, never given an accessor.
     global_constants = sort!([k for (k, g) in global_vars if get(g, "constant", false) == true])
     foreach(k -> delete!(global_vars, k), global_constants)
+    # A thread-local global has an instance per thread (`thread_locals`, read
+    # off the linked IR) and is read through the accessor step 4c compiled
+    # for it (`tls_accessor`, present in the library), or refused with the
+    # reason (`tls_refused`). Metadata without the mark predates the question.
+    (thread_locals === nothing || isempty(thread_locals)) ||
+        _mark_thread_locals!(global_vars, thread_locals, tls_accessors, _runtime_defined_names(binary_path);
+                             language = config.wrap.language)
 
     metadata = Dict{String,Any}(
         "timestamp" => string(now()),
@@ -12568,13 +12945,17 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
                                    byval::Union{Nothing,Dict{String,Vector{Dict{String,Any}}}}=nothing,
                                    inline_constructors::Union{Nothing,AbstractDict}=nothing,
                                    inline_methods::Union{Nothing,AbstractDict}=nothing,
-                                   default_arguments::Union{Nothing,AbstractDict}=nothing)::String
+                                   default_arguments::Union{Nothing,AbstractDict}=nothing,
+                                   thread_locals::Union{Nothing,Set{String}}=nothing,
+                                   tls_accessors::Union{Nothing,AbstractVector}=nothing)::String
     # Extract metadata
     metadata = extract_compilation_metadata(config, source_files, binary_path;
                                             nounwind=nounwind, byval=byval,
                                             inline_constructors=inline_constructors,
                                             inline_methods=inline_methods,
-                                            default_arguments=default_arguments)
+                                            default_arguments=default_arguments,
+                                            thread_locals=thread_locals,
+                                            tls_accessors=tls_accessors)
 
     # Static-promotion map (old static name → exported __rb_* symbol), written
     # by link_optimize_ir when the promotion pass ran. Slices resolve their

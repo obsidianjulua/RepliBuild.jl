@@ -374,6 +374,12 @@ _cg_metadata(globals) = Dict{String,Any}("functions" => Any[], "struct_definitio
             @test get(gv["_ZN3geo3Box5prot_E"], "accessibility", "public") == "protected"
             @test !haskey(gv["_ZN3geo7Counter3pubE"], "accessibility")
             @test !haskey(gv["_ZN3geo3Box5countE"], "accessibility")
+            # A static data member says so: a namespace and a class are both
+            # a scope (`geo::Box`, `cfg`), and only a member must be declared
+            # inside its class (test_tls_globals.jl's accessor plan).
+            @test get(gv["_ZN3geo3Box5countE"], "record_member", false) == true
+            @test get(gv["_ZN3geo7Counter3pubE"], "record_member", false) == true
+            @test !haskey(gv["_ZN1a1xE"], "record_member") && !haskey(gv["g_top"], "record_member")
             # A constant with no storage: named, never given a symbol.
             @test get(gv["geo::Counter::K"], "constant", false) == true
             @test gv["geo::Counter::K"]["symbol"] === nothing
