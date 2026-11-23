@@ -161,6 +161,7 @@ const TESTS = TestFile[
     T("test_bundled_linker.jl", :unit, [:build]),
     T("test_libdw_reader.jl", :unit, [:dwarf]),
     T("test_cpp_globals.jl", :unit, [:dwarf, :cpp]),
+    T("test_tls_globals.jl", :unit, [:build, :dwarf, :c, :cpp]),
     T("test_jlcs_library.jl", :unit, [:build, :dialect]),
     T("test_jlcs_abi_version.jl", :unit, [:build, :dialect]),
     T("test_llvm_tool_table.jl", :unit, [:build]),
@@ -262,6 +263,8 @@ const TESTS = TestFile[
       locks = ["typemap_c_test", "typemap_cpp_test"]),
     T("test_nested_type_aliases_live.jl", :dev, [:dwarf, :cpp], locks = ["nested_type_test"]),
     T("test_cpp_globals_live.jl", :dev, [:dwarf, :cpp], locks = ["cpp_globals_test"]),
+    # Thread-local globals, read from a second thread.
+    T("test_tls_globals_live.jl", :dev, [:build, :dwarf, :c, :cpp], locks = ["tls_global_test"]),
     T("test_inline_methods_live.jl", :dev, [:build, :dwarf, :cpp], locks = ["inline_method_test"]),
     # A header that defines functions (fmt's format-inl.h, clipper2's clipper.export.h) and the forced unit.
     T("test_defining_headers_live.jl", :dev, [:build, :cpp], locks = ["defining_header_test"]),
