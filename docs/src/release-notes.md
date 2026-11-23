@@ -26,9 +26,9 @@ registered release, which can be older than what is described here;
 ## v4.6.0 (2026-11-21)
 
 **Julia 1.13 is the oldest release supported; on Julia 1.12, `Pkg.add` keeps
-installing 4.5.1.** On Linux RepliBuild now brings its own tools and its own
-C++ support library, so there is much less to install, and it wraps Rust
-crates. After upgrading, every C project links again by itself, C++ projects
+installing the 4.5 releases.** On Linux RepliBuild now brings its own tools
+and its own C++ support library, so there is much less to install, and it
+wraps Rust crates. After upgrading, every C project links again by itself, C++ projects
 should be rebuilt, and every wrapper should be generated again.
 
 - **Rust crates.** `discover`, `build`, `wrap` and `use` work on a Cargo crate
@@ -91,7 +91,7 @@ should be rebuilt, and every wrapper should be generated again.
     methods included that header a second time. The build now leaves such a
     header out, prints its name, and carries on.
 
-  All three are in 4.5.1 as well.
+  All three are in 4.5.1 as well; 4.5.2 fixes them for Julia 1.12.
 - **Wrapper names and calls that change — re-wrap, and update callers:**
   - C++ comparison, shift, arrow and array-`new`/`delete` operators have new
     names (`operatorless`, `operatorlessless`, `operatorminusgreater`, …).
@@ -121,10 +121,29 @@ should be rebuilt, and every wrapper should be generated again.
 - **Debug information can be read in-process** on Linux with
   `REPLIBUILD_DWARF=libdw`. It is opt-in and gives the same answer.
 
+## v4.5.2 (2026-11-22)
+
+**For Julia 1.12: three fixes from 4.6.0, and nothing else.** Updating on
+Julia 1.12 installs it. Each problem was confirmed on 4.5.1 first.
+
+- **A C++ function written with a `const` number parameter**
+  (`double scaled(const double x, const int n)`) could return a wrong number
+  with no error. It is called correctly now.
+- **A struct whose members are `const`**, passed or returned by value, could
+  make every call stub of its library fail to load.
+- **A library with a header meant for one source file only**, because it
+  defines functions (fmt's `format-inl.h`, clipper2's `clipper.export.h`),
+  did not build. The build now leaves such a header out of the code it adds,
+  prints its name, and carries on.
+- **After updating,** most wrappers need nothing. A wrapper whose call stubs
+  are compiled ahead of time (`aot_thunks = true`) should be generated again
+  with `wrap(toml)`. A package that failed to build on 4.5.1 with "multiple
+  definition of" builds now.
+
 ## v4.5.1 (2026-11-17)
 
-**The last release for Julia 1.12.** It carries the C++ work that followed
-4.5.0; everything in it is in 4.6.0 too.
+**Julia 1.12 stays on the 4.5 releases; update to 4.5.2.** This one carries
+the C++ work that followed 4.5.0; everything in it is in 4.6.0 too.
 
 - **A `std::string` parameter takes a Julia string**, `const&` or by value.
 - **Inline constructors and member functions are callable.** A constructor
@@ -148,7 +167,7 @@ should be rebuilt, and every wrapper should be generated again.
 - **Rebuild, then re-wrap,** for the string parameters, the inline
   constructors, methods and default arguments, `[types] records` and the
   layouts; a re-wrap is enough for the rest.
-- **Known problems in 4.5.1, fixed in 4.6.0:**
+- **Known problems in 4.5.1, fixed in 4.5.2 and 4.6.0:**
   - A C++ function written with a `const` number parameter
     (`double scaled(const double x, const int n)`) can return a wrong number
     with no error.

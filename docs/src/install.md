@@ -32,7 +32,7 @@ RepliBuild runs on **Linux** (x86-64 and AArch64) and **Windows** (x86-64, with
 MSYS2). macOS is not supported: `using RepliBuild` refuses to load there.
 
 **Julia 1.13 or 1.14.** Julia 1.12 is served by the RepliBuild 4.5 releases,
-the last of which is 4.5.1.
+which `Pkg.add` picks there by itself.
 
 A build runs a compiler, a linker and a handful of other programs. Some of
 them RepliBuild brings with it, and some it takes from your system:

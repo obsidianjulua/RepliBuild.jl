@@ -7,7 +7,7 @@ All notable changes to RepliBuild.jl are documented in this file.
 ## v4.6.0 (2026-11-21)
 
 Version 4.5.1 → 4.6.0; Julia compat `1.13` (CI tests 1.13 and 1.14). Julia
-1.12 stays on the 4.5 line, whose last release is 4.5.1.
+1.12 stays on the 4.5 line: 4.5.1 when this was released, 4.5.2 since (below).
 
 Three things make this release:
 
@@ -350,6 +350,26 @@ One Windows job on `main` failed in `test_tools_resolver.jl` when a tool's first
 - `test_tools_resolver.jl` (unit), including a walk of the parsed source for a command literal that names a resolved tool outside `Tools.tool_cmd`.
 - `test_jlcs_library.jl` (unit), `test_jlcs_artifact_live.jl` (dev).
 - runtests, unit and devtests pass on Julia 1.13, devtests also with `REPLIBUILD_JLCS=artifact`; the new unit tests and the artifact load pass on Julia 1.12.
+
+## v4.5.2 (2026-11-22)
+
+Released from branch `release-4.5` (#139), not from `main`: version 4.5.1 →
+4.5.2, Julia compat `1.12` (CI tests 1.12 and 1.13). A patch release of the
+Julia 1.12 line that carries two of the v4.6.0 entries above and nothing else:
+
+- #136, const-qualified types in the thunk generator, and a byte-bodied record
+  on the marshal path;
+- #137, the forced unit leaves out a header that defines functions, and a
+  failed relink falls back.
+
+Each defect was confirmed on registered 4.5.1 with Julia 1.12 before it was
+ported. #135 is not in it: the regression it fixes entered `main` after 4.5.1.
+
+What a package needs: nothing for a wrapper that calls through the JIT; a
+re-wrap for one with a compiled thunks library (`aot_thunks`); a build for a
+package that failed on 4.5.1 with "multiple definition of".
+
+The full section is `CHANGELOG.md` on the `release-4.5` branch.
 
 ## v4.5.1 (2026-11-17)
 
