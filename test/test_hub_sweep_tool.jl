@@ -37,7 +37,8 @@ end
         o = _HS.sweep_parse_args(["/h", "--out", "/o", "--only", "a, b", "--skip", "c", "--jobs", "3",
                                   "--timeout", "90", "--timeout", "jolt=7200", "--arg", "llamacpp=/m.gguf",
                                   "--arg", "llamacpp=second", "--resume"])
-        @test o.hub == "/h" && o.out == "/o" && o.mode == :rebuild
+        # Both are made absolute, which on Windows adds the drive: ask, do not spell.
+        @test o.hub == abspath("/h") && o.out == abspath("/o") && o.mode == :rebuild
         @test o.only == ["a", "b"] && o.skip == ["c"] && o.jobs == 3
         @test o.timeout == 90 && o.timeouts == Dict("jolt" => 7200)
         @test o.args == Dict("llamacpp" => ["/m.gguf", "second"])
