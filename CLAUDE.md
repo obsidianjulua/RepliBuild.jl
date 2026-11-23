@@ -1293,8 +1293,17 @@ the test named when you touch the area.
   library's spelling and screened on its own, never derived from the moved
   value accessor: `conf_ptr()`, `Dict_ptr()`, not `Dict__ptr()`.
   `[wrap.rename]` still chooses a function's name first; it does not reach
-  global accessors. (`test_type_name_collisions.jl`, devtests
-  `test_type_name_collisions_live.jl`, `test_name_screen.jl`.)
+  global accessors. **The same holds for the implicit field constructor**
+  (2026-11-23, `_field_constructor_clashes`, reason `:field_constructor`): a
+  kept function with a method of as many positional arguments as a struct of
+  its name has fields (`_field_constructor_arities`: no inner constructor, not
+  only `NTuple{N, UInt8}` fields) moves, since `pair(::Integer, ::Integer)`
+  is more specific than Julia's converting `pair(a, b)` and took
+  `pair(1, 2)`; no text defines that method twice. A byte blob, a bitfield
+  record or a union is built from its bytes and moves nothing.
+  (`test_type_name_collisions.jl`, devtests
+  `test_type_name_collisions_live.jl`, `test_field_ctor_shadow_live.jl`,
+  `test_name_screen.jl`.)
 - **A pointer or reference return is typed from its declaration**
   (`_typed_pointer_return`, both generators): `T*`, `const T*`, `T&`, `T**` give
   `Ptr{T}`/`Ptr{Ptr{T}}` when `T` is a type the module emits
@@ -2832,13 +2841,6 @@ struct. Still open:
   moves as C++ does, but the caller's Julia value is an immutable bits copy,
   so using it again is a use-after-free. What owns a move-only object on the
   Julia side is John's call.
-- **A function named like a struct shadows the struct's field constructor
-  for some argument types** (found 2026-11-18): `struct pair { int a; int b;
-  };` beside `int pair(int a, int b);` gives the type `pair` one more method,
-  `pair(::Integer, ::Integer)`, so `pair(1, 2)` calls the C function and
-  `pair(Cint(1), Cint(2))` builds the struct. No text defines a method twice
-  (the field constructor is implicit), so neither the duplicate-method guard
-  nor `_constructor_clashes` sees it.
 - **Two library names that collide after a move are refused, not resolved**:
   a library that defines both a struct-named global `conf` and its own
   `conf_`, or a global `conf` beside a function `conf_ptr(void)`. The

@@ -166,14 +166,107 @@ _tn_zero(M, T, fields) = (v = _tn_call(getfield(M, T)); v isa getfield(M, T) && 
     @test _TN._screen_report(next) ==
           ["function `conf` is bound as `conf_`: the type `conf` defines a method of the same signature itself " *
            "(a constructor such as its zero-initializer `conf()`), and keeps it"]
-    # A method of another signature is a constructor beside the type, as before.
+    # A method of another arity is a constructor beside the type, as before.
+    # (One of as many arguments as the type has fields is not: the next
+    # testset.)
     sc3 = _TN._NameScreen()
     text3 = _TN.with_name_screen(sc3) do
         _TN._screen_decide!(sc3, :type, "conf", nothing)
         "module Toy\nstruct conf\n level::Cint\nend\nconf() = conf(Cint(0))\n" *
-        _TN._screened_function_name("conf", "conf") * "(x::Integer) = x\nend\n"
+        _TN._screened_function_name("conf", "conf") * "(x::Integer, y::Integer) = x + y\nend\n"
     end
     @test _TN._screen_verdict(sc3, text3) === nothing && isempty(sc3.moves)
+end
+
+@testset "the screen moves a function that takes its type's field-constructor calls" begin
+    # `struct pair { int a; int b; };` beside `int pair(int a, int b);`: Julia
+    # gives the struct `pair(::Cint, ::Cint)` and `pair(a, b)`, and the
+    # function's `pair(::Integer, ::Integer)` is more specific than the second,
+    # so `pair(1, 2)` called the function and `pair(Cint(1), Cint(2))` built
+    # the struct. No text defines a method twice.
+    toy(f) = """
+        module Toy
+        struct pair
+            a::Cint
+            b::Cint
+        end
+        pair() = pair(Cint(0), Cint(0))
+        function $f(a::Integer, b::Integer)::Cint
+            return Cint(a * 10 + b)
+        end
+        end
+        """
+    sc = _TN._NameScreen()
+    text = _TN.with_name_screen(sc) do
+        _TN._screen_decide!(sc, :type, "pair", nothing)
+        toy(_TN._screened_function_name("pair", "pair"))
+    end
+    @test isempty(_TN._method_definitions(text) |> x -> filter(s -> count(==(s), x) > 1, x))
+    next = _TN._screen_verdict(sc, text)
+    @test next !== nothing && next.move == Dict((:function, "pair") => :field_constructor)
+    text2 = _TN.with_name_screen(next) do
+        _TN._screen_decide!(next, :type, "pair", nothing)
+        toy(_TN._screened_function_name("pair", "pair"))
+    end
+    @test _TN._screen_verdict(next, text2) === nothing
+    @test occursin("function pair_(a::Integer, b::Integer)", text2)
+    @test _TN._screen_report(next) ==
+          ["function `pair` is bound as `pair_`: `pair(…)` with one argument per field builds the type `pair`, " *
+           "a function of that name with as many parameters would take those calls, and the type keeps them"]
+    # Loaded: `pair(1, 2)` builds the struct, whatever the integers.
+    M = Base.invokelatest(getfield, (m = Module(:PairHost); Base.include_string(m, text2); m), :Toy)
+    @test _tn_call(M.pair, 1, 2) isa M.pair && _tn_call(M.pair, Cint(1), Cint(2)) isa M.pair
+    @test _tn_call(M.pair_, 1, 2) == 12
+
+    # A varargs method that can take as many arguments clashes too.
+    sc4 = _TN._NameScreen()
+    text4 = _TN.with_name_screen(sc4) do
+        _TN._screen_decide!(sc4, :type, "pair", nothing)
+        "module Toy\nstruct pair\n a::Cint\n b::Cint\nend\n" *
+        _TN._screened_function_name("pair", "pair") * "(a::Integer, rest...) = a\nend\n"
+    end
+    @test _TN._screen_verdict(sc4, text4).move == Dict((:function, "pair") => :field_constructor)
+end
+
+@testset "which structs Julia gives field constructors" begin
+    text = """
+    module Toy
+    struct pair
+        a::Cint
+        b::Cint
+    end
+    struct padded
+        c::UInt8
+        _pad_1::NTuple{3, UInt8}
+        v::Cint
+    end
+    struct flags
+        _data::NTuple{4, UInt8}
+    end
+    mutable struct num
+        data::NTuple{4, UInt8}
+    end
+    struct packed_s
+        _data::NTuple{5, UInt8}
+    end
+    mutable struct Owner
+        handle::Ptr{Cvoid}
+        Owner(::Base.Val{:_rb_adopt}, h::Ptr{Cvoid}) = new(h)
+    end
+    struct empty_rec end
+    struct one
+        x
+    end
+    end
+    """
+    # A byte carrier (a bitfield record, a union, a byte blob), a type with an
+    # inner constructor and a type with no field have none a function can
+    # take the calls of.
+    @test _TN._field_constructor_arities(text) == Dict("pair" => 2, "padded" => 3, "one" => 1)
+    @test _TN._signature_arity("pair(Union{Integer,Base.Enum},Union{Integer,Base.Enum})") == (2, false)
+    @test _TN._signature_arity("f()") == (0, false)
+    @test _TN._signature_arity("f(Ptr{NTuple{2,Cint}},Vararg{Any})") == (1, true)
+    @test _TN._signature_arity("g(Any) where {T}") == (1, false)
 end
 
 @testset "GeneratorC: $(what)" for (what, rename) in (("screened", ""), ("[wrap.rename] chooses", "pool = \"make_pool\"\n"))
@@ -272,4 +365,67 @@ end
     M = _tn_load(code)
     @test _tn_zero(M, :length, (:lo, :hi)) && M.length !== Base.length
     @test hasmethod(M.length_, Tuple{}) && _tn_has(M, :length_ptr) && !_tn_has(M, :length__ptr)
+end
+
+# `pair` is a struct of two `int`s beside `int pair(int, int)`: the function
+# takes the calls of the struct's field constructor and moves. `flags` (a
+# bitfield record), `num` (a union) and `packed_s` (a byte blob, since `v`
+# sits at offset 1) are built from their bytes, so the functions beside them
+# keep their names; `triple(int)` beside a three-field struct is of another
+# arity and keeps its name too.
+function _tn_shadow_metadata(; cpp::Bool = false)
+    tag(s) = cpp ? s : "struct " * s
+    bit(n, off, w) = Dict{String,Any}("name" => n, "julia_type" => "Cuint", "c_type" => "unsigned int",
+                                      "offset" => nothing, "size" => 4, "bit_size" => w, "data_bit_offset" => off)
+    ints(names...) = [_tn_param(n, "Cint", "int") for n in names]
+    return Dict{String,Any}(
+        "functions" => Any[
+            _tn_fn("pair", ints("a", "b"), "Cint", "int"),
+            _tn_fn("flags", ints("lo", "hi"), "Cint", "int"),
+            _tn_fn("num", ints("i"), "Cint", "int"),
+            _tn_fn("packed_s", ints("c", "v"), "Cint", "int"),
+            _tn_fn("triple", ints("x"), "Cint", "int"),
+            _tn_fn("make_pair", ints("a", "b"), "pair", tag("pair")),
+            _tn_fn("make_flags", (), "flags", tag("flags")),
+            _tn_fn("make_packed", (), "packed_s", tag("packed_s")),
+            _tn_fn("triple_sum", (_tn_param("t", "Ptr{triple}", tag("triple") * " *"),), "Cint", "int")],
+        "globals" => Dict{String,Any}(),
+        "struct_definitions" => Dict{String,Any}(
+            "pair" => _tn_two_ints("a", "b"),
+            "triple" => _tn_rec("struct", "0xc", _tn_member("x", "Cint", "int", "0x0", 4),
+                                _tn_member("y", "Cint", "int", "0x4", 4), _tn_member("z", "Cint", "int", "0x8", 4)),
+            "flags" => _tn_rec("struct", "0x4", bit("lo", 0, 3), bit("hi", 3, 5)),
+            "num" => _tn_rec("union", "0x4", _tn_member("i", "Cint", "int", "0x0", 4),
+                             _tn_member("f", "Cfloat", "float", "0x0", 4)),
+            "packed_s" => _tn_rec("struct", "0x5", _tn_member("c", "UInt8", "char", "0x0", 1),
+                                  _tn_member("v", "Cint", "int", "0x1", 4))))
+end
+
+@testset "$gen: a function of a struct's field-constructor arity moves" for (gen, lang) in
+        (("GeneratorC", :c), ("GeneratorCpp", :cpp))
+    (code, sc, runs) = _tn_wrap(lang, _tn_shadow_metadata(cpp = lang === :cpp))
+    @test runs == 2
+    @test _tn_parses(code)
+    @test _TN._assert_wrapper_loadable(code, "TypeNameSynth") === nothing
+    # (GeneratorCpp names a function twice, in its overload prediction and in
+    # its loop; the report says it once.)
+    @test unique([(m.kind, m.from, m.to, m.why) for m in sc.moves]) == [(:function, "pair", "pair_", :field_constructor)]
+    @test length(_TN._screen_report(sc)) == 1
+    M = _tn_load(code)
+    # `pair(1, 2)` builds the struct, whatever the integers, and the function
+    # is `pair_`.
+    p = _tn_call(M.pair, 1, 2)
+    @test p isa M.pair && (p.a, p.b) == (1, 2)
+    @test _tn_call(M.pair, Cint(1), Cint(2)) isa M.pair
+    @test hasmethod(M.pair_, Tuple{Int,Int}) && !hasmethod(M.pair, Tuple{Int8,Int8,Int8})
+    # Nothing else moved: the byte carriers and the other arity keep the
+    # library's names, as functions of the module.
+    for n in (:flags, :num, :triple, :make_pair, :make_flags)
+        @test (n, _tn_has(M, n)) == (n, true)
+    end
+    @test hasmethod(M.flags, Tuple{Int,Int}) && hasmethod(M.num, Tuple{Int}) && hasmethod(M.triple, Tuple{Int})
+    for n in (:flags_, :num_, :triple_, :packed_s_)
+        @test (n, _tn_has(M, n)) == (n, false)
+    end
+    lang === :c && @test hasmethod(M.packed_s, Tuple{Int,Int})
 end
