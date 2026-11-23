@@ -145,6 +145,9 @@ _screen_why(why::Symbol, name::AbstractString) =
     why === :type_constructor ?
         "the type `$name` defines a method of the same signature itself (a constructor such as its " *
         "zero-initializer `$name()`), and keeps it" :
+    why === :field_constructor ?
+        "`$name(…)` with one argument per field builds the type `$name`, a function of that name " *
+        "with as many parameters would take those calls, and the type keeps them" :
                             "the wrapper's own text may use `$name`"
 
 # ── The screen of one wrap ──────────────────────────────────────────────────
@@ -937,6 +940,120 @@ function _constructor_clashes(sc::_NameScreen, uses::_NameUses, text::AbstractSt
     return out
 end
 
+# `NTuple{N, UInt8}`: the bytes a byte blob, a bitfield record or a union is
+# kept in.
+_is_byte_tuple(t) = t isa Expr && t.head === :curly && length(t.args) == 3 &&
+                    t.args[1] === :NTuple && t.args[3] === :UInt8
+
+"""
+    _field_constructor_arities(text) -> Dict{String,Int}
+
+The structs `text` defines that Julia gives field constructors, with their
+number of fields: no inner constructor (one turns Julia's off), at least one
+field, and not a byte carrier, whose fields are all `NTuple{N, UInt8}` (a byte
+blob, a bitfield record, a union: built from the bytes, never from values a
+function of the library takes).
+"""
+function _field_constructor_arities(text::AbstractString)::Dict{String,Int}
+    out = Dict{String,Int}()
+    ex = try
+        Meta.parseall(text)
+    catch
+        return out
+    end
+    function walk(x)
+        x isa Expr || return
+        if x.head in (:toplevel, :module, :block)
+            foreach(walk, x.args)
+        elseif x.head === :struct
+            head = x.args[2]
+            head isa Expr && head.head === :(<:) && (head = head.args[1])
+            head isa Symbol || return                 # a parametric type: not the generators'
+            fields = 0
+            carriers = true
+            for f in x.args[3].args
+                f isa LineNumberNode && continue
+                f isa Expr && f.head === :const && (f = f.args[1])
+                if f isa Symbol
+                    fields += 1; carriers = false
+                elseif f isa Expr && f.head === :(::) && length(f.args) == 2
+                    fields += 1; carriers &= _is_byte_tuple(f.args[2])
+                elseif f isa Expr && (f.head === :function || (f.head === :(=) && _is_method_target(f.args[1])))
+                    return                            # an inner constructor
+                end
+            end
+            (fields == 0 || carriers) && return
+            out[string(head)] = fields
+        end
+    end
+    walk(ex)
+    return out
+end
+
+# The number of positional arguments a signature from `_method_definitions`
+# takes, `"f(Integer,Ptr{T},Vararg{Any})"`: `(fixed, vararg)`.
+function _signature_arity(sig::AbstractString)
+    i = findfirst('(', sig)
+    i === nothing && return (0, false)
+    depth = 0
+    args = String[]
+    start = nextind(sig, i)
+    j = start
+    while j <= lastindex(sig)
+        c = sig[j]
+        if c in ('{', '(')
+            depth += 1
+        elseif c in ('}', ')')
+            if depth == 0
+                j > start && push!(args, sig[start:prevind(sig, j)])
+                break
+            end
+            depth -= 1
+        elseif c == ',' && depth == 0
+            push!(args, sig[start:prevind(sig, j)])
+            start = nextind(sig, j)
+        end
+        j = nextind(sig, j)
+    end
+    vararg = !isempty(args) && startswith(last(args), "Vararg{")
+    return (length(args) - vararg, vararg)
+end
+
+"""
+    _field_constructor_clashes(sc, uses, text) -> Set{String}
+
+The functions `sc` kept beside a struct of their name whose methods take the
+calls of the struct's field constructor: a method of as many positional
+arguments as the struct has fields (`_field_constructor_arities`). Julia
+gives `struct pair; a::Cint; b::Cint; end` the methods `pair(::Cint,
+::Cint)` and `pair(a, b)`, which converts; a library function
+`int pair(int a, int b)` is `pair(::Integer, ::Integer)`, more specific
+than the second, so `pair(1, 2)` called the function and
+`pair(Cint(1), Cint(2))` built the struct (found 2026-11-18). No text
+defines a method twice (the field constructor is implicit), so
+`_constructor_clashes` does not see it. The type keeps the name, as it keeps
+its zero-initializer.
+
+A byte carrier (a byte blob, a bitfield record, a union) is built from its
+bytes alone, a value no function argument the generators type takes, so a
+function beside one moves nothing; neither does a method of another arity.
+"""
+function _field_constructor_clashes(sc::_NameScreen, uses::_NameUses, text::AbstractString)::Set{String}
+    out = Set{String}()
+    beside = Set{String}(n for n in sc.kept[:function]
+                         if any(k -> k === :struct || k === :type, get(uses.bound, n, Symbol[])))
+    isempty(beside) && return out
+    arities = _field_constructor_arities(text)
+    for (sig, _) in _method_definitions(text)
+        name = sig[1:prevind(sig, something(findfirst('(', sig), lastindex(sig) + 1))]
+        (name in beside && haskey(arities, name)) || continue
+        (fixed, vararg) = _signature_arity(sig)
+        n = arities[name]
+        (fixed == n || (vararg && fixed <= n)) && push!(out, name)
+    end
+    return out
+end
+
 """
     _screen_verdict(sc, text) -> Union{Nothing,_NameScreen}
 
@@ -950,8 +1067,9 @@ use is the wrapper's. A name kept as the library spells it has to move when
 the text binds it as something else too (`_own_binding_beside`): the module's
 own constant, an import, the module; and a function kept beside a type of its
 name has to move when one of its methods is a constructor the type defines
-already (`_constructor_clashes`). Decisions only accumulate, so the
-generations end.
+already (`_constructor_clashes`) or takes the calls of the type's field
+constructor (`_field_constructor_clashes`). Decisions only accumulate, so
+the generations end.
 """
 function _screen_verdict(sc::_NameScreen, text::AbstractString)::Union{Nothing,_NameScreen}
     uses = _name_uses(text)
@@ -972,6 +1090,9 @@ function _screen_verdict(sc::_NameScreen, text::AbstractString)::Union{Nothing,_
     end
     for name in _constructor_clashes(sc, uses, text)
         haskey(want, (:function, name)) || (want[(:function, name)] = :type_constructor)
+    end
+    for name in _field_constructor_clashes(sc, uses, text)
+        haskey(want, (:function, name)) || (want[(:function, name)] = :field_constructor)
     end
     moved = Set{Tuple{Symbol,String}}((m.kind, m.from) for m in sc.moves if m.why !== :syntax &&
                                       m.why !== :every_module && m.why !== :base_type)

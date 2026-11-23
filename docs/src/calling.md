@@ -52,6 +52,7 @@ another. `wrap` prints each one, with the reason, on a line starting `names:`.
 | A struct `Integer`, `Bool` | `c_Integer`, `c_Bool`, with methods `c_Integer_get` | The wrapper's own code uses the name |
 | A value `Symbol` of `enum Kind` | `Kind_Symbol` | The wrapper's own code uses the name |
 | A global `conf` beside `struct conf`, or a function `pool(void)` beside `struct pool` | `conf_()` (its address is still `conf_ptr()`), `pool_()` | `conf()` and `pool()` make the zeroed struct |
+| A function `pair(int a, int b)` beside `struct pair { int a; int b; }` | `pair_(1, 2)` | `pair(1, 2)` makes the struct from its fields |
 
 Other names that Julia also has are kept: a function `length`, `open` or
 `string`, or a struct `Task`, is `M.length`, `M.open`, `M.string`, `M.Task`.

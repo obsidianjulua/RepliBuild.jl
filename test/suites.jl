@@ -254,6 +254,7 @@ const TESTS = TestFile[
     T("test_tier2_pointer_args_live.jl", :dev, [:cpp, :dialect], locks = ["pointer_arg_test"]),
     T("test_name_screen_live.jl", :dev, [:c, :cpp, :dialect], locks = ["name_screen_test"]),
     T("test_type_name_collisions_live.jl", :dev, [:build, :c], locks = ["type_name_collision_test"]),
+    T("test_field_ctor_shadow_live.jl", :dev, [:build, :c, :cpp], locks = ["field_ctor_shadow_test"]),
     T("test_wide_enums_live.jl", :dev, [:dwarf, :cpp], locks = ["wide_enum_test"]),
     T("test_type_mapping_live.jl", :dev, [:dwarf, :c, :cpp, :dialect],
       locks = ["typemap_c_test", "typemap_cpp_test"]),
