@@ -16,6 +16,10 @@
 #       metadata on disk predates the build's fix (wrapped again from
 #       metadata that says `Cstring`).
 #
+#     - a `char*` that is not `const` (`cs_upcase`, `cs_copy`'s `dst`) is a
+#       buffer the library writes: a Julia string there is an
+#       `ArgumentError` (2026-11-23), a byte buffer, a `Ptr`, a `Ref` pass.
+#
 #   test/cstring_param_cpp_test (C++)
 #     - a `noexcept` function and an `extern "C"` function proven `nounwind`
 #       are ccalls and get the same semantics as the Tier 2 function beside
@@ -99,6 +103,38 @@ function cstr_semantics(f)
     @test f(Ref((0x61, 0x00))) == 1
 end
 
+# A `char*` that is not `const`, through one wrapper function `f` that
+# upper-cases what it is given in place (2026-11-23). A Julia string is
+# refused, and stays as it was; a byte buffer is written.
+function char_buffer_semantics(f)
+    for s in ("abc", SubString("xabc", 2), :abc, codeunits("abc"), codeunits(SubString("xabc", 2)))
+        err = try
+            f(s); nothing
+        catch e
+            e
+        end
+        @test (typeof(s), err isa ArgumentError) == (typeof(s), true)
+        msg = err isa ArgumentError ? err.msg : ""
+        @test occursin("`char *` it may write into", msg) && occursin("Vector{UInt8}(\"text\\0\")", msg)
+    end
+    lit() = (s = "abc"; try f(s) catch end; s)
+    @test lit() == "abc" && lit() == "abc"
+    buf = Vector{UInt8}("abc\0")
+    f(buf)
+    @test GC.@preserve(buf, unsafe_string(pointer(buf))) == "ABC"
+    sbuf = Int8[104, 105, 0]
+    f(sbuf)
+    @test sbuf == Int8[72, 73, 0]
+    GC.@preserve buf begin
+        buf2 = Vector{UInt8}("xyz\0")
+        GC.@preserve buf2 f(pointer(buf2))
+        @test String(buf2[1:3]) == "XYZ"
+    end
+    r = Ref((UInt8('q'), 0x00))
+    f(r)
+    @test r[][1] == UInt8('Q')
+end
+
 # One top-level testset, so a red C half does not hide the C++ half.
 @testset "Pointers to char, live" begin
 @testset "Pointers to char, live: C" begin
@@ -112,6 +148,8 @@ end
     @testset "what was emitted" begin
         @test occursin("RepliBuild.JITManager.cstring_arg(s)", cstr_body(wsrc, "cs_len"))
         @test occursin("RepliBuild.JITManager.cstring_arg(src)", cstr_body(wsrc, "cs_copy"))
+        @test occursin("RepliBuild.JITManager.char_buffer_arg(dst)", cstr_body(wsrc, "cs_copy"))
+        @test occursin("RepliBuild.JITManager.char_buffer_arg(s)", cstr_body(wsrc, "cs_upcase"))
         @test !occursin("cstring_arg", cstr_body(wsrc, "cs_sum_ubytes"))
         @test occursin("RepliBuild.JITManager.cstring_arg(fmt)", cstr_body(wsrc, "cs_fmt_len"))
         @test occursin("RepliBuild.JITManager.cstring_arg(fmt)", cstr_body(wsrc, "cs_fmt_len_Cint_Cint"))
@@ -141,6 +179,9 @@ end
         @test M.cs_fmt_len(SubString("abcdef", 1, 2), 0) == 2
         @test M.cs_fmt_len_Cint_Cint(SubString("abcdef", 1, 3), 2, 10, 20) == 33
         @test_throws ArgumentError M.cs_fmt_len("a\0b", 0)
+        char_buffer_semantics(M.cs_upcase)
+        # A string where the library writes (`cs_copy`'s `dst`) is refused too.
+        @test_throws ArgumentError M.cs_copy("12345678", 8, "hey")
     end
 
     @testset "metadata from before the build's fix" begin
@@ -184,6 +225,10 @@ if requires("pointers to char through a C++ wrapper, live", :libJLCS, :clangxx)
             @test (f, occursin("RepliBuild.JITManager.cstring_arg(s)", b)) == (f, true)
         end
         @test occursin("RepliBuild.JITManager.pointer_arg(Cstring, s)", cstr_body(wsrc, "thunk_len"))
+        @test occursin("ccall((:", cstr_body(wsrc, "cpp_upcase"))
+        @test occursin("RepliBuild.JITManager.char_buffer_arg(s)", cstr_body(wsrc, "cpp_upcase"))
+        @test occursin("RepliBuild.JITManager.pointer_arg(RepliBuild.JITManager.CharBuffer, s)",
+                       cstr_body(wsrc, "thunk_upcase"))
         @test occursin(r"^function cpp_sbytes\(\)::Ptr\{Int8\}"m, wsrc)
         @test occursin("ccall((:", cstr_body(wsrc, "cpp_sbytes"))
         @test occursin("_Z12thunk_sbytesi_thunk\", Ptr{Int8}, ", cstr_body(wsrc, "thunk_sbytes"))
@@ -196,6 +241,8 @@ if requires("pointers to char through a C++ wrapper, live", :libJLCS, :clangxx)
         cstr_semantics(M.cpp_len)
         cstr_semantics(M.c_len)
         cstr_semantics(M.thunk_len)
+        char_buffer_semantics(M.cpp_upcase)
+        char_buffer_semantics(M.thunk_upcase)
         for p in (M.cpp_sbytes(), M.thunk_sbytes(0))
             @test p isa Ptr{Int8} && unsafe_load(p, 1) == -1
         end

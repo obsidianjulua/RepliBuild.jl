@@ -79,7 +79,9 @@ filter(l -> occursin("Safety Trap", l), readlines("julia/Mathlib.jl"))
 | `double`, `float` | Pass any `Real` in a C wrapper. In a C++ wrapper pass a `Float64` or `Float32`: write `2.0`, not `2`. |
 | `bool` | `Bool` |
 | `const char*` argument | A `String` |
+| `char*` argument | A byte buffer the function may write into, never a `String` (see [Strings](#Strings)) |
 | `char*` result | A `String`, or `nothing` for NULL |
+| `long double` | Not supported (see [`long double`](#long-double)) |
 | `struct S` by value | The struct `S` |
 | `S*` | `Ref(s)`, or a `Ptr{S}` |
 | `void*` | `Ptr{Cvoid}` |
@@ -155,12 +157,72 @@ value in the same module, it gets its enum's name in front: with a C++ class
 ## Strings
 
 - A `const char*` argument takes a Julia `String`.
+- A `char*` argument without `const` is a buffer the function may write into,
+  and it does not take a Julia string: a `String` cannot be changed, and one
+  string can be shared by many places in your program (a string literal is the
+  same object every time its line runs), so the function would change all of
+  them. Passing a `String`, a `SubString`, a `Symbol` or `codeunits(s)` there
+  raises an `ArgumentError` that says what to pass instead. Pass a byte buffer,
+  with room for what the function writes and a zero byte at the end of any text
+  you give it:
+
+  ```julia
+  buf = Vector{UInt8}("hello\0")      # the text, and the zero byte C ends it with
+  M.upcase(buf)                        # void upcase(char *s)
+  GC.@preserve buf unsafe_string(pointer(buf))   # "HELLO"
+
+  out = zeros(UInt8, 32)
+  n = M.copy_name(out, length(out))    # size_t copy_name(char *dst, size_t cap)
+  String(out[1:n])                     # "ada"
+  ```
+
+  A `Ptr`, a `Ref` and `C_NULL` pass as before.
 - A `char*` result is copied into a `String`. A NULL result is `nothing`.
 - If the caller must free the result, say so in
   [`[wrap.cstring_owned]`](toml.md#Strings-the-caller-must-free), and the
   wrapper frees it after copying.
 - Every such function also has a `<name>_ptr` version that returns the raw
   pointer and frees nothing, for when you need the pointer itself.
+
+## `long double`
+
+Julia has no `long double` type, so a function that takes a `long double` or
+returns one cannot be called. The wrapper still defines it, and calling it
+raises an error saying so:
+
+```julia
+M.mx_half(3.0)    # long double mx_half(long double x);
+# ERROR: ABI Safety Trap: cannot call 'mx_half'. It takes `long double` x by value
+# and returns `long double`. …
+```
+
+A pointer to a `long double` is not affected: it is a `Ptr{Cvoid}`.
+
+To call the function anyway, give it a version that takes and returns
+`double`. Leave the original out with
+[`[wrap] exclude_symbols`](toml.md#Leaving-things-out), and add a
+[`[wrap.macros]`](toml.md#Macros) entry of the same name with `double` types.
+RepliBuild then compiles a small function that converts the arguments and the
+result:
+
+```toml
+[wrap]
+exclude_symbols = ["mx_half"]
+shim_headers = ["mathx.h"]          # the header that declares mx_half
+
+[wrap.macros.mx_half]
+ret  = "double"
+args = ["double"]
+```
+
+```julia
+M.mx_half(3.0)    # 1.5
+```
+
+The values pass through a `double`, so digits a `long double` keeps beyond a
+`double`'s are lost. If you do not need the function, `exclude_symbols` alone
+leaves it out of the wrapper. Building the library again is needed after
+adding the macro, since the function is compiled into it.
 
 ## Variadic functions
 
@@ -371,7 +433,8 @@ method is checked before the C++ function runs. Each accepts:
 | A `Managed` object, an object made by a factory, a container such as `CppVector`, or your own type that defines `Base.unsafe_convert(::Type{Ptr{Cvoid}}, x)` | A pointer to an object, and `void*` |
 | A union or bitfield record itself: `M.Flags_get_level(f)` | A pointer to an object, and `void*` |
 | An `Array`, or a contiguous view, of `T` | `T*` where `T` is data (`const int*`), and `void*` |
-| A string | `char*`, and byte pointers such as `unsigned char*` |
+| A string | `const char*`, and byte pointers such as `const unsigned char*` |
+| A byte buffer (`Vector{UInt8}`) | `char*`, `const char*`, and byte pointers |
 | A `@cfunction` pointer | A function pointer |
 
 Anything else is a `MethodError`, before any C++ runs: a bare struct where the
@@ -379,8 +442,9 @@ object goes, a Julia function where a function pointer goes, a
 `Vector{Float64}` for a `const int*`, a Julia `Vector` or a `Ref{String}` where
 a `std::vector` or `std::string` goes.
 
-A string passed for a `char*` must not contain a zero byte; one that does is an
-`ArgumentError`. A `std::string` parameter has no such limit.
+A string passed for a `const char*` must not contain a zero byte; one that
+does is an `ArgumentError`. A `std::string` parameter has no such limit. A
+`char*` without `const` takes no string at all ([Strings](#Strings)).
 
 A `noexcept` function is called directly and is less strict about what it
 converts: pass it a `Ptr`, a `Ref`, an array, or the class's own `Managed`

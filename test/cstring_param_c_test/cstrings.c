@@ -45,3 +45,10 @@ int cs_fmt_len(const char *fmt, int count, ...) {
     va_end(ap);
     return n;
 }
+
+/* A `char*` that is not `const`: the function writes into it. A Julia
+   string is refused there; a byte buffer is written. */
+void cs_upcase(char *s) {
+    for (; *s; s++)
+        if (*s >= 'a' && *s <= 'z') *s = (char)(*s - 'a' + 'A');
+}

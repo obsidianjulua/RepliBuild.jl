@@ -392,6 +392,18 @@ abstract type Opaque end
 abstract type Code end
 
 """
+What `pointer_arg` is told for a pointer to plain `char` that is not `const`:
+a buffer the function may write into (`char_buffer_arg`). It takes what a
+`Cstring` position takes except a Julia string, a `Symbol` and `codeunits` of a
+string, which are an `ArgumentError`.
+"""
+abstract type CharBuffer end
+
+# A pointer to plain `char`, read-only (`Cstring`) or written (`CharBuffer`):
+# both take bytes of either sign, and no object.
+_char_pointee(::Type{P}) where {P} = P === Cstring || P === CharBuffer
+
+"""
     ByValue{V}
 
 What `pointer_arg` is told for a parameter C++ takes BY VALUE and the thunk
@@ -432,7 +444,7 @@ const _MemoryArray = Union{DenseArray, SubArray, Base.ReshapedArray, Base.Reinte
 # pointer parameter takes them. (`void*` takes any array and never asks.)
 function _array_matches(::Type{P}, ::Type{E}) where {P, E}
     bytes = E === UInt8 || E === Int8
-    P === Cstring && return bytes
+    _char_pointee(P) && return bytes
     P <: Ptr || return false
     T = eltype(P)
     return T === E || (bytes && (T === UInt8 || T === Int8)) || (T <: Ptr && E <: Ptr)
@@ -445,7 +457,7 @@ function _pointer_arg_hint(io, exc, argtypes, kwargs)
     exc.f === pointer_arg || return nothing
     print(io, "\nA wrapper refused this argument where C++ takes a pointer. A pointer parameter takes a `Ptr`, ",
           "a `Ref` to plain data (`Ref(x)`, never the bare value), an object that owns one (a `Managed` ",
-          "object, a factory struct), or an array of the pointee's type where C++ reads data; a `char*` ",
+          "object, a factory struct), or an array of the pointee's type where C++ reads data; a `const char*` ",
           "also takes a string.")
     return nothing
 end
@@ -462,7 +474,8 @@ The one answer to "may `x` be passed where C++ declares `P`", for every pointer
 position of a Tier 2 call, and the conversion when it may. `P` is what the
 wrapper says the position is: `Ptr{T}` for a pointer or reference to a `T` the
 wrapper emits (`this` included), `Ptr{Cvoid}` for `void*`, `Cstring` for a
-`char*`, `Ptr{Opaque}`, `Ptr{Code}`, or `ByValue{V}`.
+`const char*`, `CharBuffer` for a `char*` that is not `const`, `Ptr{Opaque}`,
+`Ptr{Code}`, or `ByValue{V}`.
 
 Accepted:
 
@@ -479,7 +492,10 @@ Accepted:
   * for `Cstring`, an `AbstractString` with Julia's `Cstring` semantics: a
     `SubString` is copied and NUL-terminated, an embedded NUL is an
     `ArgumentError`. A byte pointer that is not a C string (`unsigned char*`)
-    takes a string as `ccall` passes one to `Ptr{UInt8}`;
+    takes a string as `ccall` passes one to `Ptr{UInt8}`. For `CharBuffer`
+    (a `char*` that is not `const`), a string, a `Symbol` or `codeunits` of a
+    string is an `ArgumentError` (`char_buffer_arg`); bytes pass as for
+    `Cstring`;
   * for `ByValue{V}`, a `V`;
   * anything else that converts with `Base.unsafe_convert(Ptr{Cvoid}, x)`: the
     wrapper's owning types (`Managed*`, a factory struct), the STL wrappers,
@@ -503,6 +519,7 @@ function _pointer_arg(::Type{P}, x::Union{Base.RefValue{T}, Base.RefArray{T}}) w
 end
 
 function _pointer_arg(::Type{P}, x::_MemoryArray) where {P}
+    P === CharBuffer && x isa Base.CodeUnits && _refuse_string_at_char_buffer(x)
     E = eltype(x)
     (P === Ptr{Cvoid} || (isbitstype(E) && sizeof(E) > 0 && _array_matches(P, E))) || _refuse_pointer_arg(P, x)
     cx = Base.cconvert(Ptr{E}, x)
@@ -548,6 +565,34 @@ function cstring_arg(x::AbstractString)
 end
 cstring_arg(x::Cstring) = pointer(x)
 
+"""
+    char_buffer_arg(x)
+
+What a `ccall` site passes for a parameter bound to a pointer to plain `char`
+that is not `const` (`Wrapper._points_to_writable_char`): a buffer the function
+may write into. A Julia string is refused there with an `ArgumentError` that
+says what to pass instead: a `String` is immutable and may be shared (a
+literal in compiled code is one object for every call), and the function would
+write into it in place. So are a `SubString`, a `Symbol` (an interned name) and
+`codeunits` of a string, which point at the same bytes. Everything else is
+`cstring_arg`'s: a byte vector, a `Ptr`, `C_NULL`, a `Ref`, a `Cstring` pass as
+they did.
+
+The refusal is out of line, as `cstring_arg`'s is, so a `Ptr`, a buffer or an
+integer argument gives the wrapper nothing new to hold across the call (a
+function that leaves by `longjmp`; `cstring_arg`'s docstring).
+"""
+char_buffer_arg(x) = cstring_arg(x)
+char_buffer_arg(x::Union{AbstractString, Symbol, Base.CodeUnits}) = _refuse_string_at_char_buffer(x)
+
+@noinline _refuse_string_at_char_buffer(x) = throw(ArgumentError(
+    "a $(x isa Base.CodeUnits ? "`codeunits` of a string" : "`$(nameof(typeof(x)))`") cannot be passed where " *
+    "C takes a `char *` it may write into (not `const char *`): a Julia string is immutable and may be shared " *
+    "(a string literal is one object for every call), and the function would change it in place. Pass a byte " *
+    "buffer it can write into, NUL-terminated and as large as the function needs, for example " *
+    "`buf = Vector{UInt8}(\"text\\0\")` or `buf = zeros(UInt8, 256)`, and read the text back with " *
+    "`GC.@preserve buf unsafe_string(pointer(buf))`."))
+
 # One `memchr` over the string's bytes, as Base's own `Cstring` conversion does.
 @inline _has_nul(s::String) =
     ccall(:memchr, Ptr{Cvoid}, (Ptr{UInt8}, Cint, Csize_t), s, 0, sizeof(s)) != C_NULL
@@ -559,6 +604,7 @@ cstring_arg(x::Cstring) = pointer(x)
     "For bytes passed with their length, pass `codeunits(s)` or a byte vector."))
 
 function _pointer_arg(::Type{P}, x::AbstractString) where {P}
+    P === CharBuffer && _refuse_string_at_char_buffer(x)
     if P === Cstring
         cx = cstring_arg(x)
         return PointerArg(Ptr{Cvoid}(pointer(cx)), cx)
@@ -570,19 +616,20 @@ function _pointer_arg(::Type{P}, x::AbstractString) where {P}
 end
 
 _pointer_arg(::Type{P}, x::Cstring) where {P} =
-    (P === Cstring || P === Ptr{UInt8} || P === Ptr{Int8}) ? PointerArg(Ptr{Cvoid}(pointer(x)), nothing) :
+    (_char_pointee(P) || P === Ptr{UInt8} || P === Ptr{Int8}) ? PointerArg(Ptr{Cvoid}(pointer(x)), nothing) :
                                                               _refuse_pointer_arg(P, x)
 
 # A `Symbol` is a C string to Julia (`ccall` passes one for `Cstring`).
 _pointer_arg(::Type{P}, x::Symbol) where {P} =
-    P === Cstring ? PointerArg(Ptr{Cvoid}(pointer(Base.unsafe_convert(Cstring, x))), x) : _refuse_pointer_arg(P, x)
+    P === Cstring ? PointerArg(Ptr{Cvoid}(pointer(Base.unsafe_convert(Cstring, x))), x) :
+    P === CharBuffer ? _refuse_string_at_char_buffer(x) : _refuse_pointer_arg(P, x)
 
 # Everything else: an object, by its bytes' address or by what it converts to.
 # `applicable` is decided when this is compiled for `typeof(x)`, so the test
 # costs a call nothing, and a value with no conversion is refused here, like
 # every other refusal, instead of as a `MethodError` of `unsafe_convert`.
 function _pointer_arg(::Type{P}, x) where {P}
-    (P === Cstring || (P === Ptr{Code} && !(x isa Base.CFunction))) && _refuse_pointer_arg(P, x)
+    (_char_pointee(P) || (P === Ptr{Code} && !(x isa Base.CFunction))) && _refuse_pointer_arg(P, x)
     _is_byte_record(typeof(x)) && return PointerArg(pointer_from_objref(x), x)
     applicable(Base.unsafe_convert, Ptr{Cvoid}, x) || _refuse_pointer_arg(P, x)
     return PointerArg(Ptr{Cvoid}(Base.unsafe_convert(Ptr{Cvoid}, x)), x)
