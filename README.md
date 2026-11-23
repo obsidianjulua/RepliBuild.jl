@@ -114,7 +114,7 @@ Julia module with a submodule per library
 - **Linux (x86-64 or AArch64) or Windows (x86-64, with MSYS2 CLANG64).** macOS
   is not supported.
 - **Julia 1.13 or 1.14**, the versions CI tests. Julia 1.12 is served by the
-  4.5 line, whose last release is 4.5.1.
+  4.5 line, which `Pkg.add` picks there by itself.
 - **C libraries:** on Linux, nothing but the C library's development files
   (`libc6-dev`, `glibc-devel`), which a machine with `gcc` already has. The
   C compiler, the linker, `readelf`, `nm`, `git`, `cmake` and `ninja` come with
