@@ -32,10 +32,10 @@
 # NOTHING HERE PULLS SOURCES THAT HAVE NOT CHANGED (John, 2026-11-23). The
 # rebuild keeps the dependency checkouts, and RepliBuild fetches only when a
 # recipe's pin is new. Two things hold that:
-#   - A test script that calls `clean` is not run, and its package fails: a
-#     bare `clean` deletes the checkout and the next build clones it again. A
+#   - A test script that calls `clean` is not run, and its package fails. A
 #     test script builds what is missing, wraps, and asserts; this tool is
-#     what rebuilds.
+#     what rebuilds. (With RepliBuild 4.6.0 and older a bare `clean` also
+#     deleted the checkout, and the next build cloned it again.)
 #   - Each checkout is looked at before and after the package's steps. One
 #     that was cloned or fetched again under the same pin is a failure.
 #
@@ -190,8 +190,9 @@ end
 """
 Does this script call `clean` (bare, or qualified as in `RepliBuild.clean`,
 with any arguments)? Read off the parsed code, so a comment or a string that
-mentions it does not count. A script that does is never run by a sweep: a bare
-`clean` deletes the dependency checkout, and the next build clones it again.
+mentions it does not count. A script that does is never run by a sweep: a test
+script does not rebuild, and with RepliBuild 4.6.0 and older a bare `clean`
+deleted the dependency checkout as well.
 """
 function sweep_cleans(path::AbstractString)::Bool
     isfile(path) || return false

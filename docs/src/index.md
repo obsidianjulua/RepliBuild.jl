@@ -120,7 +120,7 @@ through for each library.
 | `build(toml)` | Compiles the library. |
 | `wrap(toml)` | Writes the Julia module, `julia/<Name>.jl`. |
 | `info(toml)` | Says whether the library and the module exist. |
-| `clean(toml)` | Deletes everything built. |
+| `clean(toml)` | Deletes everything built. Downloaded sources stay unless you say otherwise. |
 | `register(toml)` | Makes a finished wrapper loadable by name in any session. |
 | `use("name")` | Loads a registered wrapper, rebuilding it if the project changed. |
 | `list_registry()`, `unregister("name")` | Lists and removes registered wrappers. |

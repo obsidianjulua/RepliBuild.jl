@@ -126,7 +126,8 @@ files.
   ([below](#Git-submodules)).
 
 The clone is reused by later builds. It is fetched again when `url`, `tag`,
-`commit` or `submodules` change, or after `clean(toml)`.
+`commit` or `submodules` change, or after you delete it
+([Fetching again](#Fetching-again)).
 
 ## A release tarball
 
@@ -301,7 +302,22 @@ not intend, or something was not found. A `main` function in the wrapper
 
 ## Fetching again
 
+Fetched sources are kept until you delete them. Nothing downloads the same
+sources twice: a build checks what is there against the recipe, and fetches
+only when the recipe asks for something else.
+
 ```julia
-RepliBuild.clean(toml)                 # deletes fetched sources too; the next build downloads again
-RepliBuild.clean(toml; deps = false)   # keeps them; the next build checks them against the recipe
+RepliBuild.clean(toml)                 # keeps fetched sources
+RepliBuild.clean(toml; deps = true)    # deletes them; the next build downloads again
+RepliBuild.clean(toml; deps = false)   # keeps them, and never asks
 ```
+
+At the Julia prompt, `clean(toml)` asks before it decides:
+
+```
+  clean: this project has downloaded sources: zlib (3.242 MiB) in /path/to/project/.replibuild_cache/deps
+  Delete them too? The next build would download them again. [y/N]
+```
+
+Only `y` deletes. In a script, a test or a notebook nobody can answer, so
+the sources are kept and one line says how to delete them.

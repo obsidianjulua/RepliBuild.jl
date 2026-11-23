@@ -332,8 +332,11 @@ else
     @test lowercase(gitout(clone, "rev-parse", "HEAD")) == sha2       # the clone is as it was
     write_toml("v2", sha2)
 
-    # ── clean removes the clone with the cache ───────────────────────────────
+    # ── clean keeps the clone; `deps = true` removes it with the cache ───────
     RepliBuild.clean(toml)
+    @test !isdir(proj * "/julia") && !isdir(proj * "/build")
+    @test lowercase(gitout(clone, "rev-parse", "HEAD")) == sha2       # nobody was asked: the clone stays
+    RepliBuild.clean(toml; deps = true)
     @test !isdir(proj * "/.replibuild_cache") && !isdir(proj * "/julia") && !isdir(proj * "/build")
     io = IOBuffer()
     RepliBuild.GraphMode.describe(io, RepliBuild.ConfigurationManager.load_config(toml))
