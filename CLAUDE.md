@@ -1958,6 +1958,29 @@ the test named when you touch the area.
   the STL-size fallback in `generate_function_thunks` never measures the
   container behind a reference (`path::native()` returned a stack slot).
   (`test_by_value_crossing.jl`, `test_cpp_return_resolution.jl`.)
+  **The build reads the name the same way** (2026-11-23,
+  `Compiler._by_value_record_name`): it decides which records get
+  `record_abi` facts, and it read the declarator characters over the whole
+  spelling, so `unique_ptr<int[], default_delete<int[]>>`, `vector<Node *>`,
+  `function<int (int)>` and an empty `Tag<int *>` had none. With no `pass`
+  fact a `std::unique_ptr<int[]>` was returned as eight bytes in a register
+  while the callee wrote through the first argument register, and a class
+  with a destructor (`Holder<int *>`) was returned and passed in registers.
+  Needs a rebuild.
+  (`test_template_arg_records.jl`, devtests
+  `test_template_arg_records_live.jl`.)
+- **A record C++ takes by value through the caller's object's address, with
+  no layout here, is a pointer position** (2026-11-23,
+  `FunctionGen.takes_object_address`: `:indirect` and no table entry, a
+  `std::function` by value). The thunk's slot holds the object's address, so
+  GeneratorCpp spells the position as a pointer (`_by_address_ctype`, in the
+  loop and in `_integer_width_overloads`' prediction through its
+  `object_address` predicate) and converts the argument with
+  `pointer_arg(Ptr{Opaque}, x)`. Spelled by its own name the position took
+  only a value of the empty struct that name is bound to; passed as it came,
+  a Julia function was boxed and the box read as the object. An STL
+  container keeps `ByValue`, and a record with a layout crosses as its
+  bytes.
 - **A toolchain record the library reaches by value keeps its layout**
   (2026-10-29, merged 2026-11-08). The provenance gate keeps a record declared in a
   toolchain header out of `struct_definitions`, so `std::pair<double, double>`
@@ -2031,6 +2054,25 @@ the test named when you touch the area.
   unit defines). A byte-region body crosses as `_byte_blob_type(N)` on the
   packed branch too, as it always did on the other.
   (`test_const_members.jl` "B", devtests `test_const_members_live.jl`.)
+- **A container's by-value size is the DWARF's, then the table's**
+  (2026-11-23, `FunctionGen.stl_value_bytes`). `stl_container_size` keys on
+  the template's name and one name has several sizes: `std::vector<bool>` is
+  40 bytes in libstdc++ where every other `std::vector` is 24, and libc++'s
+  containers are not libstdc++'s. The thunk side already read the size from
+  `record_abi` (`_record_abi_bytes`) while GeneratorCpp sized its return
+  buffer and its `ByValue{NTuple{N}}` from the table, so a returned
+  `vector<bool>` was built 40 bytes long in a 24-byte buffer. Every place
+  that sizes a container VALUE asks `stl_value_bytes(c_type, record_abi)`;
+  `stl_container_size` alone answers only "is this a container". The table
+  is the fallback for metadata with no fact and must never be smaller than
+  the object (`vector<bool>` is 40 there). The `create_std_*` factories
+  still size from the table: they have no `record_abi` entry to read (Not
+  Yet Built). **`std::vector<bool>` gets no `CppVector` factory**
+  (`_is_bool_vector_element`, a warning naming it): it is bit-packed, its
+  `operator[]` returns a proxy and `push_back` takes a `bool` by value, so
+  made as a `CppVector{Bool}` `push!` stored wrong bits and indexing read the
+  proxy as an address. (`test_template_arg_records.jl`, devtests
+  `test_template_arg_records_live.jl`.)
 - **A byte region never crosses a thunk as an array.** A record with no
   field-by-field body (a union, a bitfield record, overlapping members) is
   `!llvm.array<N x i8>` to StructGen, and LLVM splits an array argument into one
@@ -2927,6 +2969,16 @@ struct. Still open:
   unqualified spelling is `::Integer`. The list of relaxed C spellings is
   matched before the qualifier is cut. A `MethodError` for an `Int`, never a
   wrong call.
+- **A class template instantiated on a pointer type has two spellings**
+  (found 2026-11-23): its functions' `class` is the demangler's
+  (`Holder<int*>`), its layout is keyed by DWARF's (`Holder<int *>`), and
+  `_class_table_key` does not meet them. So `_collect_class_raii` files the
+  class's destructor and constructors under a key the thunk generator never
+  asks, and a by-value parameter of such a class crosses as a copy of its
+  bytes: no copy constructor makes the temporary and no destructor ends it.
+  The call itself is right (`test_template_arg_records_live.jl`'s
+  `class_with_destructor_by_value` takes either answer). Its Julia names
+  differ the same way (`Holder_intmul_Holder` beside `Holder_int_star`).
 - **The forced unit exports constructors of records a recipe keeps out of its
   surface** (found 2026-11-21, the release sweep): boostmath hides everything
   but its shim, and its dynamic table now has 19 constructors of

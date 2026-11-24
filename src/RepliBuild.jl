@@ -147,7 +147,13 @@ function stl_container_size(c_type::AbstractString)::Int
     # Bare (std::-stripped) spellings require `<` — DWARF drops the namespace but
     # keeps the template arguments, so a bare `string` is not a container name.
     if _stl_name_match(clean, "std::vector") || startswith(clean, "vector<")
-        return 24
+        # `vector<bool>` is the bit-packed specialization: two bit iterators
+        # and a pointer in libstdc++, 40 bytes. A container's by-value size is
+        # the DWARF's wherever a build recorded it
+        # (`FunctionGen.stl_value_bytes`); this table is for metadata with no
+        # such fact, and must never be smaller than the object: sized as a
+        # `vector<T>`, a returned `vector<bool>` overran its buffer.
+        return occursin(r"^(?:std::)?vector<\s*bool\s*[,>]", clean) ? 40 : 24
     elseif _stl_name_match(clean, "std::basic_string") || _stl_name_match(clean, "std::string") || startswith(clean, "basic_string<")
         return 32  # libstdc++ SSO string is 32 bytes on 64-bit
     elseif _stl_name_match(clean, "std::shared_ptr") || startswith(clean, "shared_ptr<")

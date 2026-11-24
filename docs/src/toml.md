@@ -490,6 +490,7 @@ template_headers = ["<fmt/format.h>"]      # headers for templates that are not 
   Julia constructor, `create_std_vector_double()`, and work like Julia
   collections ([Call the wrapper](calling.md#Containers)). Any other template
   is compiled so its type exists in the wrapper, with no constructor.
+  `std::vector<bool>` is one of those: it stores bits, not `bool`s.
 - A function template cannot be listed here
   ([Header-only libraries](header-only.md#C:-a-keep-file)).
 
