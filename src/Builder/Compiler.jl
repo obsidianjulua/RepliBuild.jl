@@ -11329,13 +11329,22 @@ The record name a by-value parameter or return names, or `nothing` for a
 pointer, reference, function pointer, array or `void`. Only TOP-LEVEL cv is
 removed: `fstring<const char *>` keeps the `const` inside its argument list,
 which is part of the name the record is keyed under.
+
+A `*`, `&`, `(` or `[` inside the template arguments is not the type's own
+declarator (`_outside_template_args`): `unique_ptr<int[], default_delete<int[]>>`,
+`vector<Node *>`, `function<int (int)>` and `less<Node *>` are records. Read
+over the whole spelling, each of them had no `record_abi` entry, so nothing
+said that C++ returns it through a hidden pointer or that it is empty:
+`std::unique_ptr<int[]>` was returned as eight bytes in a register while the
+callee wrote through the first argument register (2026-11-23, the type
+matrix).
 """
 function _by_value_record_name(c_type::AbstractString)
     t = strip(c_type)
     t = replace(t, r"^(?:(?:const|volatile)\s+)+" => "")
     t = replace(t, r"(?:\s+(?:const|volatile))+$" => "")
     (isempty(t) || t in ("void", "unknown")) && return nothing
-    occursin(r"[*&(\[]", t) && return nothing
+    occursin(r"[*&(\[]", _outside_template_args(t)) && return nothing
     return String(t)
 end
 

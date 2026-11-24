@@ -50,6 +50,9 @@ function _is_ctor_or_dtor_cpp(class_name::AbstractString, func_name::AbstractStr
     return func_name == _bare_type_name_cpp(class_name)
 end
 
+"Whether a `std::vector`'s element spelling (`bool`, `bool, std::allocator<bool> `) is `bool`: the bit-packed specialization."
+_is_bool_vector_element(elem_cpp::AbstractString) = occursin(r"^\s*bool\s*(?:,|$)", elem_cpp)
+
 """
     _stl_vector_element_type(elem_cpp, defined_struct_names, infer) -> Union{String,Nothing}
 
@@ -171,17 +174,22 @@ function _tier2_invoke_args(names, ctypes, needs_conversion, enum_base,
 end
 
 """
-    _by_address_ctype(ctype, c_type) -> String
+    _by_address_ctype(ctype, c_type; object_address) -> String
 
 The ccall type a parameter's SIGNATURE is spelled from. A container C++ takes
 by value and the thunk takes by address (`FunctionGen._stl_by_value`) is
 spelled as a pointer, so it relaxes to `::Any` like one, whatever its own name
 is bound to: the value such a container is returned as, a `Ref` and a `Ptr`
-all pass (`_pointer_arg_type`). Any other parameter keeps `ctype`. The
-function loop and the overload prediction both spell a position through this.
+all pass (`_pointer_arg_type`). So is any other record the thunk takes by the
+address of the caller's object (`object_address`, from
+`FunctionGen.takes_object_address`: a `std::function` by value): spelled by
+its own name, the position took only a value of the empty placeholder struct
+that name is bound to, which is nothing a pointer conversion accepts. Any
+other parameter keeps `ctype`. The function loop and the overload prediction
+both spell a position through this.
 """
-_by_address_ctype(ctype::AbstractString, c_type::AbstractString) =
-    JLCSIRGenerator.FunctionGen._stl_by_value(c_type) ? "Ptr{Cvoid}" : String(ctype)
+_by_address_ctype(ctype::AbstractString, c_type::AbstractString; object_address::Bool = false) =
+    (object_address || JLCSIRGenerator.FunctionGen._stl_by_value(c_type)) ? "Ptr{Cvoid}" : String(ctype)
 
 """
     _pointer_arg_type(ctype, c_type; resolves) -> Union{String,Nothing}
@@ -195,6 +203,9 @@ position, `this` included:
   * a container C++ takes by value and the thunk by address
     (`FunctionGen._stl_by_value`): `ByValue{NTuple{N, UInt8}}`, the bytes the
     wrapper returns one as;
+  * any other record C++ takes by value through the address of the caller's
+    object, with no layout here (`object_address`, from
+    `FunctionGen.takes_object_address`: a `std::function`): `Ptr{Opaque}`;
   * a function pointer: `Ptr{Code}`;
   * a pointer to plain `char`: `Cstring`, or `CharBuffer` when the `char` is
     not `const` (`_points_to_writable_char`: the function may write into it,
@@ -208,12 +219,18 @@ position, `this` included:
   * a pointer or reference to anything else (an STL container, a class only
     declared): `Ptr{Opaque}`.
 """
-function _pointer_arg_type(ctype::AbstractString, c_type::AbstractString; resolves = _ -> true)
+function _pointer_arg_type(ctype::AbstractString, c_type::AbstractString; resolves = _ -> true,
+                           record_abi = Dict{String,Any}(), object_address::Bool = false)
     FG = JLCSIRGenerator.FunctionGen
     jm = "RepliBuild.JITManager"
     c = String(strip(c_type))
+    # The bytes are the ones a by-value return of the same container gives
+    # (`stl_value_bytes`): a value passes where its own type is named.
     FG._stl_by_value(c) &&
-        return "$jm.ByValue{NTuple{$(get_stl_container_size(FG._strip_top_cv(c))), UInt8}}"
+        return "$jm.ByValue{NTuple{$(FG.stl_value_bytes(c, record_abi)), UInt8}}"
+    # A record C++ takes by value through the address of the caller's object,
+    # and that the wrapper has no value of (`FunctionGen.takes_object_address`).
+    object_address && return "Ptr{$jm.Opaque}"
     # A `char*` whose `char` is not `const` may be written: a buffer, never a
     # Julia string (`JITManager.CharBuffer`).
     _points_to_writable_char(c) && (ctype == "Cstring" || occursin(r"^(?:Ptr|Ref)\{(?:UInt8|Int8|Cchar)\}$", ctype)) &&
@@ -419,7 +436,7 @@ imgui's `GetID(const char*)` beside `(const void*)`, 2026-11-13).
 function _integer_width_overloads(functions, struct_types, ccall_param_type;
                                   concrete = _concrete_ctype, bound = _ -> true,
                                   owners = _ -> String[], is_enum = _ -> false,
-                                  string_param = _ -> false)
+                                  string_param = _ -> false, object_address = _ -> false)
     groups = Dict{String,Vector{Tuple{String,Vector{String}}}}()
     for func in functions
         get(func, "is_vararg", false) == true && continue
@@ -438,7 +455,8 @@ function _integer_width_overloads(functions, struct_types, ccall_param_type;
         # pointer, here as in the loop (`_by_address_ctype`).
         ctypes = String[_by_address_ctype(ccall_param_type(String(get(p, "julia_type", "Any")),
                                                            String(get(p, "c_type", ""))),
-                                          String(get(p, "c_type", "")))
+                                          String(get(p, "c_type", ""));
+                                          object_address = object_address(String(get(p, "c_type", ""))))
                         for p in raw]
         # A `std::string` parameter the wrapper builds from a Julia string
         # (`_string_param_plan`) is spelled `_STD_STRING_PARAM` here as in the
@@ -4025,7 +4043,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                !(String(get(f, "mangled", "")) in structor_skipped)],
         struct_types, _ccall_param_type;
         bound = _sig_type_bound, owners = _sig_owners, is_enum = _sig_is_enum,
-        string_param = c -> _string_param_plan(c, record_abi) isa Tuple)
+        string_param = c -> _string_param_plan(c, record_abi) isa Tuple,
+        object_address = c -> JLCSIRGenerator.FunctionGen.takes_object_address(c, dwarf_structs, record_abi))
 
     # What a pointer or reference return may be typed with (`_typed_pointer_return`).
     typed_return_names = _typed_return_names(join(struct_chunks))
@@ -4184,8 +4203,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         # This handles by-value returns of template types
         ret_type_str = get(return_type, "julia_type", "Cvoid")
         if occursin(r"[<>]", ret_type_str) && !startswith(ret_type_str, "Ptr{") && !startswith(ret_type_str, "Ref{")
-            # If the raw return type is an STL container, use NTuple with correct ABI size
-            stl_sz = get_stl_container_size(ret_type_str)
+            # If the raw return type is an STL container, use NTuple with the
+            # size the DWARF gave this instantiation (`stl_value_bytes`).
+            stl_sz = JLCSIRGenerator.FunctionGen.stl_value_bytes(ret_type_str, record_abi)
             if stl_sz > 0
                 return_type["julia_type"] = "NTuple{$stl_sz, UInt8}"
             elseif _stl_internal(ret_type_str)
@@ -4273,7 +4293,11 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             push!(string_plans, splan)
             # A container taken by value crosses by address: spelled as a
             # pointer (`_by_address_ctype`), as the prediction spelled it.
-            sig_c_type = _by_address_ctype(actual_c_type, String(get(param, "c_type", "")))
+            # So does any other record the thunk takes by the caller's
+            # object's address (`takes_object_address`).
+            object_address = JLCSIRGenerator.FunctionGen.takes_object_address(
+                String(get(param, "c_type", "")), dwarf_structs, record_abi)
+            sig_c_type = _by_address_ctype(actual_c_type, String(get(param, "c_type", "")); object_address)
             push!(julia_param_types,
                   splan isa Tuple ? _STD_STRING_PARAM :
                   strict ? _strict_param_spelling(sig_c_type; bound = _sig_type_bound,
@@ -4285,7 +4309,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # the wrapper builds is passed by the address `string_arg` gives.
             push!(pointer_types, splan isa Tuple ? nothing :
                   _pointer_arg_type(actual_c_type, String(get(param, "c_type", ""));
-                                    resolves = t -> _sig_type_bound(t) || _sig_is_enum(t)))
+                                    resolves = t -> _sig_type_bound(t) || _sig_is_enum(t), record_abi,
+                                    object_address))
         end
 
         # Julia function name (avoid conflicts and sanitize)
@@ -4511,7 +4536,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 # UndefRefError (found live: tinyxml2 XMLDocument::Parse → XMLError).
                 # The generated @enum type is a Julia primitive type, so
                 # _invoke_call takes the scalar ccall path with it.
-                stl_size = _stl_internal(_bare_ret) ? get_stl_container_size(_bare_ret) : 0
+                stl_size = _stl_internal(_bare_ret) ? JLCSIRGenerator.FunctionGen.stl_value_bytes(_bare_ret, record_abi) : 0
                 if haskey(dwarf_structs, "__enum__$(_bare_ret)")
                     jit_ret_type = _sanitize_cpp_type_name(_bare_ret)
                 elseif stl_size > 0
@@ -4526,7 +4551,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     # Fuzzy match: DWARF keys may have trailing " >" nesting artifacts
                     matched_key = _fuzzy_dwarf_lookup(_bare_ret, dwarf_structs)
                     if matched_key !== nothing
-                        stl_size = _stl_internal(matched_key) ? get_stl_container_size(matched_key) : 0
+                        stl_size = _stl_internal(matched_key) ? JLCSIRGenerator.FunctionGen.stl_value_bytes(matched_key, record_abi) : 0
                         if stl_size > 0
                             jit_ret_type = "NTuple{$stl_size, UInt8}"
                         elseif _stl_internal(matched_key)
@@ -5274,6 +5299,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                 elem_match === nothing && (elem_match = match(r"^std::vector<(.+)>$", container_type))
                 if !isnothing(elem_match)
                     elem_cpp = String(strip(elem_match.captures[1]))
+                    # `std::vector<bool>` is the bit-packed specialization: its
+                    # `operator[]` returns a proxy object and `push_back` takes
+                    # a `bool` by value, where a `CppVector` reads and writes
+                    # elements through a pointer. Made as one, `push!` stored
+                    # wrong bits and indexing read the proxy as an address.
+                    if _is_bool_vector_element(elem_cpp)
+                        @warn "STL: no CppVector factory for $(repr(container_type)): `std::vector<bool>` is " *
+                              "bit-packed, and its members take and return bits where a CppVector reads " *
+                              "and writes elements through a pointer"
+                        continue
+                    end
                     elem_julia = _stl_vector_element_type(elem_cpp, defined_struct_names,
                                                           t -> _normalize_stl_elem_type(infer_julia_type(registry, t; context="STL factory element type")))
                     if elem_julia === nothing

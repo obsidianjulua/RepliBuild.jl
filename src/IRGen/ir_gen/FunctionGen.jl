@@ -641,6 +641,56 @@ function _record_abi_bytes(c_type::AbstractString, record_abi)
     error("no byte size in record_abi for `$c_type`, which returns_in_caller_buffer said is passed by reference")
 end
 
+"""
+    stl_value_bytes(c_type, record_abi) -> Int
+
+The byte size of the STL container `c_type` where one crosses BY VALUE (a
+return's buffer, the bytes a wrapper holds, a by-value parameter's copy): the
+size the DWARF gave this instantiation (`record_abi`), else the table's
+(`get_stl_container_size`), and 0 for what is not a container.
+
+The table knows a template by its name, and one name has several sizes:
+`std::vector<bool>` is 40 bytes in libstdc++ where every other `std::vector`
+is 24, and libc++'s containers are not libstdc++'s. Sized by the table alone,
+a `vector<bool>` return got a 24-byte buffer the callee built a 40-byte
+object in (2026-11-23, the type matrix). Every place that sizes a container
+value asks this, so the wrapper's buffer and the thunk's agree.
+"""
+function stl_value_bytes(c_type::AbstractString, record_abi)::Int
+    t = _strip_top_cv(String(c_type))
+    table = get_stl_container_size(t)
+    table > 0 || return 0
+    for cand in _scope_suffixes(t)
+        facts = get(record_abi, cand, nothing)
+        facts === nothing && continue
+        get(facts, "conflict", false) == true && continue
+        n = _parse_num(get(facts, "byte_size", nothing))
+        (n !== nothing && n > 0) && return n
+    end
+    return table
+end
+
+"""
+    takes_object_address(c_type, structs, record_abi) -> Bool
+
+Whether a by-value parameter of `c_type` reaches its thunk as an ADDRESS the
+caller supplies, with no Julia value of the record to pass: a record C++
+passes by invisible reference (`:indirect`) that has no layout here, whose
+thunk slot holds the object's address (`std::function<int (int)>`, a class
+only declared). Not an STL container (`_stl_by_value`, which has its own
+`ByValue` conversion), and not a record with a layout, which crosses as its
+bytes.
+
+The wrapper converts such an argument like any pointer
+(`JITManager.pointer_arg`). Passed as it came, a Julia function or a struct
+value given for a `std::function` was boxed, and the box read as the object.
+"""
+function takes_object_address(c_type::AbstractString, structs, record_abi)::Bool
+    t = _strip_top_cv(String(c_type))
+    _table_entry(t, structs)[1] === :missing || return false
+    return by_value_crossing(t, structs, record_abi)[1] === :indirect
+end
+
 # An STL container returned by value: `by_value_crossing`'s STL branch, which
 # answers `:direct` because the container has no layout of its own here. Its
 # thunk returns a byte blob of the container's size, and a blob over 16 bytes
@@ -1354,7 +1404,7 @@ function generate_function_thunks(functions::Vector, structs::Any=Dict(); may_th
                 end
             else
                 # Fallback for known STL containers that might be missing from DWARF struct_defs
-                stl_size = get_stl_container_size(ret_c_type)
+                stl_size = stl_value_bytes(ret_c_type, record_abi)
                 if stl_size > 0
                     ret_type = _byte_blob_type(stl_size)
                 end

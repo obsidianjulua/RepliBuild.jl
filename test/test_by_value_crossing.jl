@@ -439,7 +439,10 @@ Contents of the .debug_info section:
     @testset "_by_value_record_name / _merge_record_facts!" begin
         @test BVC._by_value_record_name("const Tag") == "Tag"
         @test BVC._by_value_record_name("Tag const") == "Tag"
-        @test BVC._by_value_record_name("fstring<const char *>") === nothing   # a `*` inside
+        # A `*` inside the template arguments is not the type's own: the record
+        # is named, cv inside its arguments kept (test_template_arg_records.jl).
+        @test BVC._by_value_record_name("fstring<const char *>") == "fstring<const char *>"
+        @test BVC._by_value_record_name("fstring<const char *> *") === nothing
         @test BVC._by_value_record_name("Box<const int>") == "Box<const int>"  # inner cv kept
         for t in ("Tag*", "Tag&", "Tag&&", "void", "unknown", "", "int[4]", "function_ptr(int)")
             @test BVC._by_value_record_name(t) === nothing
