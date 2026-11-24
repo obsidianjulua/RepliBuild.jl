@@ -1,0 +1,2 @@
+templates = ["std::string"]
+template_headers = ["<string>"]

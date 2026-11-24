@@ -158,6 +158,7 @@ const TESTS = TestFile[
     T("test_response_files.jl", :unit, [:build]),
     T("test_tools_resolver.jl", :unit, [:build]),
     T("test_hub_sweep_tool.jl", :unit, [:build]),
+    T("test_cpp_type_matrix_tool.jl", :unit, [:cpp]),
     T("test_bundled_linker.jl", :unit, [:build]),
     T("test_libdw_reader.jl", :unit, [:dwarf]),
     T("test_cpp_globals.jl", :unit, [:dwarf, :cpp]),

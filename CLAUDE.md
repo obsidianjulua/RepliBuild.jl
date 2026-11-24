@@ -2801,6 +2801,34 @@ Where the time goes was measured on Jolt, the largest Hub package
   measurement, under a cause ("dispatch collision") that sent the reader to
   the generator's dedup. Its "thunks in a manifest nothing invokes" line is
   the check: it is 0 when the tool and the generator agree.
+- **C++ standard-library types** are measured by
+  `test/tools/cpp_type_matrix.jl` (2026-11-23; hand-run, reads no Hub, about
+  ten minutes). `test/tools/cpp_type_matrix/<family>/` is one small library
+  per type family (`lib.cpp`), the `[types] templates` it needs
+  (`family.toml`) and a probe (`probe.jl`) that calls the wrapper from Julia
+  and answers one verdict per cell: make, pass by value, pass by reference,
+  return by value, return by reference. The tool builds and wraps each with
+  the sweep tool, runs the probes in children, and writes `<out>/matrix.md`;
+  the last measurement is `docs/updates/CPP_TYPE_MATRIX.md`, and what it
+  found is listed under "Confirmed defects — 2026-11-23" below.
+  - **Bound is not usable.** The coverage tool reads 96% of these libraries'
+    functions as bound. A function is bound when its thunk is invoked
+    somewhere; whether a user has anything to pass it, or can read what it
+    returns, is the matrix's question. Before saying a standard type works,
+    read its row.
+  - **A probe uses what the manual gives a user** (`docs/src/calling.md`):
+    the module's functions and types, `create_std_*()`, `Ref(x)`. A `NO WAY`
+    is its author's reading, so it shows what was looked for (`nomake`
+    checks that the wrapper has no `create_…` function first).
+  - **A check the library makes on a value Julia holds is made first on one
+    that never left C++** (`intact(control, got, want)`): a check that fails
+    on its own control proves nothing.
+  - A probe that dies is run again from the case after it and the case is
+    CRASH, so a case never relies on an earlier one. A new type is a
+    function in a family's `lib.cpp` and a case in its `probe.jl`; a new
+    family is a directory.
+
+  (`test_cpp_type_matrix_tool.jl`.)
 - **Over-aligned records, what the C sret and byval fixes do not cover**
   (2026-10-18, narrowed 2026-10-25 and 2026-11-10). GeneratorCpp's own ccall
   path has no aligned buffer, and every alignment DWARF records (the record's,
@@ -2906,6 +2934,45 @@ struct. Still open:
   fails. The engine does what the inline-constructor pass says. Whether
   `surface_types_only` should keep such records out of the forced unit, or
   the recipe should exclude them, is John's call.
+
+### Confirmed defects — 2026-11-23 type matrix
+
+Found by `test/tools/cpp_type_matrix.jl` on 22 standard-library probe
+libraries (libstdc++, Linux x86-64, thunks compiled at load); every case is in
+`docs/updates/CPP_TYPE_MATRIX.md`. All open:
+
+- **A by-value return is built in the caller's buffer and then moved.**
+  `slot_value` copies the bytes into a Julia value, and `Ref(r)` or a
+  by-value pass (`pointer_arg(ByValue{V}, x)`) copies them again. A type that
+  points into itself is not valid at the new address: `std::list`,
+  `std::map`, `std::set` and `std::unordered_map` (a marker inside the
+  object), and a short `std::string` wherever `take_string!` does not read it
+  in place (inside a `pair`, an `optional`, a `filesystem::path`;
+  `std::wstring`, `std::u16string`). Lookups happen to work, `rbegin()`
+  answers wrong, and a walk to `end()` does not stop. The same values are
+  never ended: nothing runs a destructor on the bytes, and a by-value pass
+  lends where C++ moves. What owns such an object on the Julia side is John's
+  call, the same one as for a move-only parameter above.
+- **`std::vector<bool>` by value is sized as `std::vector<T>`**:
+  `stl_container_size` answers 24 for any `vector<` spelling, and it is 40
+  bytes on libstdc++. The callee writes past the return buffer, and the next
+  call that reads the value dies.
+- **`std::unique_ptr<T[]>` returned by value gets no hidden return pointer**:
+  the wrapper calls it as returning 8 bytes in a register. Its `[]` spelling
+  has no `record_abi` entry, where `unique_ptr<T>` has one and is right.
+- **A reference to a smart pointer, `std::function`, `std::variant`,
+  `std::atomic`, `std::mutex` or a stream is typed `Ref{<empty struct>}`**,
+  where a reference to a container is `::Any`. So `Ref` of the bytes a smart
+  pointer was returned as, the manual's way for a returned container, is a
+  `MethodError`; and for `std::function`, `std::variant` and `std::istream`
+  nothing makes a value to pass, which the coverage tool counts as bound.
+- **`create_std_basic_string_char()` is zeroed memory** (its method table has
+  no constructor), so `String(s)` on a new one is an error; and
+  **`create_std_map_std_string_int()` is a `CppMap{Ptr{Cvoid}, Cint}`**, so a
+  `String` key is a `MethodError`.
+- **The refusal for a toolchain record with no layout advises
+  `-fstandalone-debug`** when the library is already built with it
+  (`std::function`, `std::variant`, a fixed-extent `std::span`).
 
 ## Not Yet Built (roadmap, not bugs)
 
