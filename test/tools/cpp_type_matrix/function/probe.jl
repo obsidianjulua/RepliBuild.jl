@@ -8,8 +8,13 @@ case(F, "make") do
     nomake(r"function", "`M.function_int_int()` is an empty struct, and nothing turns a Julia function or a @cfunction into a std::function")
 end
 case(F, "takes a Julia function") do
-    takes(6, "a Julia function") do
+    takes(6, "a Julia function, by reference") do
         M.fn_apply_ref(twice, 3)
+    end
+end
+case(F, "takes a Julia function") do
+    takes(6, "a Julia function, by value") do
+        M.fn_apply(twice, 3)
     end
 end
 case(F, "takes a @cfunction") do
@@ -17,23 +22,27 @@ case(F, "takes a @cfunction") do
         M.fn_apply_ref(@cfunction(twice, Cint, (Cint,)), 3)
     end
 end
+case(F, "return by reference") do
+    p = M.fn_twice()
+    (p isa Ptr && p != C_NULL) ? "OPAQUE one the library owns comes back as a $(describe(p))" : "WRONG got $(repr(p))"
+end
 case(F, "pass by value") do
-    r = M.fn_apply(twice, 3)
-    "ERROR the call was made and answered $(repr(r))"
+    # C++ passes the address of the caller's object, and so does the wrapper:
+    # the function works on the object the pointer names.
+    p = M.fn_twice()
+    works((M.fn_apply(p, 21), M.fn_apply(p, 4)), (42, 8), "a pointer to one the library owns, passed twice; no copy is made")
+end
+case(F, "pass by reference") do
+    p = M.fn_twice()
+    works((M.fn_apply_ref(p, 3), M.fn_empty(p)), (6, 0), "the pointer as the library returned it")
+end
+case(F, "pass by reference") do
+    p = Ptr{M.function_int_int}(M.fn_twice())
+    works((M.fn_apply_ref(p, 3), M.fn_empty(p)), (6, 0), "the pointer converted by hand: Ptr{function_int_int}(p)")
 end
 case(F, "return by value") do
     r = M.fn_adder(2)
     "ERROR the call was made and answered a $(describe(r))"
-end
-case(F, "pass by reference") do
-    # Nothing can be passed: the parameter is a Ref to an empty struct, and the
-    # one function that would return a std::function is refused.
-    try
-        M.fn_adder(2)
-    catch
-        return noway("`fn_apply_ref` and `fn_empty` are bound and take a `Ref{function_int_int}`, an empty struct; nothing makes or returns one")
-    end
-    "ERROR fn_adder returned, and this probe does not pass its result on"
 end
 
 const V = "std::function<void(int)>"
