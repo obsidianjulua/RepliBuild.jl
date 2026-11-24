@@ -283,8 +283,8 @@ exceptions.
 | Rebuild after editing the TOML or the sources | `build(toml)`, then `wrap(toml)` |
 | Regenerate the module after a TOML edit that does not change the library | `wrap(toml)` alone ([which keys](toml.md#When-an-edit-takes-effect)) |
 | See whether the library and module exist | `info(toml)` |
-| Start over | `clean(toml)`, or `build(toml; clean = true)` |
-| Start over, keeping the downloaded sources | `clean(toml; deps = false)` |
+| Start over, keeping the downloaded sources | `clean(toml)`, or `build(toml; clean = true)` |
+| Start over and download the sources again | `clean(toml; deps = true)` |
 
 Three habits:
 

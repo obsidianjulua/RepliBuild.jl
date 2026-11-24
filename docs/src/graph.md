@@ -147,8 +147,8 @@ Two types count as the same only when they really are:
 
 - Unchanged files are not recompiled and unchanged libraries are not linked
   again. CMake's configure step runs on every `build`.
-- `clean(toml)` removes everything built, and a fetched project;
-  `clean(toml; deps = false)` keeps the fetched project.
+- `clean(toml)` removes everything built and keeps a fetched project.
+  `clean(toml; deps = true)` deletes the fetched project too.
 - `register(toml)` registers the whole project as one, and `use(name)` returns
   the top module ([Load it anywhere](use.md)).
 

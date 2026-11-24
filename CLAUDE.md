@@ -144,12 +144,19 @@ skill drives adding a package.
 - **Nothing pulls sources that have not changed, and a Hub test script never
   cleans** (John, 2026-11-23: "I dont like git pulls unless sources are new,
   the test.jl shouldn't clean or pull").
-  - A bare `RepliBuild.clean(toml)` deletes `.replibuild_cache/` with the
-    dependency checkout in it, and the next build clones again. `clean(toml;
-    deps = false)` keeps the checkout; a build then runs only `git rev-parse`
-    on it. The resolver fetches by itself when the recipe's pin, tag, URL or
-    submodule list changes, and only then. Use `deps = false` whenever a
-    rebuild from cold is wanted.
+  - **`clean` keeps downloaded sources unless a person says to delete them**
+    (John, 2026-11-23: "clean should prompt to delete sources").
+    `clean(toml)` asks at an interactive prompt on a terminal, and only `y`
+    deletes; in a script, a test or a child process nobody is asked and the
+    sources stay (`_clean_deletes_sources`). `deps = true` deletes without
+    asking, `deps = false` keeps without asking, and `build(toml; clean =
+    true)` always keeps. Up to 4.6.0 a bare `clean(toml)` deleted
+    `.replibuild_cache/` with the checkout in it, and the next build cloned
+    again. Code that cleans passes `deps` explicitly: a new caller of
+    `clean_internal` that leaves it out deletes sources.
+  - A build on a checkout that matches its marker runs only `git rev-parse`.
+    The resolver fetches by itself when the recipe's pin, tag, URL or
+    submodule list changes, and only then.
   - A `test.jl` calls `RepliBuild.build` (nothing to do when the package is
     built and unchanged), wraps, and asserts about the build; `test_deep.jl`
     verifies behaviour. Neither calls `clean`. The sweep tool refuses to run

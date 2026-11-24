@@ -29,8 +29,11 @@ RepliBuild.wrap(toml)                            # write julia/<Name>.jl
   result.
 - `discover` keeps an existing `replibuild.toml`. `discover(path; force = true)`
   rewrites it, keeping only [some keys](config.md#What-a-forced-discover-keeps).
-- `build(toml; clean = true)` deletes everything built first.
-- `clean(toml; deps = false)` keeps downloaded sources.
+- `build(toml; clean = true)` deletes everything built first. Downloaded
+  sources are kept.
+- `clean(toml)` keeps downloaded sources too. At the Julia prompt it asks
+  whether to delete them; `clean(toml; deps = true)` deletes them without
+  asking, and `deps = false` keeps them without asking.
 
 ```@docs
 discover

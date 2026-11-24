@@ -848,7 +848,8 @@ Compile C++ project → library (.so/.dylib/.dll)
 
 # Arguments
 - `toml_path`: Path to replibuild.toml configuration file (default: "replibuild.toml")
-- `clean`: Clean before building (default: false)
+- `clean`: delete what the last build wrote before building, keeping the
+  sources the project downloaded (default: false)
 
 # Returns
 Library path (String). For a `[graph]` project, the output directory that holds
@@ -896,7 +897,9 @@ function build(toml_path::String="replibuild.toml"; clean::Bool=false)
         cd(project_dir)
 
         if clean
-            clean_internal(project_dir)
+            # A rebuild from cold, from the sources already downloaded: they have
+            # not changed, and deleting them only makes the build fetch them again.
+            clean_internal(project_dir; deps=false)
             _clean_graph(toml_path)
         end
 
@@ -1055,15 +1058,23 @@ function wrap(toml_path::String="replibuild.toml"; headers::Vector{String}=Strin
 end
 
 """
-    clean(toml_path="replibuild.toml")
+    clean(toml_path="replibuild.toml"; deps=nothing)
 
-Remove build artifacts (build/, julia/, caches)
+Remove what a build wrote: `build/`, `julia/` and the caches.
+
+The sources a project downloaded (the git checkouts and unpacked archives
+under `.replibuild_cache/deps/`) are kept unless you say otherwise. They have
+not changed, and deleting them only makes the next build download them again.
 
 # Arguments
 - `toml_path`: Path to replibuild.toml configuration file (default: "replibuild.toml")
-- `deps`: also remove the vendored git dependencies under `.replibuild_cache/deps/`
-  (default `true`). `deps=false` keeps the clones, so the next build checks their
-  pins instead of fetching them again; everything else in the cache still goes.
+- `deps`: what to do with the downloaded sources.
+  - not given: at an interactive prompt, `clean` asks whether to delete them
+    too, and keeps them on anything but `y`. Anywhere else (a script, a test,
+    a notebook) it keeps them and says how to delete them.
+  - `deps=false`: keep them, without asking. The next build checks each one
+    against the recipe's pin instead of fetching it.
+  - `deps=true`: delete them, without asking.
 
 # Examples
 ```julia
@@ -1073,11 +1084,14 @@ RepliBuild.clean()
 # Clean specific project
 RepliBuild.clean("path/to/replibuild.toml")
 
-# Rebuild from cold without re-cloning the dependencies
+# In a script: keep the downloaded sources, ask nothing
 RepliBuild.clean("path/to/replibuild.toml"; deps=false)
+
+# Delete the downloaded sources too
+RepliBuild.clean("path/to/replibuild.toml"; deps=true)
 ```
 """
-function clean(toml_path::String="replibuild.toml"; deps::Bool=true)
+function clean(toml_path::String="replibuild.toml"; deps::Union{Bool,Nothing}=nothing)
     # Resolve absolute path to TOML file
     toml_path = abspath(toml_path)
 
@@ -1086,8 +1100,49 @@ function clean(toml_path::String="replibuild.toml"; deps::Bool=true)
     end
 
     project_dir = dirname(toml_path)
-    clean_internal(project_dir; deps=deps)
+    delete_sources = _clean_deletes_sources(deps, joinpath(project_dir, ".replibuild_cache", "deps"))
+    clean_internal(project_dir; deps=delete_sources)
     _clean_graph(toml_path)
+end
+
+"A person can be asked: an interactive session whose input and output are a terminal."
+_clean_can_ask(input::IO, output::IO) = isinteractive() && input isa Base.TTY && output isa Base.TTY
+
+"""
+    _clean_deletes_sources(deps, deps_dir; input, output, can_ask) -> Bool
+
+Whether `clean` deletes the downloaded sources in `deps_dir`.
+
+`deps` given is the answer. Not given: with nothing downloaded there is nothing
+to keep (the whole cache goes, as it always did); otherwise a person is asked
+when one can answer, and the sources are kept on anything but `y` or `yes`,
+on an empty line and at end of input. Where nobody can be asked they are kept,
+with a line saying how to delete them: a script that calls `clean(toml)` must
+neither block on a question nor download the same sources again.
+"""
+function _clean_deletes_sources(deps::Union{Bool,Nothing}, deps_dir::AbstractString;
+                                input::IO=stdin, output::IO=stdout,
+                                can_ask::Bool=_clean_can_ask(input, output))::Bool
+    deps === nothing || return deps
+    (isdir(deps_dir) && !isempty(readdir(deps_dir))) || return true
+    if !can_ask
+        println(output, "  clean: downloaded sources kept in $deps_dir (`clean(toml; deps=true)` deletes them)")
+        return false
+    end
+    sources = String[e for e in readdir(deps_dir) if isdir(joinpath(deps_dir, e))]
+    bytes = 0
+    for (root, _, files) in walkdir(deps_dir), f in files
+        p = joinpath(root, f)
+        islink(p) || (bytes += filesize(p))
+    end
+    println(output, "  clean: this project has downloaded sources: ", join(sources, ", "),
+            " (", Base.format_bytes(bytes), ") in ", deps_dir)
+    print(output, "  Delete them too? The next build would download them again. [y/N] ")
+    flush(output)
+    answer = lowercase(strip(readline(input)))
+    yes = answer in ("y", "yes")
+    yes || println(output, "  clean: downloaded sources kept")
+    return yes
 end
 
 """
