@@ -1,0 +1,2 @@
+templates = ["std::map<int, int>", "std::map<std::string, int>", "std::unordered_map<int, int>", "std::set<int>"]
+template_headers = ["<map>", "<unordered_map>", "<set>", "<string>"]

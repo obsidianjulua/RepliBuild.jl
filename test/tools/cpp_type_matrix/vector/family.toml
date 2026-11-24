@@ -1,0 +1,2 @@
+templates = ["std::vector<int>", "std::vector<double>", "std::vector<P2>", "std::vector<std::string>", "std::vector<std::vector<int>>"]
+template_headers = ["<vector>", "<string>", "types.hpp"]
