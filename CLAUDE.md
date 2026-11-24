@@ -1490,6 +1490,24 @@ the test named when you touch the area.
   byte vector passes, the error says so, and a Hub test that sends bytes with
   a NUL spells them that way. Do not relax the refusal for a parameter that
   looks like it has a length beside it.
+- **A Julia string is refused at a `char*` that is not `const`** (John,
+  2026-11-23: "refuse a string but it needs to remain functional"). The
+  function may write through it, and a `String` is immutable and shared (a
+  literal is one object for every run of its line: `upcase("abc")` left the
+  method's literal `"ABC"`). `_points_to_writable_char` decides from the
+  spelling before the last `*` (`_strip_top_cv` drops a leading `const`);
+  every `ccall` path binds such an argument through
+  `JITManager.char_buffer_arg` (`_cstring_param_arg`) and Tier 2 tells
+  `pointer_arg` `JITManager.CharBuffer`. A `String`, `SubString`, `Symbol`
+  and `codeunits` of a string are an `ArgumentError` saying to pass a byte
+  buffer; everything else passes exactly as `cstring_arg` passes it, so the
+  function stays callable. The refusal is out of line, like
+  `_refuse_embedded_nul`, so no `Ptr`, buffer or integer argument gets a GC
+  frame (`test_cstring_arg_roots.jl`). `char* const` is a buffer;
+  `char *const` is no C string to `_points_to_plain_char` at all
+  (`_strip_top_cv` reads the one spelling and not the other) and stays as it
+  was. (`test_cstring_params.jl`, `test_tier2_pointer_args.jl`, devtests
+  `test_cstring_params_live.jl`.)
 - Blob structs get `setproperty`/`setproperties` built in the same loop as the getters.
   `with()` forwards to them. C++ field structs get `setproperty` too
   (`_field_setter_chunk`), so a record keeps its setters when it stops being a blob.
@@ -2888,10 +2906,6 @@ struct. Still open:
   fails. The engine does what the inline-constructor pass says. Whether
   `surface_types_only` should keep such records out of the forced unit, or
   the recipe should exclude them, is John's call.
-- **A `String` passed at a non-const `char*` the library writes into is
-  written in place**: Julia's immutable `String`, possibly a shared literal.
-  DWARF cannot tell an input `char*` from an output buffer, so refusing it is
-  John's call.
 
 ## Not Yet Built (roadmap, not bugs)
 

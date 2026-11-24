@@ -287,10 +287,13 @@ end
     # a name the wrapper does not bind is never spelled into a body
     @test pt("Ptr{Unbound}", "Unbound*") == "Ptr{$jm.Opaque}"
     @test pt("Ptr{Ptr{Unbound}}", "Unbound**") == "Ptr{$jm.Opaque}"
-    # char pointers: a C string only for a pointer to plain `char`
+    # char pointers: a C string only for a pointer to plain `char`, and a
+    # buffer the function may write into when that `char` is not `const`
+    # (2026-11-23: a Julia string is refused there)
     @test pt("Ptr{UInt8}", "const char*") == "Cstring"
-    @test pt("Ptr{UInt8}", "char*") == "Cstring"
-    @test pt("Ptr{UInt8}", "char* const") == "Cstring"
+    @test pt("Ptr{UInt8}", "char*") == "$jm.CharBuffer"
+    @test pt("Ptr{UInt8}", "char* const") == "$jm.CharBuffer"
+    @test pt("Ptr{UInt8}", "const char* const") == "Cstring"
     @test pt("Cstring", "const char*") == "Cstring"
     @test pt("Ptr{UInt8}", "const unsigned char*") == "Ptr{UInt8}"
     @test pt("Ptr{UInt8}", "uint8_t*") == "Ptr{UInt8}"

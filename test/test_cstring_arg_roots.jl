@@ -45,6 +45,23 @@ function variadic(message::Any, va_1::Integer)::Cint
     message_c = $(_CAR_CONV)
     return @ccall "libnowhere".lj_failf(message_c::Ptr{UInt8}; va_1::Cint)::Cint
 end"""))
+# A `char*` that is not `const` (2026-11-23): a buffer, where a string is
+# refused. The wrapper keeps an integer beside it, as `cs_copy`'s `cap`.
+const _CAR_BUF = _CAR_W._cstring_param_arg("dst", "char*", "Ptr{UInt8}")
+Core.eval(_CAR_MOD, Meta.parse("""
+function writes(dst::Any, cap::Integer)::Cvoid
+    dst_c = $(_CAR_BUF)
+    cap_c = Csize_t(cap)
+    return ccall((:lj_fill, "libnowhere"), Cvoid, (Ptr{UInt8}, Csize_t), dst_c, cap_c)
+end"""))
+# The same call shape with the `const char*` conversion: what a `Vector`
+# costs there already, the baseline the buffer may not exceed.
+Core.eval(_CAR_MOD, Meta.parse("""
+function writes_before(dst::Any, cap::Integer)::Cvoid
+    dst_c = $(_CAR_CONV)
+    cap_c = Csize_t(cap)
+    return ccall((:lj_fill, "libnowhere"), Cvoid, (Ptr{UInt8}, Csize_t), dst_c, cap_c)
+end"""))
 # What a wrapper was before the conversion existed.
 Core.eval(_CAR_MOD, :(bare(message::Any)::Cvoid =
     ccall((:lj_fail, "libnowhere"), Cvoid, (Ptr{UInt8},), message)))
@@ -103,6 +120,22 @@ _car_frame(f, T) = occursin("gcframe", _car_ir(f, T))
         # Pointers and C strings never had one.
         @test !_car_frame(_CAR_MOD.plain, (Ptr{UInt8},))
         @test !_car_frame(_CAR_MOD.plain, (Cstring,))
+    end
+
+    @testset "a char* that is not const gives a pointer, a buffer or an integer nothing new to hold" begin
+        @test _CAR_BUF == "RepliBuild.JITManager.char_buffer_arg(dst)"
+        @test !_car_frame(_CAR_MOD.writes, (Ptr{UInt8}, Int))
+        @test !_car_frame(_CAR_MOD.writes, (Ptr{Cvoid}, Int32))
+        # A `Vector`'s memory is rooted across any `ccall` by Base; the buffer
+        # conversion adds nothing to that.
+        @test _car_frame(_CAR_MOD.writes, (Vector{UInt8}, Int)) == _car_frame(_CAR_MOD.writes_before, (Vector{UInt8}, Int))
+        # A string never reaches the call: the refusal is a call, out of line,
+        # and nothing after it runs.
+        ir = _car_ir(_CAR_MOD.writes, (String, Int))
+        @test occursin("char_buffer_arg", ir) || occursin("_refuse_string_at_char_buffer", ir)
+        @test occursin("unreachable", ir) && !occursin("lj_fill", ir)
+        @test !_car_frame(_CAR_MOD.writes, (String, Int))
+        @test !occursin("gc_pool_alloc", ir) && !occursin("gc_small_alloc", ir) && !occursin("jl_alloc", ir)
     end
 
     @testset "the refusal is a call, not inlined code" begin

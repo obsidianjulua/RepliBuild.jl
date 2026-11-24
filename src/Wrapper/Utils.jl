@@ -2367,6 +2367,23 @@ function _points_to_plain_char(c_type::AbstractString)::Bool
 end
 
 """
+    _points_to_writable_char(c_type) -> Bool
+
+A pointer to plain `char` (`_points_to_plain_char`) whose pointee is not
+`const`: `char *`, `volatile char *`, never `const char *` or `char const *`.
+The function may write through it, so a Julia string is refused there
+(`JITManager.char_buffer_arg`, Tier 2's `CharBuffer`). Read off the spelling
+before the last `*`, since `FunctionGen._strip_top_cv` drops a leading `const`.
+"""
+function _points_to_writable_char(c_type::AbstractString)::Bool
+    _points_to_plain_char(c_type) || return false
+    t = strip(c_type)
+    i = findlast('*', t)
+    i === nothing && return false
+    return !occursin(r"\bconst\b", t[1:prevind(t, i)])
+end
+
+"""
     _cstring_param_arg(name, c_type, ccall_type) -> Union{String,Nothing}
 
 The expression a `ccall` path binds a parameter's argument to before the call,
@@ -2375,13 +2392,17 @@ for a pointer to plain `char` (`_points_to_plain_char`) whose ccall type is a
 byte pointer, so a string there has Julia's `Cstring` semantics (a `SubString`
 copied and NUL-terminated, an embedded NUL refused) while a `Ptr`, a `Ref`, a
 byte vector pass as before. The ccall type stays the byte pointer: as `Cstring`
-it would refuse those. GeneratorC, GeneratorCpp's `ccall` path and the
-`[wrap.varargs]` fixed parameters all ask this.
+it would refuse those. A pointer whose `char` is not `const`
+(`_points_to_writable_char`) is a buffer the function may write into, and binds
+`RepliBuild.JITManager.char_buffer_arg(name)` instead, which refuses a Julia
+string and passes the rest as `cstring_arg` does. GeneratorC, GeneratorCpp's
+`ccall` path and the `[wrap.varargs]` fixed parameters all ask this.
 """
 function _cstring_param_arg(name::AbstractString, c_type::AbstractString,
                             ccall_type::AbstractString)::Union{String,Nothing}
     ccall_type in ("Ptr{UInt8}", "Ptr{Int8}", "Ptr{Cchar}", "Cstring") || return nothing
     _points_to_plain_char(c_type) || return nothing
+    _points_to_writable_char(c_type) && return "RepliBuild.JITManager.char_buffer_arg($name)"
     return "RepliBuild.JITManager.cstring_arg($name)"
 end
 

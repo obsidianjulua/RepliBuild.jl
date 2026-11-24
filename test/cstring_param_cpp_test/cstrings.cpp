@@ -33,3 +33,14 @@ const signed char *thunk_sbytes(int which) {
     return g_sbytes;
 }
 const char *cpp_greet() noexcept { return "hello"; }
+
+// A `char*` that is not `const`: written into. On the ccall path and on
+// Tier 2 a Julia string is refused there, a byte buffer is written.
+void cpp_upcase(char *s) noexcept {
+    for (; *s; s++)
+        if (*s >= 'a' && *s <= 'z') *s = static_cast<char>(*s - 'a' + 'A');
+}
+void thunk_upcase(char *s) {
+    if (!s) throw std::invalid_argument("thunk_upcase: null");
+    cpp_upcase(s);
+}

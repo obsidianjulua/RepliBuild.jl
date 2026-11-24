@@ -196,7 +196,9 @@ position, `this` included:
     (`FunctionGen._stl_by_value`): `ByValue{NTuple{N, UInt8}}`, the bytes the
     wrapper returns one as;
   * a function pointer: `Ptr{Code}`;
-  * a pointer to plain `char`: `Cstring`. Any other byte pointer (`unsigned
+  * a pointer to plain `char`: `Cstring`, or `CharBuffer` when the `char` is
+    not `const` (`_points_to_writable_char`: the function may write into it,
+    so a Julia string is refused there). Any other byte pointer (`unsigned
     char*`, `int8_t*`) and a reference to a `char` are data: `Ptr{UInt8}`,
     `Ptr{Int8}`;
   * `void*`, and a pointer to a scalar Julia has no type for (`long double&`,
@@ -212,6 +214,10 @@ function _pointer_arg_type(ctype::AbstractString, c_type::AbstractString; resolv
     c = String(strip(c_type))
     FG._stl_by_value(c) &&
         return "$jm.ByValue{NTuple{$(get_stl_container_size(FG._strip_top_cv(c))), UInt8}}"
+    # A `char*` whose `char` is not `const` may be written: a buffer, never a
+    # Julia string (`JITManager.CharBuffer`).
+    _points_to_writable_char(c) && (ctype == "Cstring" || occursin(r"^(?:Ptr|Ref)\{(?:UInt8|Int8|Cchar)\}$", ctype)) &&
+        return "$jm.CharBuffer"
     ctype == "Cstring" && return "Cstring"
     m = match(r"^(?:Ptr|Ref)\{(.+)\}$", ctype)
     m === nothing && return nothing
