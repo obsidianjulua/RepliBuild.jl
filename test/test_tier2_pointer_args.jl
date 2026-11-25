@@ -423,7 +423,9 @@ end
         # parameter's placeholder); the by-value position does not take it.
         @test occursin(r"^(?:mutable )?struct shared_ptr_Rec\b"m, code)
         @test sig("spval") == ["function spval(p::Any)"]
-        @test sig("spref") == ["function spref(p::Ref{shared_ptr_Rec})"]    # a reference keeps its type
+        # A reference keeps its type, and also takes a `Ref` of the bytes the
+        # by-value position takes (2026-11-24, test_placeholder_references.jl).
+        @test sig("spref") == ["function spref(p::Union{Ref{shared_ptr_Rec}, Base.RefValue{NTuple{16, UInt8}}})"]
     end
 
     @testset "the prediction is in step with the loop" begin

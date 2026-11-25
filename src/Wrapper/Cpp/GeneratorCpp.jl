@@ -174,7 +174,7 @@ function _tier2_invoke_args(names, ctypes, needs_conversion, enum_base,
 end
 
 """
-    _by_address_ctype(ctype, c_type; object_address) -> String
+    _by_address_ctype(ctype, c_type; object_address, value_ref_bytes) -> String
 
 The ccall type a parameter's SIGNATURE is spelled from. A container C++ takes
 by value and the thunk takes by address (`FunctionGen._stl_by_value`) is
@@ -184,12 +184,47 @@ all pass (`_pointer_arg_type`). So is any other record the thunk takes by the
 address of the caller's object (`object_address`, from
 `FunctionGen.takes_object_address`: a `std::function` by value): spelled by
 its own name, the position took only a value of the empty placeholder struct
-that name is bound to, which is nothing a pointer conversion accepts. Any
-other parameter keeps `ctype`. The function loop and the overload prediction
-both spell a position through this.
+that name is bound to, which is nothing a pointer conversion accepts. A
+reference to a smart pointer (`value_ref_bytes`, from `_value_ref_bytes`) is
+its typed pointer or a `Ref` of the bytes one is returned as. Any other
+parameter keeps `ctype`. The function loop and the overload prediction both
+spell a position through this.
 """
-_by_address_ctype(ctype::AbstractString, c_type::AbstractString; object_address::Bool = false) =
-    (object_address || JLCSIRGenerator.FunctionGen._stl_by_value(c_type)) ? "Ptr{Cvoid}" : String(ctype)
+function _by_address_ctype(ctype::AbstractString, c_type::AbstractString; object_address::Bool = false,
+                           value_ref_bytes::Int = 0)
+    (object_address || JLCSIRGenerator.FunctionGen._stl_by_value(c_type)) && return "Ptr{Cvoid}"
+    # A reference to a container the wrapper returns as its bytes and has only
+    # a placeholder struct for (`_value_ref_bytes`): the typed pointer, or a
+    # `Ref` of exactly those bytes.
+    value_ref_bytes > 0 && return "Union{$(ctype), Base.RefValue{NTuple{$(value_ref_bytes), UInt8}}}"
+    return String(ctype)
+end
+
+"""
+    _value_ref_bytes(ctype, c_type, placeholders, record_abi) -> Int
+
+The size of the bytes whose `Ref` also passes at a parameter, or 0 for a
+parameter that takes no such thing. Nonzero for a REFERENCE (`ctype` is
+`Ref{P}`) to a container the wrapper returns by value as its bytes
+(`FunctionGen.stl_value_bytes`) and has only a placeholder struct for (`P in
+placeholders`, the module's `struct P end`): a `std::shared_ptr`, a
+`std::unique_ptr`.
+
+No value of a placeholder exists, so `Ref{P}` took only a pointer already
+typed `P`. `sp_read(Ref(sp_make(5)))`, the manual's way for a returned
+container, was a `MethodError` (the type matrix, 2026-11-23), where a
+reference to a `std::vector` took it. The position is not `::Any`: an untyped
+pointer is anything, and a `@cfunction` pointer passed for a `std::function`
+would be read as the object.
+"""
+function _value_ref_bytes(ctype::AbstractString, c_type::AbstractString, placeholders, record_abi)::Int
+    m = match(r"^Ref\{([A-Za-z_][A-Za-z0-9_]*)\}$", String(ctype))
+    (m !== nothing && String(m.captures[1]) in placeholders) || return 0
+    FG = JLCSIRGenerator.FunctionGen
+    t = FG._strip_top_cv(String(strip(c_type)))
+    t = endswith(t, "&&") ? chop(t; tail = 2) : endswith(t, "&") ? chop(t) : return 0
+    return FG.stl_value_bytes(FG._strip_top_cv(t), record_abi)
+end
 
 """
     _pointer_arg_type(ctype, c_type; resolves) -> Union{String,Nothing}
@@ -436,7 +471,8 @@ imgui's `GetID(const char*)` beside `(const void*)`, 2026-11-13).
 function _integer_width_overloads(functions, struct_types, ccall_param_type;
                                   concrete = _concrete_ctype, bound = _ -> true,
                                   owners = _ -> String[], is_enum = _ -> false,
-                                  string_param = _ -> false, object_address = _ -> false)
+                                  string_param = _ -> false, object_address = _ -> false,
+                                  value_ref_bytes = (_, _) -> 0)
     groups = Dict{String,Vector{Tuple{String,Vector{String}}}}()
     for func in functions
         get(func, "is_vararg", false) == true && continue
@@ -453,10 +489,10 @@ function _integer_width_overloads(functions, struct_types, ccall_param_type;
                   (_cpp_this_param(class_name, func_name, struct_types) !== nothing || hop === true)
         # A container taken by value crosses by address and is spelled as a
         # pointer, here as in the loop (`_by_address_ctype`).
-        ctypes = String[_by_address_ctype(ccall_param_type(String(get(p, "julia_type", "Any")),
-                                                           String(get(p, "c_type", ""))),
-                                          String(get(p, "c_type", ""));
-                                          object_address = object_address(String(get(p, "c_type", ""))))
+        ctypes = String[(ct = ccall_param_type(String(get(p, "julia_type", "Any")), String(get(p, "c_type", "")));
+                         _by_address_ctype(ct, String(get(p, "c_type", ""));
+                                           object_address = object_address(String(get(p, "c_type", ""))),
+                                           value_ref_bytes = value_ref_bytes(ct, String(get(p, "c_type", "")))))
                         for p in raw]
         # A `std::string` parameter the wrapper builds from a Julia string
         # (`_string_param_plan`) is spelled `_STD_STRING_PARAM` here as in the
@@ -2044,6 +2080,10 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # reports zero types (hello_world): function signatures still gate
     # parameter annotations on this set.
     defined_struct_names = Set{String}()
+    # The structs declared with no field and never given one: a class only
+    # declared, a smart pointer, a `std::function`. No value of one exists
+    # (`_value_ref_bytes`).
+    placeholder_struct_names = Set{String}()
 
     # Emit forward declarations for:
     # 1. Truly opaque types (no DWARF definition) — as mutable struct
@@ -2106,6 +2146,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # Both opaque types and pointer-referenced types should be immutable structs
             # to preserve inline C++ ABI layout (0-byte empty structs) if they are used by value.
             push!(struct_chunks, "struct $s_name end\n")
+            push!(placeholder_struct_names, s_name)
         end
         push!(struct_chunks, "\n")
     end
@@ -4044,7 +4085,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         struct_types, _ccall_param_type;
         bound = _sig_type_bound, owners = _sig_owners, is_enum = _sig_is_enum,
         string_param = c -> _string_param_plan(c, record_abi) isa Tuple,
-        object_address = c -> JLCSIRGenerator.FunctionGen.takes_object_address(c, dwarf_structs, record_abi))
+        object_address = c -> JLCSIRGenerator.FunctionGen.takes_object_address(c, dwarf_structs, record_abi),
+        value_ref_bytes = (ct, c) -> _value_ref_bytes(ct, c, placeholder_struct_names, record_abi))
 
     # What a pointer or reference return may be typed with (`_typed_pointer_return`).
     typed_return_names = _typed_return_names(join(struct_chunks))
@@ -4264,6 +4306,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         string_plans = Any[]          # per parameter: nothing, a plan Tuple, or a reason String
         pointer_types = Union{Nothing,String}[]   # per parameter: what `pointer_arg` is told (`_pointer_arg_type`)
         cstring_args = Union{Nothing,String}[]    # per parameter: the `ccall` path's string conversion (`_cstring_param_arg`)
+        value_ref_params = Bool[]                 # per parameter: also takes a `Ref` of a value's bytes (`_value_ref_bytes`)
 
         for (i, param) in enumerate(params)
             # Sanitize parameter name (e.g., avoid 'end', 'function' keywords)
@@ -4297,7 +4340,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # object's address (`takes_object_address`).
             object_address = JLCSIRGenerator.FunctionGen.takes_object_address(
                 String(get(param, "c_type", "")), dwarf_structs, record_abi)
-            sig_c_type = _by_address_ctype(actual_c_type, String(get(param, "c_type", "")); object_address)
+            # A reference to a smart pointer also takes a `Ref` of the bytes
+            # one is returned as (`_value_ref_bytes`).
+            value_ref_bytes = _value_ref_bytes(actual_c_type, String(get(param, "c_type", "")),
+                                               placeholder_struct_names, record_abi)
+            push!(value_ref_params, value_ref_bytes > 0)
+            sig_c_type = _by_address_ctype(actual_c_type, String(get(param, "c_type", ""));
+                                           object_address, value_ref_bytes)
             push!(julia_param_types,
                   splan isa Tuple ? _STD_STRING_PARAM :
                   strict ? _strict_param_spelling(sig_c_type; bound = _sig_type_bound,
@@ -4791,10 +4840,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         ccall_args = join(ccall_param_names, ", ")
 
         # ccall needs tuple expression (Type1, Type2) not Tuple{Type1, Type2}
+        # A position that also takes a `Ref` of a value's bytes
+        # (`value_ref_params`) is an address of either: the signature admits
+        # only the typed pointer and that `Ref`.
         ccall_types = if isempty(param_types)
             "()"
         else
-            "($(join(param_types, ", ")),)"  # Note: trailing comma for single-element tuples
+            "($(join((value_ref_params[i] ? "Ptr{Cvoid}" : pt for (i, pt) in enumerate(param_types)), ", ")),)"  # Note: trailing comma for single-element tuples
         end
 
         # llvmcall needs Tuple{Type1, Type2} — built from raw param_types (no trailing comma)

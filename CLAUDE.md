@@ -1339,7 +1339,34 @@ the test named when you touch the area.
   this way never gets the `_safe`/`Managed` wrapper (`newly_typed_return`), since
   `GetIO()` returns memory the context owns. A handle that appears only in returns
   has no `struct T end` (forward declarations come from parameters) and stays
-  `Ptr{Cvoid}`. (`test_typed_pointer_returns.jl`.)
+  `Ptr{Cvoid}`. A function pointer is the type's own `(`, read outside the
+  template arguments (2026-11-24): read over the whole spelling, a
+  `const std::function<int (int)>*` return stayed `Ptr{Cvoid}` and did not
+  pass where a `const std::function&` is taken.
+  (`test_typed_pointer_returns.jl`, `test_placeholder_references.jl`.)
+- **A reference to a smart pointer also takes a `Ref` of the bytes one is
+  returned as** (2026-11-24, `_value_ref_bytes`, spelled by
+  `_by_address_ctype` in the loop and in `_integer_width_overloads`'
+  prediction). A `std::shared_ptr` or `std::unique_ptr` is a placeholder
+  (`struct shared_ptr_Node end`, in `placeholder_struct_names`) with no value,
+  and returned by value it is its bytes. A reference parameter typed
+  `Ref{shared_ptr_Node}` took only a pointer already typed that way, so
+  `sp_read(Ref(sp_make(5)))`, the manual's way for a returned container, was a
+  `MethodError`. The position is now `Union{Ref{P}, Base.RefValue{NTuple{N,
+  UInt8}}}`, `N` from `stl_value_bytes`, the size the by-value return has; on
+  the plain-call path its `ccall` type is `Ptr{Cvoid}`, which only those two
+  reach.
+  - **Never `::Any` there.** That was tried first: any `Ptr` then passes
+    (`pointer_arg`'s rule for a pointer position), and a `@cfunction` pointer
+    given where a `const std::function&` is taken was read as the object and
+    the process died. An untyped pointer is anything; a reference to a
+    placeholder takes a typed pointer, or bytes of the one size.
+  - A reference to any other placeholder (a `std::function`, a stream, a
+    class only declared) is `Ref{P}` as before. A `std::ostringstream*` at a
+    `std::ostream&` still needs the pointer converted by hand.
+
+  (`test_placeholder_references.jl`, devtests
+  `test_placeholder_references_live.jl`.)
 - **The library populates the wrapper's namespace.** Generated diagnostics must call
   `Base.error(...)` (enforced by `_assert_base_calls_qualified`), and helpers must
   qualify `Base.get`/`Base.string`/…. `ccall` is syntax: `Base.ccall` is an
@@ -2995,8 +3022,10 @@ libraries (libstdc++, Linux x86-64, thunks compiled at load); every case is in
 invariants above (`test_template_arg_records.jl`): `std::vector<bool>`
 returned by value was sized as a `std::vector<T>` and overran its buffer, and
 `std::unique_ptr<T[]>` came back in a register where C++ uses a hidden
-pointer. The matrix was measured again on 2026-11-24 and no case kills the
-process. Still open:
+pointer. Fixed 2026-11-24 (`test_placeholder_references.jl`): a reference to
+a smart pointer refused `Ref` of the bytes one is returned as, and a
+`std::function*` return was untyped. The matrix was measured again that day
+and no case kills the process. Still open:
 
 - **A by-value return is built in the caller's buffer and then moved.**
   `slot_value` copies the bytes into a Julia value, and `Ref(r)` or a
@@ -3010,16 +3039,14 @@ process. Still open:
   never ended: nothing runs a destructor on the bytes, and a by-value pass
   lends where C++ moves. What owns such an object on the Julia side is John's
   call, the same one as for a move-only parameter above.
-- **A reference to a smart pointer, `std::function`, `std::variant`,
-  `std::atomic`, `std::mutex` or a stream is typed `Ref{<empty struct>}`**,
-  where a reference to a container is `::Any`. So `Ref` of the bytes a smart
-  pointer was returned as, the manual's way for a returned container, is a
-  `MethodError`, and so is a `std::function*` the library returned (it comes
-  back `Ptr{Cvoid}`) where a `const std::function&` is taken: both need a
-  pointer of the declared type made by hand. For `std::variant` and
-  `std::istream` nothing makes a value to pass, which the coverage tool
-  counts as bound. Nothing makes a `std::function` either: by value it takes
-  a pointer to one the library owns (2026-11-23).
+- **Nothing makes a `std::function`, a `std::variant` or a stream.** A
+  reference to one is typed `Ref{<empty struct>}` and takes a typed pointer
+  the library returned: a `std::function` it owns passes by value and by
+  reference. For `std::variant` and `std::istream` no function returns one,
+  which the coverage tool counts as bound, and a `std::ostringstream*` at a
+  `std::ostream&` needs the pointer converted by hand. (A reference to a
+  smart pointer takes `Ref` of its bytes, and a `std::function*` return is
+  typed, since 2026-11-24: the Generators invariants.)
 - **`create_std_basic_string_char()` is zeroed memory** (its method table has
   no constructor), so `String(s)` on a new one is an error; and
   **`create_std_map_std_string_int()` is a `CppMap{Ptr{Cvoid}, Cint}`**, so a

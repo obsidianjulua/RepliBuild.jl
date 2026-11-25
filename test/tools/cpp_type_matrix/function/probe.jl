@@ -36,9 +36,11 @@ case(F, "pass by reference") do
     p = M.fn_twice()
     works((M.fn_apply_ref(p, 3), M.fn_empty(p)), (6, 0), "the pointer as the library returned it")
 end
-case(F, "pass by reference") do
-    p = Ptr{M.function_int_int}(M.fn_twice())
-    works((M.fn_apply_ref(p, 3), M.fn_empty(p)), (6, 0), "the pointer converted by hand: Ptr{function_int_int}(p)")
+case(F, "takes an untyped pointer") do
+    # Only a pointer typed as the library returned it: an untyped one is anything.
+    takes(6, "a Ptr{Cvoid} to one the library owns") do
+        M.fn_apply_ref(Ptr{Cvoid}(M.fn_twice()), 3)
+    end
 end
 case(F, "return by value") do
     r = M.fn_adder(2)
