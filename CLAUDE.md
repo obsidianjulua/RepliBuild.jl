@@ -2991,7 +2991,12 @@ struct. Still open:
 
 Found by `test/tools/cpp_type_matrix.jl` on 22 standard-library probe
 libraries (libstdc++, Linux x86-64, thunks compiled at load); every case is in
-`docs/updates/CPP_TYPE_MATRIX.md`. All open:
+`docs/updates/CPP_TYPE_MATRIX.md`. Fixed the same day, with the rules in the
+invariants above (`test_template_arg_records.jl`): `std::vector<bool>`
+returned by value was sized as a `std::vector<T>` and overran its buffer, and
+`std::unique_ptr<T[]>` came back in a register where C++ uses a hidden
+pointer. The matrix was measured again on 2026-11-24 and no case kills the
+process. Still open:
 
 - **A by-value return is built in the caller's buffer and then moved.**
   `slot_value` copies the bytes into a Julia value, and `Ref(r)` or a
@@ -3005,26 +3010,24 @@ libraries (libstdc++, Linux x86-64, thunks compiled at load); every case is in
   never ended: nothing runs a destructor on the bytes, and a by-value pass
   lends where C++ moves. What owns such an object on the Julia side is John's
   call, the same one as for a move-only parameter above.
-- **`std::vector<bool>` by value is sized as `std::vector<T>`**:
-  `stl_container_size` answers 24 for any `vector<` spelling, and it is 40
-  bytes on libstdc++. The callee writes past the return buffer, and the next
-  call that reads the value dies.
-- **`std::unique_ptr<T[]>` returned by value gets no hidden return pointer**:
-  the wrapper calls it as returning 8 bytes in a register. Its `[]` spelling
-  has no `record_abi` entry, where `unique_ptr<T>` has one and is right.
 - **A reference to a smart pointer, `std::function`, `std::variant`,
   `std::atomic`, `std::mutex` or a stream is typed `Ref{<empty struct>}`**,
   where a reference to a container is `::Any`. So `Ref` of the bytes a smart
   pointer was returned as, the manual's way for a returned container, is a
-  `MethodError`; and for `std::function`, `std::variant` and `std::istream`
-  nothing makes a value to pass, which the coverage tool counts as bound.
+  `MethodError`, and so is a `std::function*` the library returned (it comes
+  back `Ptr{Cvoid}`) where a `const std::function&` is taken: both need a
+  pointer of the declared type made by hand. For `std::variant` and
+  `std::istream` nothing makes a value to pass, which the coverage tool
+  counts as bound. Nothing makes a `std::function` either: by value it takes
+  a pointer to one the library owns (2026-11-23).
 - **`create_std_basic_string_char()` is zeroed memory** (its method table has
   no constructor), so `String(s)` on a new one is an error; and
   **`create_std_map_std_string_int()` is a `CppMap{Ptr{Cvoid}, Cint}`**, so a
   `String` key is a `MethodError`.
 - **The refusal for a toolchain record with no layout advises
   `-fstandalone-debug`** when the library is already built with it
-  (`std::function`, `std::variant`, a fixed-extent `std::span`).
+  (`std::function` returned by value, `std::variant`, a fixed-extent
+  `std::span`).
 
 ## Not Yet Built (roadmap, not bugs)
 

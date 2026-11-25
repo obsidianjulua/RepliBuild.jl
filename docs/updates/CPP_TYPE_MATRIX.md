@@ -16,13 +16,15 @@ Everything from "The measurement" on is the tool's output, unedited.
 
 ## What it shows
 
-Measured 2026-11-23, RepliBuild 4.6.0, Julia 1.13, Linux x86-64, clang 23 with
-libstdc++ 16, thunks compiled at load. Not measured: thunks compiled ahead of
-time, libc++, AArch64, Windows.
+Measured 2026-11-24 on main after the fixes of 2026-11-23 (RepliBuild 4.6.0
+plus unreleased changes), Julia 1.13, Linux x86-64, clang 23 with libstdc++ 16,
+thunks compiled at load. Not measured: thunks compiled ahead of time, libc++,
+AArch64, Windows. First measured 2026-11-23; what that measurement found and
+has since been fixed is at the end of this section.
 
-The coverage tool reads these wrappers as 96.34% bound: 158 of 164 functions, 6 refused.
-That counts a function whose thunk the wrapper invokes. The matrix asks what a
-user can do with it.
+The coverage tool reads these wrappers as 96.97% bound: 160 of 165 functions,
+5 refused. That counts a function whose thunk the wrapper invokes. The matrix
+asks what a user can do with it.
 
 ### Works with a Julia value
 
@@ -63,7 +65,8 @@ reference.
 Everything that owns memory and comes back by value: every container, the
 smart pointers, `std::optional`, `std::any`, `std::filesystem::path`, wide
 strings. Where the value does not point into itself (the next section), the
-library reads the bytes back right. From Julia:
+library reads the bytes back right. A `std::function` the library owns is a
+handle too, a pointer: it passes where C++ takes one by value. From Julia:
 
 - **nothing reads what is inside** (a vector's elements, an optional's value);
 - **nothing ends it**: of two `unique_ptr`s returned and dropped, both objects
@@ -80,38 +83,47 @@ library reads the bytes back right. From Julia:
   `std::pair`, a `std::optional` or a `std::filesystem::path` it is not, and
   neither are `std::wstring` and `std::u16string`. Lookups happened to work;
   a map's last key read as 0 where it is 3; a walk of the list would not end.
-- **`std::vector<bool>` returned by value kills the process.** The wrapper
-  gives it the 24 bytes of a `std::vector<T>`; it is 40. The library writes
-  16 bytes past the buffer, Julia gets a value cut short, and the next call
-  that reads it dies.
-- **`std::unique_ptr<T[]>` returned by value is called wrong**: as a return
-  in a register, with no hidden return pointer. Over five runs it killed the
-  process twice and threw `std::bad_alloc` three times, by what the registers
-  held: the one cell of the table that moves between runs.
-  `std::unique_ptr<T>` is called right.
 
 ### Bound, and nothing to pass
 
-- **`std::function`, `std::variant` and `std::istream` by reference.** The
-  parameter is a `Ref` to an empty struct and nothing makes one. Seven
-  functions the coverage tool counts as bound.
-- **A smart pointer by reference refuses the bytes it was returned as.**
-  `sp_read(Ref(sp_make(5)))`, the manual's way for a returned container, is a
-  `MethodError`; a pointer of the declared type made by hand works.
+- **`std::variant` and `std::istream` by reference.** The parameter is a `Ref`
+  to an empty struct and nothing makes one. Three functions the coverage tool
+  counts as bound.
+- **A reference to a smart pointer or to a `std::function` refuses what the
+  library returned.** `sp_read(Ref(sp_make(5)))`, the manual's way for a
+  returned container, is a `MethodError`, and so is a `std::function*` the
+  library returned, passed where a `const std::function&` is taken. A pointer
+  of the declared type made by hand works for both.
 - **A `std::ostream&` does not take a `std::ostringstream*`** until the pointer
   is converted by hand.
+- **Nothing makes a `std::function`.** A Julia function and a `@cfunction` are
+  not taken, by value or by reference.
 
 ### Refused
 
-`std::function`, `std::variant` and a fixed-extent `std::span` by value. The
-refusal is correct. Its advice is not: it names `-fstandalone-debug`, which
-these libraries are built with.
+`std::function` returned by value, and `std::variant` and a fixed-extent
+`std::span` by value. The refusal is correct. Its advice is not: it names
+`-fstandalone-debug`, which these libraries are built with.
 
 ### Exceptions
 
 A `std::runtime_error`, a `std::out_of_range`, a class derived from
 `std::exception` and a thrown `int` each arrive as a Julia `CxxException`, the
 first three with the C++ message, and the next call works.
+
+### Fixed since the first measurement
+
+Found on 2026-11-23 and fixed the same day; a library needs a rebuild to pick
+them up.
+
+- **`std::vector<bool>` returned by value killed the process.** The wrapper
+  gave it the 24 bytes of a `std::vector<T>`; it is 40. The size now comes
+  from the DWARF.
+- **`std::unique_ptr<T[]>` returned by value was called as a return in a
+  register**, with no hidden return pointer: it killed the process or threw
+  `std::bad_alloc`. It is now built in the caller's buffer.
+- **`std::function` by value was refused.** It takes a pointer to one, and
+  refuses anything else before any C++ runs.
 
 ### Seen in passing
 
@@ -125,9 +137,9 @@ first three with the C++ message, and the next call works.
 
 ## The measurement
 
-Measured 2026-11-23 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_type_matrix.jl`, on x86_64-linux-gnu. Probe libraries compiled with `-std=c++20 -O1 -fPIC -fstandalone-debug`; thunks compiled when the wrapper loads.
+Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_type_matrix.jl`, on x86_64-linux-gnu. Probe libraries compiled with `-std=c++20 -O1 -fPIC -fstandalone-debug`; thunks compiled when the wrapper loads.
 
-188 cases: 94 works, 28 opaque, 18 not taken, 6 refused, 25 no way, 10 wrong, 5 error, 2 crash.
+191 cases: 96 works, 31 opaque, 19 not taken, 5 refused, 24 no way, 10 wrong, 6 error.
 
 | Type | make | pass by value | pass by reference | return by value | return by reference | other |
 |:--|:--|:--|:--|:--|:--|:--|
@@ -146,7 +158,7 @@ Measured 2026-11-23 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | `a class derived from std::exception` |  |  |  |  |  | thrown: WORKS |
 | `int (not a std::exception)` |  |  |  |  |  | thrown: WORKS |
 | `std::error_code` | NO WAY | WORKS |  | WORKS |  |  |
-| `std::function<int(int)>` | NO WAY | REFUSED | NO WAY | REFUSED |  | takes a Julia function: NOT TAKEN; takes a @cfunction: NOT TAKEN |
+| `std::function<int(int)>` | NO WAY | WORKS | ERROR, WORKS | REFUSED | OPAQUE | takes a Julia function: NOT TAKEN; takes a @cfunction: NOT TAKEN |
 | `std::function<void(int)>` |  |  | NOT TAKEN |  |  |  |
 | `std::function<double(double, double)>` |  |  | NOT TAKEN |  |  |  |
 | `int (*)(int) (a plain function pointer)` | WORKS |  |  |  |  | takes a Julia function: NOT TAKEN |
@@ -179,7 +191,7 @@ Measured 2026-11-23 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | `std::string_view` | WORKS | WORKS | WORKS | WORKS |  | takes a Julia String: NOT TAKEN |
 | `std::unique_ptr<UNode>` | NO WAY | WORKS | ERROR, WORKS | OPAQUE |  |  |
 | `std::unique_ptr<UCounted> (counts live objects)` |  |  |  |  |  | ended by Julia: NO WAY; ended by a by-value pass: NO WAY |
-| `std::unique_ptr<int[]>` |  |  |  | CRASH |  |  |
+| `std::unique_ptr<int[]>` |  |  |  | OPAQUE |  |  |
 | `std::variant<int, double>` | NO WAY | REFUSED | NO WAY | REFUSED |  |  |
 | `std::variant<int, std::string>` |  |  | NO WAY | REFUSED |  |  |
 | `std::vector<int>` | WORKS | WORKS | WORKS | OPAQUE |  | takes a Julia Vector: NOT TAKEN |
@@ -187,7 +199,7 @@ Measured 2026-11-23 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | `std::vector<P2> (a library struct)` | WORKS |  |  | OPAQUE |  |  |
 | `std::vector<std::string>` | NO WAY |  |  | OPAQUE |  |  |
 | `std::vector<std::vector<int>>` | NO WAY |  |  | OPAQUE |  |  |
-| `std::vector<bool>` | NO WAY |  |  | CRASH |  |  |
+| `std::vector<bool>` | NO WAY |  |  | OPAQUE |  |  |
 | `std::wstring` | NO WAY |  | WORKS | OPAQUE |  | takes a Julia String: NOT TAKEN; intact after the return: WRONG |
 | `std::u16string` |  |  |  | OPAQUE |  | intact after the return: WRONG |
 | `std::u8string` |  |  |  | NO WAY |  |  |
@@ -271,12 +283,15 @@ Measured 2026-11-23 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 ### function
 
 - `std::function<int(int)>`, make: **NO WAY** — no create function in the wrapper; `M.function_int_int()` is an empty struct, and nothing turns a Julia function or a @cfunction into a std::function
-- `std::function<int(int)>`, takes a Julia function: **NOT TAKEN** — a Julia function: no method fn_apply_ref(::typeof(twice), ::Int64)
+- `std::function<int(int)>`, takes a Julia function: **NOT TAKEN** — a Julia function, by reference: no method fn_apply_ref(::typeof(twice), ::Int64)
+- `std::function<int(int)>`, takes a Julia function: **NOT TAKEN** — a Julia function, by value: no method pointer_arg(::DataType, ::typeof(twice))
 - `std::function<int(int)>`, takes a @cfunction: **NOT TAKEN** — a @cfunction pointer: no method fn_apply_ref(::Ptr{Nothing}, ::Int64)
-- `std::function<int(int)>`, pass by value: **REFUSED** — cannot call 'fn_apply' (fn_apply(std::function<int (int)>, int)). It takes `function<int (int)>` by value, and that record's layout is not in this library's DWARF, so no …
-- `std::function<int(int)>`, return by value: **REFUSED** — cannot call 'fn_adder' (fn_adder(int)). It returns `function<int (int)>` by value, and that record's layout is not in this library's DWARF, so no call could pass it corre…
-- `std::function<int(int)>`, pass by reference: **NO WAY** — `fn_apply_ref` and `fn_empty` are bound and take a `Ref{function_int_int}`, an empty struct; nothing makes or returns one
-- `std::function<void(int)>`, pass by reference: **NOT TAKEN** — a Julia function: no method fn_each(::var"#36#37", ::Int64)
+- `std::function<int(int)>`, return by reference: **OPAQUE** — one the library owns comes back as a Ptr{Nothing}
+- `std::function<int(int)>`, pass by value: **WORKS** — a pointer to one the library owns, passed twice; no copy is made
+- `std::function<int(int)>`, pass by reference: **ERROR** — MethodError: no method fn_apply_ref(::Ptr{Nothing}, ::Int64)
+- `std::function<int(int)>`, pass by reference: **WORKS** — the pointer converted by hand: Ptr{function_int_int}(p)
+- `std::function<int(int)>`, return by value: **REFUSED** — cannot call 'fn_adder' (fn_adder(int)). It returns `function<int (int)>` by value, which C++ returns through a hidden pointer the thunk does not pass, and that record's l…
+- `std::function<void(int)>`, pass by reference: **NOT TAKEN** — a Julia function: no method fn_each(::var"#48#49", ::Int64)
 - `std::function<double(double, double)>`, pass by reference: **NOT TAKEN** — a Julia function: no method fn_fold(::typeof(+), ::Float64, ::Float64)
 - `int (*)(int) (a plain function pointer)`, make: **WORKS** — @cfunction
 - `int (*)(int) (a plain function pointer)`, takes a Julia function: **NOT TAKEN** — a Julia function: no method pointer_arg(::DataType, ::typeof(twice))
@@ -418,7 +433,7 @@ Measured 2026-11-23 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 - `std::unique_ptr<UNode>`, pass by value: **WORKS** — the bytes
 - `std::unique_ptr<UCounted> (counts live objects)`, ended by Julia: **NO WAY** — nothing ends a unique_ptr returned by value: 2 of 2 objects are still alive after GC, and the wrapper has no function that would delete them
 - `std::unique_ptr<UCounted> (counts live objects)`, ended by a by-value pass: **NO WAY** — the object is still alive after the call: passing the bytes lends the pointer, it does not move it, and nothing ends the object later
-- `std::unique_ptr<int[]>`, return by value: **CRASH** — signal 11
+- `std::unique_ptr<int[]>`, return by value: **OPAQUE** — its bytes, the pointer to the array
 
 ### variant
 
@@ -446,7 +461,7 @@ Measured 2026-11-23 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 - `std::vector<std::vector<int>>`, make: **NO WAY** — no create function in the wrapper; the entry is in [types] templates and gets no constructor
 - `std::vector<std::vector<int>>`, return by value: **OPAQUE** — its bytes
 - `std::vector<bool>`, make: **NO WAY** — no create function in the wrapper; not in [types] templates
-- `std::vector<bool>`, return by value: **CRASH** — signal 11
+- `std::vector<bool>`, return by value: **OPAQUE** — its bytes, a NTuple{40, UInt8}
 
 ### wide_string
 
@@ -473,7 +488,7 @@ Measured 2026-11-23 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | tm_chrono | 6/6 | 100.0 | 0 | 6 | 0 | 0 | 0 |  | 4/0/0/0/0 | 4.6.0 |
 | tm_complex | 5/5 | 100.0 | 0 | 5 | 0 | 0 | 0 |  | 2/0/0/0/0 | 4.6.0 |
 | tm_exception | 8/8 | 100.0 | 0 | 8 | 0 | 0 | 0 |  | 1/1/0/1/0 | 4.6.0 |
-| tm_function | 5/7 | 71.43 | 0 | 5 | 2 | 0 | 0 |  | 0/0/0/3/0 | 4.6.0 |
+| tm_function | 7/8 | 87.5 | 0 | 7 | 1 | 0 | 0 |  | 0/0/0/3/0 | 4.6.0 |
 | tm_initializer_list | 3/3 | 100.0 | 0 | 3 | 0 | 0 | 0 |  | 2/0/0/0/0 | 4.6.0 |
 | tm_map | 15/15 | 100.0 | 0 | 15 | 0 | 0 | 0 |  | 0/0/0/0/0 | 4.6.0 |
 | tm_optional | 8/8 | 100.0 | 0 | 8 | 0 | 0 | 0 |  | 3/3/3/0/0 | 4.6.0 |
@@ -491,30 +506,29 @@ Measured 2026-11-23 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | tm_wide_string | 9/9 | 100.0 | 0 | 9 | 0 | 0 | 0 |  | 0/0/0/0/0 | 4.6.0 |
 
 libraries measured: 22 of 22 rows
-surface (unique mangled, net of exclusions, not-exported and earlier-bound): 164
+surface (unique mangled, net of exclusions, not-exported and earlier-bound): 165
 expected drops (several C++ entry points behind one Julia method, by design): 0
-callable (surface less expected): 164
-bound:   158/164 = 96.34%  (tier 3: 0, tier 2: 158)
-traps:   6   dropped: 0   unexported: 0
+callable (surface less expected): 165
+bound:   160/165 = 96.97%  (tier 3: 0, tier 2: 160)
+traps:   5   dropped: 0   unexported: 0
 pure virtuals (no symbol, called through the vtable): 0 bound of 0 in the surface
 thunks in a manifest nothing invokes: 0   thunks invoked outside the surface (STL members): 0
 types:   fields 30, blobs 5, byte records (unions/bitfields) 4, opaque 18, imported 0, owners (Managed/factory) 1
 
 misses by cause (count, then the first symbols):
-  6  trap: by-value record with no layout
-        per library: tm_variant 3, tm_function 2, tm_span 1
+  5  trap: by-value record with no layout
+        per library: tm_variant 3, tm_span 1, tm_function 1
         tm_function  fn_adder(int)
-        tm_function  fn_apply(std::function<int (int)>, int)
         tm_span  span_fixed(std::span<int const, 3ul>)
         tm_variant  var_make(int)
         tm_variant  var_index(std::variant<int, double>)
         tm_variant  vars_make[abi:cxx11](int)
 
 trapped records (functions each blocks):
-  2  function<int (int)>
   2  variant<int, double>
+  1  function<int (int)>
   1  span<const int, 3UL>
   1  variant<int, std::__cxx11::basic_string<char, std::char_traits<char>,…
 
-cpp coverage: 158/164 (96.34%), traps 6, dropped 0, expected 0
+cpp coverage: 160/165 (96.97%), traps 5, dropped 0, expected 0
 ```
