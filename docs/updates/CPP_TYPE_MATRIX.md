@@ -16,9 +16,9 @@ Everything from "The measurement" on is the tool's output, unedited.
 
 ## What it shows
 
-Measured 2026-11-24 on main after the fixes of 2026-11-23 (RepliBuild 4.6.0
-plus unreleased changes), Julia 1.13, Linux x86-64, clang 23 with libstdc++ 16,
-thunks compiled at load. Not measured: thunks compiled ahead of time, libc++,
+Measured 2026-11-24 with the fixes of 2026-11-23 and 2026-11-24 (RepliBuild
+4.6.0 plus unreleased changes), Julia 1.13, Linux x86-64, clang 23 with
+libstdc++ 16, thunks compiled at load. Not measured: thunks compiled ahead of time, libc++,
 AArch64, Windows. First measured 2026-11-23; what that measurement found and
 has since been fixed is at the end of this section.
 
@@ -89,15 +89,10 @@ handle too, a pointer: it passes where C++ takes one by value. From Julia:
 - **`std::variant` and `std::istream` by reference.** The parameter is a `Ref`
   to an empty struct and nothing makes one. Three functions the coverage tool
   counts as bound.
-- **A reference to a smart pointer or to a `std::function` refuses what the
-  library returned.** `sp_read(Ref(sp_make(5)))`, the manual's way for a
-  returned container, is a `MethodError`, and so is a `std::function*` the
-  library returned, passed where a `const std::function&` is taken. A pointer
-  of the declared type made by hand works for both.
+- **Nothing makes a `std::function`.** A Julia function and a `@cfunction` are
+  not taken, by value or by reference. One the library owns passes both ways.
 - **A `std::ostream&` does not take a `std::ostringstream*`** until the pointer
   is converted by hand.
-- **Nothing makes a `std::function`.** A Julia function and a `@cfunction` are
-  not taken, by value or by reference.
 
 ### Refused
 
@@ -113,8 +108,7 @@ first three with the C++ message, and the next call works.
 
 ### Fixed since the first measurement
 
-Found on 2026-11-23 and fixed the same day; a library needs a rebuild to pick
-them up.
+Found on 2026-11-23. The first three reach a library when it is rebuilt.
 
 - **`std::vector<bool>` returned by value killed the process.** The wrapper
   gave it the 24 bytes of a `std::vector<T>`; it is 40. The size now comes
@@ -124,6 +118,11 @@ them up.
   `std::bad_alloc`. It is now built in the caller's buffer.
 - **`std::function` by value was refused.** It takes a pointer to one, and
   refuses anything else before any C++ runs.
+- **A reference to a smart pointer refused the bytes one is returned as**
+  (`sp_read(Ref(sp_make(5)))`, the manual's way for a returned container),
+  and a `std::function*` the library returned came back untyped and was
+  refused where a `const std::function&` is taken. Both pass since
+  2026-11-24, with no rebuild.
 
 ### Seen in passing
 
@@ -139,7 +138,7 @@ them up.
 
 Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_type_matrix.jl`, on x86_64-linux-gnu. Probe libraries compiled with `-std=c++20 -O1 -fPIC -fstandalone-debug`; thunks compiled when the wrapper loads.
 
-191 cases: 96 works, 31 opaque, 19 not taken, 5 refused, 24 no way, 10 wrong, 6 error.
+191 cases: 98 works, 31 opaque, 20 not taken, 5 refused, 24 no way, 10 wrong, 3 error.
 
 | Type | make | pass by value | pass by reference | return by value | return by reference | other |
 |:--|:--|:--|:--|:--|:--|:--|
@@ -158,7 +157,7 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | `a class derived from std::exception` |  |  |  |  |  | thrown: WORKS |
 | `int (not a std::exception)` |  |  |  |  |  | thrown: WORKS |
 | `std::error_code` | NO WAY | WORKS |  | WORKS |  |  |
-| `std::function<int(int)>` | NO WAY | WORKS | ERROR, WORKS | REFUSED | OPAQUE | takes a Julia function: NOT TAKEN; takes a @cfunction: NOT TAKEN |
+| `std::function<int(int)>` | NO WAY | WORKS | WORKS | REFUSED | OPAQUE | takes a Julia function: NOT TAKEN; takes a @cfunction: NOT TAKEN; takes an untyped pointer: NOT TAKEN |
 | `std::function<void(int)>` |  |  | NOT TAKEN |  |  |  |
 | `std::function<double(double, double)>` |  |  | NOT TAKEN |  |  |  |
 | `int (*)(int) (a plain function pointer)` | WORKS |  |  |  |  | takes a Julia function: NOT TAKEN |
@@ -178,7 +177,7 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | `std::deque<int>` | NO WAY |  |  | OPAQUE |  |  |
 | `std::list<int>` | NO WAY |  |  | WRONG |  | intact after the return: WRONG |
 | `std::bitset<8>` | WORKS | WORKS |  | WORKS |  |  |
-| `std::shared_ptr<SNode>` | NO WAY | WORKS | ERROR, WORKS | OPAQUE |  | use count after a by-value pass: WORKS |
+| `std::shared_ptr<SNode>` | NO WAY | WORKS | WORKS | OPAQUE |  | use count after a by-value pass: WORKS |
 | `std::weak_ptr<SNode>` |  |  | WORKS | WORKS |  |  |
 | `std::span<const int>` | WORKS | WORKS | WORKS |  |  | takes a Julia Vector: NOT TAKEN |
 | `std::span<int>` |  | WORKS |  | WORKS |  |  |
@@ -189,7 +188,7 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | `std::string` | WORKS | WORKS | WORKS | WORKS | OPAQUE |  |
 | `std::string& (written by the function)` | WORKS | WORKS | WORKS |  |  | an empty CppString reads back as "": ERROR; takes a Julia String: NOT TAKEN |
 | `std::string_view` | WORKS | WORKS | WORKS | WORKS |  | takes a Julia String: NOT TAKEN |
-| `std::unique_ptr<UNode>` | NO WAY | WORKS | ERROR, WORKS | OPAQUE |  |  |
+| `std::unique_ptr<UNode>` | NO WAY | WORKS | WORKS | OPAQUE |  |  |
 | `std::unique_ptr<UCounted> (counts live objects)` |  |  |  |  |  | ended by Julia: NO WAY; ended by a by-value pass: NO WAY |
 | `std::unique_ptr<int[]>` |  |  |  | OPAQUE |  |  |
 | `std::variant<int, double>` | NO WAY | REFUSED | NO WAY | REFUSED |  |  |
@@ -286,12 +285,12 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 - `std::function<int(int)>`, takes a Julia function: **NOT TAKEN** — a Julia function, by reference: no method fn_apply_ref(::typeof(twice), ::Int64)
 - `std::function<int(int)>`, takes a Julia function: **NOT TAKEN** — a Julia function, by value: no method pointer_arg(::DataType, ::typeof(twice))
 - `std::function<int(int)>`, takes a @cfunction: **NOT TAKEN** — a @cfunction pointer: no method fn_apply_ref(::Ptr{Nothing}, ::Int64)
-- `std::function<int(int)>`, return by reference: **OPAQUE** — one the library owns comes back as a Ptr{Nothing}
+- `std::function<int(int)>`, return by reference: **OPAQUE** — one the library owns comes back as a Ptr{function_int_int}
 - `std::function<int(int)>`, pass by value: **WORKS** — a pointer to one the library owns, passed twice; no copy is made
-- `std::function<int(int)>`, pass by reference: **ERROR** — MethodError: no method fn_apply_ref(::Ptr{Nothing}, ::Int64)
-- `std::function<int(int)>`, pass by reference: **WORKS** — the pointer converted by hand: Ptr{function_int_int}(p)
+- `std::function<int(int)>`, pass by reference: **WORKS** — the pointer as the library returned it
+- `std::function<int(int)>`, takes an untyped pointer: **NOT TAKEN** — a Ptr{Cvoid} to one the library owns: no method fn_apply_ref(::Ptr{Nothing}, ::Int64)
 - `std::function<int(int)>`, return by value: **REFUSED** — cannot call 'fn_adder' (fn_adder(int)). It returns `function<int (int)>` by value, which C++ returns through a hidden pointer the thunk does not pass, and that record's l…
-- `std::function<void(int)>`, pass by reference: **NOT TAKEN** — a Julia function: no method fn_each(::var"#48#49", ::Int64)
+- `std::function<void(int)>`, pass by reference: **NOT TAKEN** — a Julia function: no method fn_each(::var"#51#52", ::Int64)
 - `std::function<double(double, double)>`, pass by reference: **NOT TAKEN** — a Julia function: no method fn_fold(::typeof(+), ::Float64, ::Float64)
 - `int (*)(int) (a plain function pointer)`, make: **WORKS** — @cfunction
 - `int (*)(int) (a plain function pointer)`, takes a Julia function: **NOT TAKEN** — a Julia function: no method pointer_arg(::DataType, ::typeof(twice))
@@ -373,7 +372,7 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 
 - `std::shared_ptr<SNode>`, make: **NO WAY** — no create function in the wrapper; the library's `sp_make` is the way
 - `std::shared_ptr<SNode>`, return by value: **OPAQUE** — comes back as its bytes, a NTuple{16, UInt8}: the object pointer, then the control block's
-- `std::shared_ptr<SNode>`, pass by reference: **ERROR** — MethodError: no method sp_read(::Base.RefValue{NTuple{16, UInt8}})
+- `std::shared_ptr<SNode>`, pass by reference: **WORKS** — Ref(r), as the manual says for a returned container
 - `std::shared_ptr<SNode>`, pass by reference: **WORKS** — a hand-made Ptr{shared_ptr_SNode} to the bytes
 - `std::shared_ptr<SNode>`, pass by value: **WORKS** — the bytes, passed twice
 - `std::shared_ptr<SNode>`, use count after a by-value pass: **WORKS**
@@ -428,7 +427,7 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 
 - `std::unique_ptr<UNode>`, make: **NO WAY** — no create function in the wrapper; the library's `up_make` is the way
 - `std::unique_ptr<UNode>`, return by value: **OPAQUE** — comes back as its bytes, a NTuple{8, UInt8}, which are the pointer it owns
-- `std::unique_ptr<UNode>`, pass by reference: **ERROR** — MethodError: no method up_read(::Base.RefValue{NTuple{8, UInt8}})
+- `std::unique_ptr<UNode>`, pass by reference: **WORKS** — Ref(r), as the manual says for a returned container
 - `std::unique_ptr<UNode>`, pass by reference: **WORKS** — a hand-made Ptr{unique_ptr_UNode_std_default_delete_UNode} to the bytes
 - `std::unique_ptr<UNode>`, pass by value: **WORKS** — the bytes
 - `std::unique_ptr<UCounted> (counts live objects)`, ended by Julia: **NO WAY** — nothing ends a unique_ptr returned by value: 2 of 2 objects are still alive after GC, and the wrapper has no function that would delete them

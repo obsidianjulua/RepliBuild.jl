@@ -21,6 +21,7 @@ const _JULIA_KEYWORDS = Set([
 # under the old name because it is referenced from six files in Wrapper.
 import ..INTERNAL_TYPE_BLOCKLIST
 import .._glob_to_regex, .._glob_matcher   # package level: the Builder asks them too
+import .._outside_template_args            # a declarator inside template arguments is not the type's
 # `nm -D` reads ELF's dynamic symbol table and is a hard error on PE ("File
 # format has no dynamic symbol table"). The export directory is the same
 # question there — see Builder/Compiler.jl's _pe_exported_names.
@@ -1876,7 +1877,10 @@ crosses (a pointer, `!llvm.ptr` for a thunk) does not.
 """
 function _typed_pointer_return(c_type::AbstractString, names, sanitize)::Union{String,Nothing}
     t = strip(String(c_type))
-    occursin('(', t) && return nothing                       # a function pointer
+    # A function pointer. Only the type's own `(` says so: one inside the
+    # template arguments is part of a record's name, and read over the whole
+    # spelling a `const std::function<int (int)>*` return stayed `Ptr{Cvoid}`.
+    occursin('(', _outside_template_args(t)) && return nothing
     levels = 0
     while true
         if endswith(t, "&&")
