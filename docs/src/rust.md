@@ -120,7 +120,9 @@ The output folder (`julia/` by default) then holds:
 with the reason.
 
 If `wrap` says `thunks: not compiled ahead of time`, the module still works:
-it compiles those calls the first time one is used. That needs RepliBuild's
+it compiles those calls the first time one is used. The reason is printed
+after the message; on a machine with no LLVM it is a missing `llc`, which
+the system's LLVM provides ([Set up](install.md#What-you-need)). That needs RepliBuild's
 support library (`libJLCS` in the check's report) on the machine that runs
 the module, where the compiled file needs nothing.
 

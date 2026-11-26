@@ -35,34 +35,39 @@ MSYS2). macOS is not supported: `using RepliBuild` refuses to load there.
 which `Pkg.add` picks there by itself.
 
 A build runs a compiler, a linker and a handful of other programs. Some of
-them RepliBuild brings with it, and some it takes from your system:
+them come with RepliBuild, installed by `Pkg.add` like any Julia dependency,
+and the rest are taken from your system:
 
 | Program | Used for | Linux | Windows |
 |:--------|:---------|:------|:--------|
 | C compiler (`clang`) | Compiling C libraries | Comes with RepliBuild | Comes with RepliBuild, using MSYS2's headers and libraries |
 | C library headers and startup files | Every build | **Your system** (`libc6-dev`, `glibc-devel`) | **Your system** (MSYS2 CLANG64) |
-| C++ compiler (`clang++`) and LLVM tools | Compiling and running C++ libraries | **Your system**, version 21 or newer | **Your system** (MSYS2 CLANG64) |
 | Linker | Linking C libraries | Comes with RepliBuild | Your system |
-| Linker | Linking C++ libraries | Your system | Your system |
-| `readelf`, `nm`, `objdump` | Reading the built library | Comes with RepliBuild | Your system (MSYS2) |
-| `llvm-dwarfdump` | Wrapping a C++ library, and loading its wrapper | Your system's; RepliBuild's own copy when there is none | Your system's; RepliBuild's own copy when there is none |
+| `readelf`, `nm`, `objdump`, `c++filt` | Reading the built library | Comes with RepliBuild | Your system (MSYS2) |
 | `git` | Git dependencies | Comes with RepliBuild | Your system |
 | `cmake`, `ninja` | [CMake projects](graph.md) | Comes with RepliBuild | Your system (MSYS2) |
+| `clang++`, `llvm-link`, `opt`, `llvm-config` | Compiling and linking C++ libraries | **Your system**, LLVM 21 or newer | **Your system** (MSYS2 CLANG64), also to load a C++ wrapper |
+| `llvm-dwarfdump` | Wrapping a C++ library, and loading its wrapper | Your system's; RepliBuild's own copy when there is none | Your system's; RepliBuild's own copy when there is none |
+| `llc` | Compiling a wrapper's stubs ahead of time: C++ with `aot_thunks = true`, and every Rust crate | Your system (part of LLVM) | Your system (MSYS2 CLANG64) |
+| `libJLCS` | RepliBuild's own support library, for C++ wrappers and some Rust calls | Downloaded with RepliBuild | Built on your machine |
 | `pkg-config` | `system` dependencies only | Your system | Your system |
 | `cargo`, `rustc` | [Rust crates](rust.md) only | **Your system** ([rustup](https://rustup.rs)) | Not run yet |
-| `libJLCS` | RepliBuild's own C++ support library | Downloaded with RepliBuild | Built on your machine |
 
 So on Linux a C library needs almost nothing from the system, and a C++
 library needs `clang++` and LLVM. On Windows everything comes from MSYS2.
+Without `llc` everything still works: `wrap` leaves the stubs to be compiled
+when the wrapper loads, and says so.
 
-**The programs that "come with RepliBuild" are a recent addition, and the
-system's are still used.** On Linux RepliBuild tries its own copy of a program
-first and uses the one on `PATH` when its own copy cannot start. On Windows it
-is the other way round: the system's first. `REPLIBUILD_TOOLS=system` makes
-Linux prefer the system's programs too, and `REPLIBUILD_TOOL_GIT=/path/to/git`
-(and the like) names one program exactly ([Settings](#Settings)). When a
-build behaves differently on two machines, which copy of a program ran is the
-first thing to compare; the check report prints the path of each.
+**Which copy of a program runs.** For the programs that come with RepliBuild,
+the system's copy is still used. On Linux RepliBuild tries its own copy first,
+and the one on `PATH` when its own is missing or cannot start; on Windows it
+is the other way round. `llvm-dwarfdump` is the exception: the system's copy
+first on both, so that it matches the LLVM that compiled the library.
+`REPLIBUILD_TOOLS=system` (or `jll`) sets one order for all of them, and
+`REPLIBUILD_TOOL_GIT=/path/to/git` (and the like) names one program exactly
+([Settings](#Settings)). When a build behaves differently on two machines,
+which copy of a program ran is the first thing to compare; the check report
+prints the path of each.
 
 ## Linux
 
@@ -104,7 +109,8 @@ sudo pacman -S clang llvm                    # Arch
 ```
 
 RepliBuild looks for these programs by name: `clang++`, `llvm-config`,
-`llvm-link`, `opt` and `llvm-dwarfdump`. On Debian and Ubuntu they are installed
+`llvm-link`, `opt`, `llvm-dwarfdump` and, to compile a wrapper's stubs ahead
+of time, `llc`. On Debian and Ubuntu they are installed
 as `clang++-23` and so on, with the plain names in `/usr/lib/llvm-23/bin`, which
 is why that directory goes on `PATH`. Check with `clang++ --version`.
 
@@ -120,7 +126,7 @@ If the download was skipped (no network during `Pkg.add`), it is fetched the
 first time a C++ wrapper needs it, or by `Pkg.build("RepliBuild")`.
 
 !!! note "The 4.5 releases use the system's programs for everything"
-    This manual describes RepliBuild 4.6, which needs Julia 1.13. On Julia
+    This manual describes RepliBuild 4.6, which needs Julia 1.13 or newer. On Julia
     1.12, `Pkg.add` installs a 4.5 release. Those bring only the C compiler:
     they use the system's `readelf`, `nm`, `git`, `cmake`, `ninja`,
     `llvm-dwarfdump` and linker, and do not download `libJLCS`. On those,
@@ -191,23 +197,30 @@ says how to confirm that this is the cause.
 
 ```
 C bucket — Tier 3 (ccall) ~
-  OK   clang (JLL)    clang 20.1.8
-  OK   sysroot        system headers reachable
+  OK   clang (JLL)    clang 20.1.8 (version-locked to Julia's libLLVM 20.1.8)
+       ~/.julia/artifacts/…/tools/clang
+  OK   sysroot        system headers reachable (compiled a TU including stdio.h)
 
 DWARF extraction — required by every tier ~
-  OK   DWARF dumper   GNU readelf 2.47
-  OK   symbol reader  GNU nm 2.47
+  OK   DWARF dumper   GNU readelf 2.47.20260726 (--debug-dump=info)
+       ~/.julia/artifacts/…/bin/readelf
+  OK   symbol reader  GNU nm 2.47.20260726 (nm -D --defined-only)
+       ~/.julia/artifacts/…/bin/nm
 
 C++ — Tier 2 (MLIR thunks) ~
   OK   llvm-config    LLVM 23.1.5
+       /usr/bin/llvm-config
   OK   clang++        Clang 23.1.5
+       /usr/bin/clang++
   …
-  OK   libJLCS        prebuilt
+  OK   libJLCS        prebuilt (JLCS artifact, LLVM and MLIR linked in)
+       ~/.julia/artifacts/…/lib/libJLCS.so
 ```
 
-Each line is one program or library, with `OK`, `WARN` or `FAIL`, and the fix
-printed under anything that is not `OK`. You do not need to know what the
-section names mean. What each group is for:
+Each line is one program or library, with `OK`, `WARN` or `FAIL`, the path of
+the copy that was found, and the fix printed under anything that is not `OK`.
+A path under `~/.julia/artifacts` is a copy that came with RepliBuild. You do
+not need to know what the section names mean. What each group is for:
 
 | Group | Needed for | If it fails |
 |:------|:-----------|:------------|
@@ -215,10 +228,11 @@ section names mean. What each group is for:
 | `DWARF extraction` | Every build | Nothing can be wrapped. On Windows, install `mingw-w64-x86_64-binutils`. |
 | `C++` | C++ libraries only | C libraries still work. Install `clang++` and LLVM, and check `PATH`. |
 | `MSYS2` (Windows) | C++ libraries | The `clang++` found is not CLANG64's. Put `C:\msys64\clang64\bin` first on `PATH`. |
+| `Rust` | Rust crates only | C and C++ still work. Install `cargo` and `rustc` ([rustup](https://rustup.rs)). |
 
 `mlir-tblgen` and `cmake` under `C++` are needed only to build `libJLCS`
-yourself. With the prebuilt library they may show `FAIL` while the summary
-still says C++ works.
+yourself. With the prebuilt library a missing `mlir-tblgen` shows `FAIL`
+while the summary still says C++ works. The check does not look for `llc`.
 
 From code:
 
@@ -266,8 +280,8 @@ for a normal setup.
 
 | Variable | Effect |
 |:---------|:-------|
-| `REPLIBUILD_TOOLS` | Which copy of `readelf`, `nm`, `objdump`, `git`, `cmake`, `ninja` and the C linker is tried first. `jll`: RepliBuild's own (the default on Linux). `system`: the one on `PATH` (the default on Windows). The other is used when the first is missing or cannot start. Any other value is an error. |
-| `REPLIBUILD_TOOL_<NAME>` | The path of one of those programs, used as given: `REPLIBUILD_TOOL_GIT`, `_CMAKE`, `_NINJA`, `_READELF`, `_NM`, `_OBJDUMP`, `_LLVM_DWARFDUMP`. |
+| `REPLIBUILD_TOOLS` | Which copy of `readelf`, `nm`, `objdump`, `c++filt`, `git`, `cmake`, `ninja`, `llvm-dwarfdump` and the C linker is tried first. `jll`: RepliBuild's own (the default on Linux, except for `llvm-dwarfdump`). `system`: the one on `PATH` (the default on Windows, and for `llvm-dwarfdump` everywhere). The other is used when the first is missing or cannot start. For the C linker, `system` means the compiler's own default linker. Any other value is an error. |
+| `REPLIBUILD_TOOL_<NAME>` | The path of one program, used as given: `REPLIBUILD_TOOL_GIT`, `_CMAKE`, `_NINJA`, `_READELF`, `_NM`, `_OBJDUMP`, `_CXXFILT`, `_LD_LLD` (the C linker, Linux), `_LLVM_DWARFDUMP`, `_CARGO`, `_RUSTC`. |
 | `LLVM_CONFIG` | The path of the `llvm-config` whose LLVM compiles C++, when it is not on `PATH`. |
 | `REPLIBUILD_JLCS` | `artifact` for the prebuilt `libJLCS`, `local` for the one you built, or the path of a library file. |
 | `MSYS2_ROOT` | Windows: where MSYS2 is installed, when not `C:\msys64`. |
