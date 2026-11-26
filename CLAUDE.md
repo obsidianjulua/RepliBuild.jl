@@ -484,6 +484,24 @@ If you are asked to work on it:
   change to one copy is a change to both and is checked against those rules
   first. (`test_jlcs_abi_version.jl`,
   devtests `test_jlcs_abi_live.jl`.)
+  **The library's soname is the dialect's: `libJLCS.so.<ABI_VERSION>`**
+  (2026-11-25, a link to `libJLCS.so.<VERSION>`; `VERSION`'s major is
+  `ABI_VERSION`, and CMake refuses anything else). `add_llvm_library` gives
+  a shared library LLVM's version as its soname (`libJLCS.so.23.1`,
+  `libJLCS.so.23.1jl` from `LLVM_full_jll`), so the dialect's CMake sets its
+  own AFTER that call. An AOT thunks library imports libJLCS by the soname
+  it was linked against, and the loader takes an already-loaded library for
+  that import only when the sonames are equal: otherwise it searches the
+  thunks library's RUNPATH, finds the old file where it still is (an older
+  artifact, a build directory built again) and loads a SECOND libJLCS with
+  no error, which is the two-exception-buffer case.
+  `JITManager.open_thunks_library` refuses a thunks library that brought
+  another libJLCS into the process (`_foreign_jlcs`, compared as files) and
+  says to wrap again. So a libJLCS rebuilt across a soname change (an ABI
+  bump; `build.sh` on a checkout whose library was built before this) means
+  every AOT package is wrapped again (`hub_sweep.jl --rewrap`), and until
+  then it fails at load with that message. (`test_jlcs_soname.jl`, devtests
+  `test_jlcs_soname_live.jl`.)
 - `Builder/SysConfigGen.jl`, `Builder/VisibilityProbe.jl` — probes, run once per
   package or version bump, not on the build path.
 - `Builder/BuildGraph.jl` — the build-graph contract: a `TargetGraph` of targets
@@ -2551,9 +2569,10 @@ outward-facing, so ask first.
   `PackageRegistry` is included after the Rust modules for this, so
   `RustBuild` takes the generator fingerprint from its caller.
 - **The dialect's ABI version is 3 (2 with `native_call`, 3 with its address
-  form), and the published libJLCS is 3.0.0 at that number** (release
-  `jlcs-v3.0.0`, the one `Artifacts.toml` names; its two tarballs' hashes
-  are the file's). The next change to the dialect's ABI needs a new release
+  form), and the published libJLCS is 3.0.1 at that number** (release
+  `jlcs-v3.0.1`, the one `Artifacts.toml` names; its two tarballs' hashes
+  are the file's). Release `jlcs-v3.0.0` is what registered 4.6.0 downloads
+  and must stay. The next change to the dialect's ABI needs a new release
   before its branch's CI can be green (`JLCSLibrary` above).
 - **`RustDWARF` builds a unit's DIE tree only when the unit names a wanted
   symbol**, and resolves after the tree is built, so DIE order cannot matter.
@@ -3192,6 +3211,13 @@ DWARF-resolved destructors — **is** built.)
   its lanes is not this case and crosses today.
 - AAPCS64 homogeneous vector aggregates (a record holding a SIMD vector), and
   Windows on ARM (2026-11-09). Both refused by name.
+- The prebuilt libJLCS (`JLCS_STATIC_LLVM`) on Windows and macOS
+  (2026-11-25, raised in review of the Yggdrasil recipe). The export list is
+  a GNU version script, so the static build is ELF only. A `.def` file for
+  PE and an exported-symbols list for Mach-O would do the same job, as
+  Yggdrasil's `L/LLVMDowngrader` does with `LLVM_full_jll`'s archives on
+  every OS. Windows would gain a libJLCS with no MSYS2 MLIR to build it;
+  macOS is refused at load for other reasons (the macOS entry above).
 - Codegen `.ll → .so` still shells to clang; not internalised. (The linker it
   starts is the bundled LLD for C on Linux since 2026-11-17; C++, Windows and
   the AOT thunks library still link with the system's.)

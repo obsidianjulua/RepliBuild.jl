@@ -17,8 +17,18 @@ Two numbers, both in `src/mlir`:
   library that reports another. Bump it with any change to what Julia
   generates for the dialect or calls in it (an op, an attribute, a thunk
   convention, a C API signature).
-- `VERSION`: the binary's own version (`3.0.0`), independent of RepliBuild's.
-  Bump it for every published build; a change of `ABI_VERSION` is a new major.
+- `VERSION`: the binary's own version (`3.0.1`), independent of RepliBuild's.
+  Bump it for every published build; a change of `ABI_VERSION` is a new major,
+  and the major is always `ABI_VERSION` (CMake refuses anything else).
+
+The library's soname is the dialect's: `libJLCS.so.<ABI_VERSION>`, a link to
+`libJLCS.so.<VERSION>`. CMake sets it after `add_llvm_library`, which would
+give the library LLVM's version (`libJLCS.so.23.1jl` from `LLVM_full_jll`, as
+3.0.0 was). So a build against another LLVM keeps its name, and the name
+moves only when `ABI_VERSION` does. A thunks library records the soname of
+the libJLCS it was linked against: across a soname change every AOT package
+is wrapped again, and RepliBuild refuses one that was not
+(`JITManager.open_thunks_library`).
 
 ## Today: a release on this repository
 
@@ -64,6 +74,11 @@ repository; read them before changing it):
 - Every `Dependency` has a `compat` bound that the standard-library JLL of
   the oldest Julia in `julia_compat` satisfies.
 - GCC 10, the version `LLVM_full_jll` 23 is built with.
+- Two licences are installed: this repository's, and `LLVM_full_jll`'s, since
+  LLVM's and MLIR's code is linked into the library.
+- The recipe sets no soname: the dialect's CMake does. Moving the recipe to
+  another `LLVM_full_jll` with the same sources is a new build of the same
+  JLL version; a new soname (a new `ABI_VERSION`) is a new JLL version.
 
 Before a recipe change goes to Yggdrasil, in a checkout of it, with its own
 environment:

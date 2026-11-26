@@ -156,6 +156,30 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_
 target_compile_definitions(JLCS PRIVATE JLCS_ABI_VERSION=${JLCS_ABI_VERSION})
 message(STATUS "JLCS: dialect ABI version ${JLCS_ABI_VERSION}")
 
+# The soname is the dialect's, not LLVM's. add_llvm_library gives a shared
+# library LLVM's own version as its soname (libJLCS.so.23.1, and
+# libJLCS.so.23.1jl from LLVM_full_jll), so the name followed the LLVM the
+# library was built with and moved when that did, with the dialect unchanged.
+# What a thunks library linked against libJLCS has to match is the dialect's
+# ABI: the soname is libJLCS.so.<ABI_VERSION>, and the file carries the
+# binary's own version (src/mlir/VERSION), whose major is that number. ELF
+# only, as add_llvm_library's is: a DLL's name carries no version.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" JLCS_VERSION LIMIT_COUNT 1)
+string(STRIP "${JLCS_VERSION}" JLCS_VERSION)
+if(NOT JLCS_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  message(FATAL_ERROR "src/mlir/VERSION must hold one version of three numbers, not '${JLCS_VERSION}'")
+endif()
+if(NOT JLCS_VERSION MATCHES "^${JLCS_ABI_VERSION}\\.")
+  message(FATAL_ERROR "src/mlir/VERSION (${JLCS_VERSION}) must have the dialect ABI version (${JLCS_ABI_VERSION}) as its major: the soname is libJLCS.so.${JLCS_ABI_VERSION}")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+if(UNIX AND NOT APPLE)
+  set_target_properties(JLCS PROPERTIES
+    SOVERSION ${JLCS_ABI_VERSION}
+    VERSION ${JLCS_VERSION})
+endif()
+message(STATUS "JLCS: version ${JLCS_VERSION}")
+
 if(JLCS_STATIC_LLVM)
   target_link_libraries(JLCS PRIVATE JLCSStaticLLVM)
   target_link_options(JLCS PRIVATE
