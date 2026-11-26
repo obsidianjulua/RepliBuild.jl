@@ -1,22 +1,22 @@
 [[JLCS]]
 arch = "aarch64"
 cxxstring_abi = "cxx11"
-git-tree-sha1 = "b1235a61a7148fc80a034e0cfac6821a28737cc3"
+git-tree-sha1 = "75e8b638052c76ebac0767b713e24dfedcc8f634"
 lazy = true
 libc = "glibc"
 os = "linux"
 
     [[JLCS.download]]
-    sha256 = "00bd6a84034296f86ed7e5e6831edbdb2984fa2418220e84cd4cd99d68836684"
-    url = "https://github.com/obsidianjulua/RepliBuild.jl/releases/download/jlcs-v3.0.0/JLCS.v3.0.0.aarch64-linux-gnu-cxx11.tar.gz"
+    sha256 = "17b82a95a5241c2a88fd5cbcb442dc3744781f2f93ac162afa2ca383fc2d0e4c"
+    url = "https://github.com/obsidianjulua/RepliBuild.jl/releases/download/jlcs-v3.0.1/JLCS.v3.0.1.aarch64-linux-gnu-cxx11.tar.gz"
 [[JLCS]]
 arch = "x86_64"
 cxxstring_abi = "cxx11"
-git-tree-sha1 = "9062aa97f6a1ddef954f37a2c04b66ce8ad36bae"
+git-tree-sha1 = "4893c3f33c8f0e70e7054e8884f6ec587e1f9f09"
 lazy = true
 libc = "glibc"
 os = "linux"
 
     [[JLCS.download]]
-    sha256 = "64560b56adb9c9183ba13f7fcc49d7cf6a3a8e293b8ba746ef5596ea41cf4cb6"
-    url = "https://github.com/obsidianjulua/RepliBuild.jl/releases/download/jlcs-v3.0.0/JLCS.v3.0.0.x86_64-linux-gnu-cxx11.tar.gz"
+    sha256 = "f652f06f85173f3b590eefb8a3b3f1a0c7487e6ebfbbbdcb6149ed8c0a4108ae"
+    url = "https://github.com/obsidianjulua/RepliBuild.jl/releases/download/jlcs-v3.0.1/JLCS.v3.0.1.x86_64-linux-gnu-cxx11.tar.gz"

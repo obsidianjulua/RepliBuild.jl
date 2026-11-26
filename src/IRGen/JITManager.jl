@@ -941,6 +941,16 @@ Opening libJLCS by absolute path first satisfies both halves: the loader resolve
 the import against an already-loaded module by name, and that module is the one
 `MLIRNative` ccalls. Idempotent, and on ELF a no-op that names the file the
 RUNPATH already resolved to.
+
+**The loader matches by soname, so a thunks library linked against a libJLCS
+of another soname is refused here.** On ELF the import is the soname of the
+libJLCS the thunks were linked against (`libJLCS.so.<dialect ABI>`; LLVM's
+version, `libJLCS.so.23.1`, before the dialect had its own). When the libJLCS
+in use has another, the already-loaded one does not satisfy the import and the
+loader goes looking by RUNPATH: it finds the old file where it still is (an
+older artifact, a build directory that was built again) and loads it as a
+second copy, with no error. That is the two-buffer case above, so it is an
+error here that says to wrap again ([`_foreign_jlcs`](@ref)).
 """
 function open_thunks_library(thunks_path::AbstractString)
     jlcs = MLIRNative.libJLCS_path()
@@ -955,19 +965,71 @@ function open_thunks_library(thunks_path::AbstractString)
         end
     end
 
-    try
-        return Libdl.dlopen(thunks_path, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
+    # What was loaded before is not this library's doing.
+    before = _foreign_jlcs(jlcs)
+    handle = try
+        Libdl.dlopen(thunks_path, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
     catch e
+        said = sprint(showerror, e)
+        relink = occursin(r"libJLCS\.(?:so|dll|dylib)", said) ? """
+
+
+        The loader's message names a libJLCS file: the thunks were linked
+        against a libJLCS that is no longer there. Wrap the package again
+        (`RepliBuild.wrap`) to link them against the one above.""" : ""
         error("""
         AOT thunks library failed to open:
           $thunks_path
-          $(sprint(showerror, e))
+          $said
 
         Its thunks import `jlcs_catch_current_exception` from libJLCS, which must
         therefore load first:
           $jlcs
-          $jlcs_state""")
+          $jlcs_state$relink""")
     end
+    brought = setdiff(_foreign_jlcs(jlcs), before)
+    if !isempty(brought)
+        try
+            Libdl.dlclose(handle)
+        catch
+        end
+        error(_second_jlcs_message(thunks_path, jlcs, brought))
+    end
+    return handle
+end
+
+"""
+    _foreign_jlcs(jlcs, loaded = Libdl.dllist()) -> Vector{String}
+
+The libJLCS files among `loaded` that are not `jlcs`, the one RepliBuild uses:
+a second copy of the library in this process. Compared as files (`realpath`),
+since the library is reached through a symlink (`libJLCS.so` to
+`libJLCS.so.<ABI>`) and the loader reports the name it was asked for.
+"""
+function _foreign_jlcs(jlcs::AbstractString, loaded = Libdl.dllist())
+    own = _real_file(jlcs)
+    return String[p for p in loaded if _is_jlcs_file(p) && _real_file(p) != own]
+end
+
+# `libJLCS.so`, `libJLCS.so.3`, `libJLCS.so.3.0.1`, `libJLCS.so.23.1jl`,
+# `libJLCS.dll`. Not `libJLCS_thunks.so`, which is a wrapped project's.
+_is_jlcs_file(path::AbstractString) =
+    occursin(r"^libJLCS\.(?:so(?:\.[0-9A-Za-z.]+)?|dll|dylib)$", basename(path))
+
+_real_file(path::AbstractString) = ispath(path) ? realpath(path) : abspath(path)
+
+function _second_jlcs_message(thunks_path::AbstractString, jlcs::AbstractString, brought)
+    return """
+    AOT thunks library was linked against another libJLCS:
+      $thunks_path
+    It loaded
+      $(join(brought, "\n  "))
+    beside the libJLCS RepliBuild uses:
+      $jlcs
+
+    Each copy has its own exception buffer, so a C++ exception a thunk catches
+    would never reach Julia. Wrap the package again (`RepliBuild.wrap`) to link
+    its thunks against the libJLCS above."""
 end
 
 """
