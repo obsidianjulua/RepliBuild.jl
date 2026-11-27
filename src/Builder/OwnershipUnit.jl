@@ -258,6 +258,26 @@ function plan(functions, structs, record_abi; demangle = Compiler._demangle)
         def isa AbstractDict ? Compiler._inline_ctor_headers_of(get(def, "decl_files", String[])) : String[]
     end
 
+    # What a line that writes a type by name has to include: the headers of
+    # the project's records its identifiers name (a record's leading
+    # identifier => its headers), and the standard ones (`std_headers`).
+    lead_headers = Dict{String,Vector{String}}()
+    for name in sort!(collect(String, keys(structs)))
+        def = structs[name]
+        (def isa AbstractDict && get(def, "toolchain", false) != true) || continue
+        hs = headers_of(name)
+        isempty(hs) && continue
+        m = match(r"^[A-Za-z_][A-Za-z0-9_]*", name)
+        m === nothing || append!(get!(() -> String[], lead_headers, String(m.match)), hs)
+    end
+    named_headers(spelled) = begin
+        hs = String[]
+        for m in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", String(spelled))
+            append!(hs, get(lead_headers, String(m.match), String[]))
+        end
+        unique(vcat(hs, std_headers(spelled)))
+    end
+
     found = Dict{String,Vector{Dict{String,Any}}}()
     bytes = Dict{String,Union{Nothing,Int}}()
     function add!(key, c_type, ret, rank, expr, headers, from)
@@ -317,36 +337,23 @@ function plan(functions, structs, record_abi; demangle = Compiler._demangle)
             pkey === nothing && continue
             if dparams !== nothing && length(dparams) == length(params) && _spellable(dparams[i])
                 add!(pkey, pc, false, isempty(headers) ? 2 : 1, String(dparams[i]),
-                     unique(vcat(headers, std_headers(String(dparams[i])))), "parameter $i of $mangled")
+                     unique(vcat(headers, named_headers(String(dparams[i])))), "parameter $i of $mangled")
             else
                 get!(unnamed, pkey, "its spelling in $dm cannot be written in a unit")
             end
         end
     end
 
-    # The type's own name, for every key: the headers are the standard ones
-    # its spelling names, its own where the project declares it in one, and
-    # those of the project's records its template arguments name.
-    lead_headers = Dict{String,Vector{String}}()     # a record's leading identifier => its headers
-    for name in sort!(collect(String, keys(structs)))
-        def = structs[name]
-        (def isa AbstractDict && get(def, "toolchain", false) != true) || continue
-        hs = headers_of(name)
-        isempty(hs) && continue
-        m = match(r"^[A-Za-z_][A-Za-z0-9_]*", name)
-        m === nothing || append!(get!(() -> String[], lead_headers, String(m.match)), hs)
-    end
+    # The type's own name, for every key: the headers are its own where the
+    # project declares it in one, and what its spelling names.
     for key in sort!(unique(vcat(collect(String, keys(found)), collect(String, keys(unnamed)))))
         c_type = haskey(found, key) ? String(found[key][1]["c_type"]) : key
         named = own_name(key, c_type, structs, record_abi)
         named === nothing && continue
         (spelled, toolchain) = named
         hs = toolchain ? String[] : headers_of(key)
-        for m in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", spelled)
-            append!(hs, get(lead_headers, String(m.match), String[]))
-        end
         add!(key, c_type, haskey(found, key) ? found[key][1]["ret"] : true, OWN_NAME_RANK, spelled,
-             unique(vcat(hs, std_headers(spelled))), "its own name")
+             unique(vcat(hs, named_headers(spelled))), "its own name")
     end
 
     candidates = Dict{String,Any}[]
@@ -356,12 +363,18 @@ function plan(functions, structs, record_abi; demangle = Compiler._demangle)
         # is kept beside the `MAX_CANDIDATES` best of the others: it is the
         # one line that needs no function declared.
         sort!(ways; by = w -> (w["rank"], w["from"]))
-        seen = Set{String}()
+        seen = Dict{String,Dict{String,Any}}()
         kept = 0
         for w in ways
-            w["expr"] in seen && continue
+            # The same expression reached another way is the same line: it
+            # takes the headers of both.
+            if haskey(seen, w["expr"])
+                first_way = seen[w["expr"]]
+                first_way["headers"] = unique(vcat(first_way["headers"], w["headers"]))
+                continue
+            end
             (kept >= MAX_CANDIDATES && w["rank"] != OWN_NAME_RANK) && continue
-            push!(seen, w["expr"])
+            seen[w["expr"]] = w
             w["rank"] == OWN_NAME_RANK || (kept += 1)
             w["id"] = length(candidates)
             w["bytes"] = bytes[key]

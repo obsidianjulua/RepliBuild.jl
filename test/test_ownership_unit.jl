@@ -241,6 +241,25 @@ end
     @test q[end]["expr"] == "std::vector<own::Tracked, std::allocator<own::Tracked> >"
     @test q[end]["headers"] == ["/src/own.hpp", "<memory>", "<vector>"]
 
+    # A parameter written by name needs the header of the project's record it
+    # names too: nothing else brings it in when no class declares the function.
+    up = "unique_ptr<own::Tracked, std::default_delete<own::Tracked> >"
+    abi[up] = Dict{String,Any}("byte_size" => "0x8", "pass" => "reference", "empty" => false, "scope" => "std")
+    adopt = Any[_ou_fn("_Z5adoptSt10unique_ptrIN3own7TrackedESt14default_deleteIS1_EE",
+                       "adopt(std::unique_ptr<own::Tracked, std::default_delete<own::Tracked> >)", "int";
+                       params = Any[Dict{String,Any}("name" => "t", "c_type" => up)])]
+    q = _OU.plan(adopt, structs, abi)["candidates"]
+    # The parameter's spelling and the type's own name are one expression: one
+    # line, with the headers of both ways.
+    @test length(q) == 1
+    @test q[1]["expr"] == "std::unique_ptr<own::Tracked, std::default_delete<own::Tracked> >"
+    @test q[1]["headers"] == ["/src/own.hpp", "<memory>"]
+    @test occursin("parameter 1 of", q[1]["from"])
+    # ...and with no scope known for the type, the parameter's line alone still has them.
+    delete!(abi[up], "scope")
+    q = _OU.plan(adopt, structs, abi)["candidates"]
+    @test length(q) == 1 && q[1]["headers"] == ["/src/own.hpp", "<memory>"]
+
     # The facts of one name read in two scopes carry no scope.
     C = RepliBuild.Compiler
     facts = Dict{String,Dict{String,Any}}()

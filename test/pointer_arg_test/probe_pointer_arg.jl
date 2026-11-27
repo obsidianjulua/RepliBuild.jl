@@ -135,7 +135,7 @@ end
 probe("container_by_value_takes_the_returned_value") do p
     v = M.vec_iota(5)
     # What the library returned is the C++ object, held where C++ built it.
-    v isa RepliBuild.CxxObjects.Owned{NTuple{24, UInt8}} || push!(p, "vec_iota returned a $(typeof(v))")
+    v isa M.RepliBuild.CxxObjects.Owned{NTuple{24, UInt8}} || push!(p, "vec_iota returned a $(typeof(v))")
     (got = M.vec_sum_val(v)) == 10 || push!(p, "vec_sum_val(value) = $got")
     # By value it was copied: the caller's object passes again, and by reference as itself.
     (got = (M.vec_sum_val(v), M.vec_sum(v))) == (10, 10) || push!(p, "by value again, then by reference: $got")

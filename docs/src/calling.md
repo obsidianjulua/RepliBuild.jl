@@ -548,6 +548,14 @@ M.own_Tracked_value(t)                # int Tracked::value() const: 17
 A type with nothing to end (plain data, or a class whose destructor does
 nothing) is returned as a plain Julia struct, as before.
 
+RepliBuild learns what a type needs from the compiler, in a small file it
+compiles with your library. That file has to be able to name the type, which
+it can for anything a header declares and for standard types. A class
+defined only in a `.cpp` file is out of its reach: an object of it (or a
+smart pointer to it) comes back as raw bytes that nothing ends, the wrapper
+says so in a comment beside the call, and `wrap` lists such functions.
+Declare the class in a header to fix that.
+
 ### Objects passed by value
 
 Where a function takes such a type by value, it gets a **copy**, made by the

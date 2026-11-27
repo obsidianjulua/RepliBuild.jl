@@ -469,11 +469,11 @@ end
         """)
         cfg = RepliBuild.ConfigurationManager.load_config(joinpath(dir, "replibuild.toml"))
         lib = abspath(first(filter(p -> occursin("libjulia", basename(p)), Base.Libc.Libdl.dllist())))
-        gen(ownership) = (res = Base.invokelatest(_CXO_W.generate_introspective_module_cpp, cfg, lib,
+        gen(ownership; skipped = Any[]) = (res = Base.invokelatest(_CXO_W.generate_introspective_module_cpp, cfg, lib,
                      merge(Dict{String,Any}("functions" => deepcopy(fns), "globals" => Dict{String,Any}(),
                                             "struct_definitions" => deepcopy(structs), "record_abi" => deepcopy(ra)),
                            ownership === nothing ? Dict{String,Any}() :
-                           Dict{String,Any}("ownership" => Dict{String,Any}("types" => deepcopy(ownership), "skipped" => Any[]))),
+                           Dict{String,Any}("ownership" => Dict{String,Any}("types" => deepcopy(ownership), "skipped" => skipped))),
                      "Owned", _CXO_W.create_type_registry(cfg), true);
                  res isa Tuple ? String(first(res)) : String(res))
         body(text, name) = (m = match(Regex("\\nfunction $(name)\\(.*?\\n\\s*end\\n", "s"), text); m === nothing ? "" : String(m.match))
@@ -523,9 +523,37 @@ end
         @test occursin("RepliBuild.JITManager.return_slot(NTuple{24, UInt8})", body(old, "iota"))
         @test occursin("RepliBuild.JITManager.ByValue{NTuple{24, UInt8}}", body(old, "take"))
         @test occursin("function see(t::Tracked)", body(old, "see"))
+        @test !occursin("nothing ends it", old)       # and it says nothing new: byte for byte what it was
         # ...and a type the build asked nothing about keeps it too.
         part = gen(Dict{String,Any}(up => own[up]))
         @test occursin("return_slot(NTuple{24, UInt8})", body(part, "iota")) && occursin("_RB_OWN_1", body(part, "boxed"))
         @test [m.captures[1] for m in eachmatch(r"^const (_RB_OWN_\d+) ="m, part)] == ["_RB_OWN_1"]
+
+        # A return the wrapper cannot hold says so beside its call: the build
+        # asked, and has no answer for the type, or the reason it gave.
+        b = body(part, "iota")
+        @test occursin("# C++ `$vec` is returned as a copy of its bytes, and nothing ends it: " *
+                       "the build did not ask its compiler about the type\n", b)
+        @test occursin("# C++ `Tracked` is returned as a copy of its bytes, and nothing ends it: ", body(part, "tracked"))
+        why = gen(Dict{String,Any}(up => own[up]);
+                  skipped = Any[Dict{String,Any}("key" => vec, "reason" => "does not compile: use of undeclared identifier 'X'")])
+        @test occursin("nothing ends it: does not compile: use of undeclared identifier 'X'\n", body(why, "iota"))
+        # A held return, and one with nothing to end, say nothing of the kind.
+        @test !occursin("nothing ends it", body(part, "boxed")) && !occursin("nothing ends it", body(text, "iota"))
+        @test !occursin("nothing ends it", body(text, "copied")) && !occursin("nothing ends it", text)
+        # A type that has to be ended and that the wrapper holds in a form it cannot keep in place.
+        wide_align = merge(own, Dict{String,Any}("Tracked" => merge(own["Tracked"], Dict{String,Any}("align" => 32))))
+        @test occursin("nothing ends it: the wrapper has no plain struct of its size to keep it in",
+                       body(gen(wide_align), "tracked"))
+        # The wrap report names the functions, once.
+        report = let path = tempname()
+            open(path, "w") do io
+                redirect_stdout(() -> gen(Dict{String,Any}(up => own[up])), io)
+            end
+            read(path, String)
+        end
+        # (Three: with only the unique_ptr described, `Copied` has no answer either.)
+        @test occursin(r"wrap: 3 function\(s\) return a C\+\+ object as a copy of its bytes that nothing ends", report)
+        @test occursin("copied, iota, tracked", report) && !occursin("boxed", report)
     end
 end

@@ -1817,12 +1817,30 @@ the test named when you touch the area.
     an instantiation (`replibuild_force::own_facts<n, size, align, flags>`,
     read off the unit's IR), and compiles `replibuild_own_end_<n>`,
     `_copy_<n>` and `_move_<n>`. The metadata's `ownership.types[key]`
-    carries both. A return type is named through `decltype` of the member
-    that returns it, never spelled from DWARF. The unit follows the forced
-    unit's rules: one row per line, the include block checked alone, no
-    strong definition but its own helpers, and a relink that fails falls
-    back to the library without it (`refused!`). The helpers are not API
-    (`extract_symbols_from_binary`) and are shims to `_pe_export_intent`.
+    carries both.
+  - **A type is named four ways, best first** (`OwnershipUnit.plan`):
+    `decltype` of the member that returns it, a by-value parameter's
+    spelling in a demangled name, `decltype` of a free function, and last
+    its own name: the scope its definition was read in (the `scope` fact
+    of `record_abi`, absent where two scopes declare the name) plus its
+    DWARF name, with the standard headers its `std::` names are declared
+    in (`STD_HEADERS`). The last is the one way for a library whose
+    functions no header declares, and it is always among the candidates.
+    The compile judges every line, and a size other than DWARF's refuses
+    it (`checked!`): a spelling is never trusted on its own. A class
+    DEFINED in a source file has no line at all (no unit can include it,
+    and including the source would give its statics a second copy), so it
+    gets no facts.
+  - **The unit is written with the include block its rows were judged
+    with** (`judged_with`), never the winners' headers alone: a row can
+    compile only because another candidate's header declares what it
+    names, and without that header the unit did not compile and the
+    library was built without it (found 2026-11-27 on `sret_inplace_test`).
+    The rest is the forced unit's rules: one row per line, the include
+    block checked alone, no strong definition but its own helpers, and a
+    relink that fails falls back to the library without it (`refused!`).
+    The helpers are not API (`extract_symbols_from_binary`) and are shims
+    to `_pe_export_intent`.
   - **A return the facts say `ends` is a `CxxObjects.Owned{T}`**: the
     storage the call built into (`slot`, then `born!` once the call has
     returned, so a call that throws leaves nothing to end), whose finalizer
@@ -3243,7 +3261,11 @@ DWARF-resolved destructors — **is** built.)
   (2026-11-18): the metadata lists it in `global_constants`; decoding
   `DW_AT_const_value` is not built.
 - C++ ownership, what is left (2026-11-27). A graph-mode library and an
-  ingested one have no step 4d and keep the old by-value behaviour. So do a
+  ingested one have no step 4d and keep the old by-value behaviour. So does
+  a class defined in a source file and anything naming one
+  (`std::shared_ptr<Node>` with `Node` in a `.cpp`): the library's own
+  destructor and copy-constructor symbols could stand in for the unit's
+  functions there, and that is not built. So do a
   record the wrapper emits `mutable` (a class with bitfields and a
   destructor: its storage is already the Julia object, and only a finalizer
   is missing), a factory class returned by value, and a type aligned above

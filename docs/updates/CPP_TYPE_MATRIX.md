@@ -16,13 +16,18 @@ Everything from "The measurement" on is the tool's output, unedited.
 
 ## What it shows
 
-Measured 2026-11-24 with the fixes of 2026-11-23 and 2026-11-24 (RepliBuild
-4.6.0 plus unreleased changes), Julia 1.13, Linux x86-64, clang 23 with
-libstdc++ 16, thunks compiled at load. Not measured: thunks compiled ahead of time, libc++,
-AArch64, Windows. First measured 2026-11-23; what that measurement found and
+Measured 2026-11-27 with the C++ ownership change (RepliBuild 4.6.0 plus
+unreleased changes), Julia 1.13, Linux x86-64, clang 23 with libstdc++ 16,
+thunks compiled at load. Not measured: thunks compiled ahead of time, libc++,
+AArch64, Windows. First measured 2026-11-23; what each measurement found and
 has since been fixed is at the end of this section.
 
-The coverage tool reads these wrappers as 96.97% bound: 160 of 165 functions,
+**No case is wrong and none kills the process.** 193 cases: 111 work, 32 are
+handles, 20 take no plain Julia value, 5 are refused, 22 have nothing to
+pass, 3 are errors (explained below). The measurement of 2026-11-24 had 10
+wrong.
+
+The coverage tool reads these wrappers as 97.01% bound: 162 of 167 functions,
 5 refused. That counts a function whose thunk the wrapper invokes. The matrix
 asks what a user can do with it.
 
@@ -35,8 +40,8 @@ Only `std::string`. A `String` goes in where C++ takes `std::string` or
 
 `std::pair`, `std::tuple`, `std::array`, `std::complex`, `std::chrono`
 durations and time points, `std::bitset`, `std::string_view`, `std::span`,
-`std::initializer_list`, `std::error_code`, `std::weak_ptr`. Passed and read
-back; all but the last two can be made from Julia.
+`std::initializer_list`, `std::error_code`. Passed and read back; all can be
+made from Julia but the last.
 
 - **No Julia value converts.** A `ComplexF64`, a `Tuple`, a `Vector`, a
   `String` for a `string_view` is a `MethodError`: the struct has to be built.
@@ -60,29 +65,35 @@ reference.
   constructed string: `String(s)` on it is an error until the library has
   written into it.
 
-### Crosses as bytes: a handle
+### Held where C++ built it: a handle that is ended
 
 Everything that owns memory and comes back by value: every container, the
-smart pointers, `std::optional`, `std::any`, `std::filesystem::path`, wide
-strings. Where the value does not point into itself (the next section), the
-library reads the bytes back right. A `std::function` the library owns is a
-handle too, a pointer: it passes where C++ takes one by value. From Julia:
+smart pointers, `std::optional<std::string>`, `std::any`,
+`std::filesystem::path`, wide strings, a `std::pair` holding a string. Since
+2026-11-27 each is the C++ object itself, kept in the storage the call built
+it in, and Julia runs its destructor when it collects the object or at
+`RepliBuild.release!`.
 
-- **nothing reads what is inside** (a vector's elements, an optional's value);
-- **nothing ends it**: of two `unique_ptr`s returned and dropped, both objects
-  were alive after a collection, and a by-value pass lends the pointer where
-  C++ would move it.
+- **It is valid where Julia holds it.** A map's last key, a walk to a list's
+  end, a short string inside a pair or a path: all ten cases that were wrong
+  read right (`intact after the return` in the table).
+- **It is ended, once.** Of two `unique_ptr`s returned and dropped, both
+  objects are deleted after a collection.
+- **By value, C++ copies or moves.** A `shared_ptr` passed by value twice
+  leaves the use count at 1 and the caller's pointer whole; a `unique_ptr`
+  passed by value is deleted when the call returns and is spent, and passing
+  it again is an `ArgumentError`.
+- **Nothing reads what is inside** from Julia (a vector's elements, an
+  optional's string): that is why these cells say OPAQUE and not WORKS. A
+  record's fields do read, where it has them: a `std::weak_ptr`'s object
+  pointer, a `std::pair`'s `second`.
 
-### Broken
-
-- **A value that points into itself is not valid in Julia's hands.** It is
-  built in a buffer and its bytes are then copied into a Julia value. A
-  `std::list`, `std::map`, `std::set` and `std::unordered_map` keep a pointer
-  to a marker inside themselves, and a short `std::string` keeps its
-  characters inside itself: alone it is read in place and is fine, inside a
-  `std::pair`, a `std::optional` or a `std::filesystem::path` it is not, and
-  neither are `std::wstring` and `std::u16string`. Lookups happened to work;
-  a map's last key read as 0 where it is 3; a walk of the list would not end.
+**Where it does not reach.** The build asks its compiler about each type in
+a unit of its own, and that unit has to be able to name the type. A class
+defined in a source file cannot be included, so a `std::unique_ptr` or
+`std::shared_ptr` to one keeps the old behaviour: bytes that nothing ends.
+The two smart-pointer libraries here declare their classes in a header, as
+a library does, for that reason.
 
 ### Bound, and nothing to pass
 
@@ -100,6 +111,21 @@ handle too, a pointer: it passes where C++ takes one by value. From Julia:
 `std::span` by value. The refusal is correct. Its advice is not: it names
 `-fstandalone-debug`, which these libraries are built with.
 
+### The three errors
+
+None is a wrong call: each is a `MethodError` or an `ArgumentError` raised in
+Julia before or after C++ ran, and each is a gap listed above.
+
+- **`std::map<std::string, int>`, made from Julia**: `m["one"] = 1` is a
+  `MethodError`. The constructor function gives a map whose key type is
+  `Ptr{Cvoid}` ("Works through a container object").
+- **A `std::ostringstream*` at a `std::ostream&`** is a `MethodError`: the
+  wrapper does not know the one derives from the other ("Bound, and nothing
+  to pass").
+- **An empty `create_std_basic_string_char()` read back** is an
+  `ArgumentError`: it is zeroed memory, not a constructed string ("Works
+  through a container object").
+
 ### Exceptions
 
 A `std::runtime_error`, a `std::out_of_range`, a class derived from
@@ -108,7 +134,8 @@ first three with the C++ message, and the next call works.
 
 ### Fixed since the first measurement
 
-Found on 2026-11-23. The first three reach a library when it is rebuilt.
+Found on 2026-11-23. Everything here but the last item of the first list
+reaches a library when it is rebuilt.
 
 - **`std::vector<bool>` returned by value killed the process.** The wrapper
   gave it the 24 bytes of a `std::vector<T>`; it is 40. The size now comes
@@ -124,6 +151,17 @@ Found on 2026-11-23. The first three reach a library when it is rebuilt.
   refused where a `const std::function&` is taken. Both pass since
   2026-11-24, with no rebuild.
 
+Fixed on 2026-11-27, by the ownership change:
+
+- **A value that points into itself was not valid in Julia's hands.** It was
+  built in a buffer and its bytes were then copied into a Julia value. A
+  `std::list`, `std::map`, `std::set` and `std::unordered_map` keep a pointer
+  to a marker inside themselves, and a short `std::string` keeps its
+  characters inside itself. Lookups happened to work; a map's last key read
+  as 0 where it is 3; a walk of the list would not end.
+- **Nothing ended it**, and a by-value pass lent the caller's bytes where C++
+  copies or moves.
+
 ### Seen in passing
 
 - A function returning a type that holds a `std::string` is named
@@ -136,9 +174,9 @@ Found on 2026-11-23. The first three reach a library when it is rebuilt.
 
 ## The measurement
 
-Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_type_matrix.jl`, on x86_64-linux-gnu. Probe libraries compiled with `-std=c++20 -O1 -fPIC -fstandalone-debug`; thunks compiled when the wrapper loads.
+Measured 2026-11-27 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_type_matrix.jl`, on x86_64-linux-gnu. Probe libraries compiled with `-std=c++20 -O1 -fPIC -fstandalone-debug`; thunks compiled when the wrapper loads.
 
-191 cases: 98 works, 31 opaque, 20 not taken, 5 refused, 24 no way, 10 wrong, 3 error.
+193 cases: 111 works, 32 opaque, 20 not taken, 5 refused, 22 no way, 3 error.
 
 | Type | make | pass by value | pass by reference | return by value | return by reference | other |
 |:--|:--|:--|:--|:--|:--|:--|
@@ -163,21 +201,21 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | `int (*)(int) (a plain function pointer)` | WORKS |  |  |  |  | takes a Julia function: NOT TAKEN |
 | `std::initializer_list<int>` | WORKS | WORKS | WORKS |  |  | takes a Julia Vector: NOT TAKEN |
 | `std::initializer_list<double>` |  | WORKS |  |  |  |  |
-| `std::map<int, int>` | WORKS | WORKS | WORKS | OPAQUE |  | takes a Julia Dict: NOT TAKEN; intact after the return: WRONG |
+| `std::map<int, int>` | WORKS | WORKS | WORKS | OPAQUE |  | takes a Julia Dict: NOT TAKEN; intact after the return: WORKS |
 | `std::map<std::string, int>` | ERROR |  |  | OPAQUE |  |  |
-| `std::unordered_map<int, int>` | WORKS |  |  | OPAQUE |  | intact after the return: WRONG |
-| `std::set<int>` | NO WAY |  |  | OPAQUE |  | intact after the return: WRONG |
+| `std::unordered_map<int, int>` | WORKS |  |  | OPAQUE |  | intact after the return: WORKS |
+| `std::set<int>` | NO WAY |  |  | OPAQUE |  | intact after the return: WORKS |
 | `std::optional<int>` | WORKS | WORKS | WORKS | OPAQUE |  | make (holding a value): NO WAY |
 | `std::optional<double>` |  |  |  | OPAQUE |  |  |
-| `std::optional<std::string>` |  |  |  | OPAQUE |  | intact after the return: WRONG |
+| `std::optional<std::string>` |  |  |  | OPAQUE |  | intact after the return: WORKS |
 | `std::pair<int, double>` | WORKS | WORKS | WORKS | WORKS |  | takes a Julia Pair or Tuple: NOT TAKEN |
-| `std::pair<std::string, int>` |  |  |  | OPAQUE |  | intact after the return: WRONG |
+| `std::pair<std::string, int>` |  |  |  | OPAQUE |  | intact after the return: WORKS |
 | `std::tuple<int, double, char>` | WORKS | WORKS | WORKS | WORKS |  | takes a Julia Tuple: NOT TAKEN |
-| `std::filesystem::path` | NO WAY | WORKS | WORKS | OPAQUE |  | takes a Julia String: NOT TAKEN; intact after the return: WRONG |
+| `std::filesystem::path` | NO WAY | WORKS | WORKS | OPAQUE |  | takes a Julia String: NOT TAKEN; intact after the return: WORKS |
 | `std::deque<int>` | NO WAY |  |  | OPAQUE |  |  |
-| `std::list<int>` | NO WAY |  |  | WRONG |  | intact after the return: WRONG |
+| `std::list<int>` | NO WAY |  |  | OPAQUE |  | intact after the return: WORKS |
 | `std::bitset<8>` | WORKS | WORKS |  | WORKS |  |  |
-| `std::shared_ptr<SNode>` | NO WAY | WORKS | WORKS | OPAQUE |  | use count after a by-value pass: WORKS |
+| `std::shared_ptr<SNode>` | NO WAY | WORKS | WORKS | OPAQUE |  | use count after a by-value pass: WORKS; copied and ended by Julia: WORKS |
 | `std::weak_ptr<SNode>` |  |  | WORKS | WORKS |  |  |
 | `std::span<const int>` | WORKS | WORKS | WORKS |  |  | takes a Julia Vector: NOT TAKEN |
 | `std::span<int>` |  | WORKS |  | WORKS |  |  |
@@ -189,7 +227,7 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | `std::string& (written by the function)` | WORKS | WORKS | WORKS |  |  | an empty CppString reads back as "": ERROR; takes a Julia String: NOT TAKEN |
 | `std::string_view` | WORKS | WORKS | WORKS | WORKS |  | takes a Julia String: NOT TAKEN |
 | `std::unique_ptr<UNode>` | NO WAY | WORKS | WORKS | OPAQUE |  |  |
-| `std::unique_ptr<UCounted> (counts live objects)` |  |  |  |  |  | ended by Julia: NO WAY; ended by a by-value pass: NO WAY |
+| `std::unique_ptr<UCounted> (counts live objects)` |  |  |  |  |  | ended by Julia: WORKS; ended by release!: WORKS; ended by a by-value pass: WORKS |
 | `std::unique_ptr<int[]>` |  |  |  | OPAQUE |  |  |
 | `std::variant<int, double>` | NO WAY | REFUSED | NO WAY | REFUSED |  |  |
 | `std::variant<int, std::string>` |  |  | NO WAY | REFUSED |  |  |
@@ -199,8 +237,8 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | `std::vector<std::string>` | NO WAY |  |  | OPAQUE |  |  |
 | `std::vector<std::vector<int>>` | NO WAY |  |  | OPAQUE |  |  |
 | `std::vector<bool>` | NO WAY |  |  | OPAQUE |  |  |
-| `std::wstring` | NO WAY |  | WORKS | OPAQUE |  | takes a Julia String: NOT TAKEN; intact after the return: WRONG |
-| `std::u16string` |  |  |  | OPAQUE |  | intact after the return: WRONG |
+| `std::wstring` | NO WAY |  | WORKS | OPAQUE |  | takes a Julia String: NOT TAKEN; intact after the return: WORKS |
+| `std::u16string` |  |  |  | OPAQUE |  | intact after the return: WORKS |
 | `std::u8string` |  |  |  | NO WAY |  |  |
 
 `make` is a value made from Julia with no function of the library making it. A cell with two words had two cases; every case is listed below with what was tried.
@@ -221,7 +259,7 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 
 - `std::any`, make: **WORKS** — an empty one: `M.any()`, all zero
 - `std::any`, make (holding a value): **NO WAY** — no create function in the wrapper; the struct is 16 bytes with no field for a value; the library's `any_int` is the way
-- `std::any`, return by value: **OPAQUE** — a struct of bytes, a any; what it holds is read only through the library
+- `std::any`, return by value: **OPAQUE** — the C++ object, a RepliBuild.CxxObjects.Owned{any}; what it holds is read only through the library
 - `std::any`, pass by reference: **WORKS** — Ref of the returned struct
 - `std::any`, pass by value: **WORKS** — passed twice
 
@@ -309,16 +347,16 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 - `std::map<int, int>`, takes a Julia Dict: **NOT TAKEN** — a Dict{Cint,Cint}: no method pointer_arg(::DataType, ::Dict{Int32, Int32})
 - `std::map<int, int>`, pass by reference: **WORKS** — a CppMap
 - `std::map<int, int>`, pass by value: **WORKS** — a CppMap, passed twice
-- `std::map<int, int>`, return by value: **OPAQUE** — comes back as its bytes, a NTuple{48, UInt8}; lookups through Ref(r) are right
-- `std::map<int, int>`, intact after the return: **WRONG** — the library's check answers 0 on the value Julia holds, and 3 on one that never left C++
+- `std::map<int, int>`, return by value: **OPAQUE** — comes back as the C++ object, a RepliBuild.CxxObjects.Owned{NTuple{48, UInt8}}; lookups through Ref(r) are right
+- `std::map<int, int>`, intact after the return: **WORKS**
 - `std::map<std::string, int>`, make: **ERROR** — MethodError: no method convert(::DataType, ::String)
-- `std::map<std::string, int>`, return by value: **OPAQUE** — its bytes; the key is a Julia String
+- `std::map<std::string, int>`, return by value: **OPAQUE** — the C++ object; the key is a Julia String
 - `std::unordered_map<int, int>`, make: **WORKS** — create_std_unordered_map_int_int()
-- `std::unordered_map<int, int>`, return by value: **OPAQUE** — its bytes, a NTuple{56, UInt8}; all 5 keys were found through Ref(r) on this run
-- `std::unordered_map<int, int>`, intact after the return: **WRONG** — the library's check answers 0 on the value Julia holds, and 1 on one that never left C++
+- `std::unordered_map<int, int>`, return by value: **OPAQUE** — the C++ object, a RepliBuild.CxxObjects.Owned{NTuple{56, UInt8}}; all 5 keys were found through Ref(r)
+- `std::unordered_map<int, int>`, intact after the return: **WORKS**
 - `std::set<int>`, make: **NO WAY** — no create function in the wrapper; the entry is in [types] templates and gets no constructor
-- `std::set<int>`, return by value: **OPAQUE** — its bytes
-- `std::set<int>`, intact after the return: **WRONG** — the library's check answers 0 on the value Julia holds, and 6 on one that never left C++
+- `std::set<int>`, return by value: **OPAQUE** — the C++ object
+- `std::set<int>`, intact after the return: **WORKS**
 
 ### optional
 
@@ -329,7 +367,7 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 - `std::optional<int>`, return by value: **OPAQUE** — a struct of bytes: the value and the flag are read by hand at their offsets, no field names them
 - `std::optional<double>`, return by value: **OPAQUE** — a struct of bytes
 - `std::optional<std::string>`, return by value: **OPAQUE** — a struct of bytes; the string inside is not a Julia String
-- `std::optional<std::string>`, intact after the return: **WRONG** — the library's check answers 0 on the value Julia holds, and 1 on one that never left C++
+- `std::optional<std::string>`, intact after the return: **WORKS**
 
 ### pair_tuple
 
@@ -339,7 +377,7 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 - `std::pair<int, double>`, pass by reference: **WORKS**
 - `std::pair<int, double>`, return by value: **WORKS** — fields `first` and `second`
 - `std::pair<std::string, int>`, return by value: **OPAQUE** — `second` is a field; `first` is the string's bytes, a NTuple{32, UInt8}, not a Julia String
-- `std::pair<std::string, int>`, intact after the return: **WRONG** — the library's check answers 0 on the value Julia holds, and 1 on one that never left C++
+- `std::pair<std::string, int>`, intact after the return: **WORKS**
 - `std::tuple<int, double, char>`, return by value: **WORKS** — the elements are fields in the order the library stores them (last first): _M_head_impl, _M_head_impl_1, _M_head_impl_2
 - `std::tuple<int, double, char>`, make: **WORKS** — zeroed, then setproperties on the library's internal field names
 - `std::tuple<int, double, char>`, takes a Julia Tuple: **NOT TAKEN** — a Tuple{Cint,Float64,Cchar}: no method tup_sum(::Tuple{Int32, Float64, Int8})
@@ -350,20 +388,20 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 
 - `std::filesystem::path`, make: **NO WAY** — no create function in the wrapper; `M.path()` is zeroed bytes, not a constructed path, and no field takes text
 - `std::filesystem::path`, takes a Julia String: **NOT TAKEN** — a Julia String: no method path_len(::String)
-- `std::filesystem::path`, return by value: **OPAQUE** — a struct of bytes, a path; its text is read only through the library
+- `std::filesystem::path`, return by value: **OPAQUE** — the C++ object, a RepliBuild.CxxObjects.Owned{path}; its text is read only through the library
 - `std::filesystem::path`, pass by reference: **WORKS** — Ref of the value the library returned
 - `std::filesystem::path`, pass by value: **WORKS** — and the std::string it returns is a Julia String
 - `std::filesystem::path`, pass by value: **WORKS** — 68 characters
-- `std::filesystem::path`, intact after the return: **WRONG** — the library's check answers 0 on the value Julia holds, and 1 on one that never left C++
+- `std::filesystem::path`, intact after the return: **WORKS**
 - `std::filesystem::path`, return by value: **OPAQUE** — operator/ result
 
 ### sequence
 
 - `std::deque<int>`, make: **NO WAY** — no create function in the wrapper; not in [types] templates, and a deque gets no constructor there either
-- `std::deque<int>`, return by value: **OPAQUE** — comes back as its bytes, a NTuple{80, UInt8}
+- `std::deque<int>`, return by value: **OPAQUE** — comes back as the C++ object, a RepliBuild.CxxObjects.Owned{NTuple{80, UInt8}}
 - `std::list<int>`, make: **NO WAY** — no create function in the wrapper; not in [types] templates, and a list gets no constructor there either
-- `std::list<int>`, intact after the return: **WRONG** — the library's check answers 0 on the value Julia holds, and 1 on one that never left C++
-- `std::list<int>`, return by value: **WRONG** — the list's last node points at the buffer it was returned in, not at the copy Julia holds: a walk to end() never arrives (not run)
+- `std::list<int>`, intact after the return: **WORKS**
+- `std::list<int>`, return by value: **OPAQUE** — the C++ object, a RepliBuild.CxxObjects.Owned{NTuple{24, UInt8}}
 - `std::bitset<8>`, make: **WORKS** — the struct's one field, a word
 - `std::bitset<8>`, pass by value: **WORKS**
 - `std::bitset<8>`, return by value: **WORKS** — read from the field `_M_w`
@@ -371,13 +409,14 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 ### shared_ptr
 
 - `std::shared_ptr<SNode>`, make: **NO WAY** — no create function in the wrapper; the library's `sp_make` is the way
-- `std::shared_ptr<SNode>`, return by value: **OPAQUE** — comes back as its bytes, a NTuple{16, UInt8}: the object pointer, then the control block's
-- `std::shared_ptr<SNode>`, pass by reference: **WORKS** — Ref(r), as the manual says for a returned container
-- `std::shared_ptr<SNode>`, pass by reference: **WORKS** — a hand-made Ptr{shared_ptr_SNode} to the bytes
-- `std::shared_ptr<SNode>`, pass by value: **WORKS** — the bytes, passed twice
+- `std::shared_ptr<SNode>`, return by value: **OPAQUE** — comes back as the C++ object, a RepliBuild.CxxObjects.Owned{NTuple{16, UInt8}}, held where C++ built it; its bytes are the object pointer, then the control block's
+- `std::shared_ptr<SNode>`, pass by reference: **WORKS** — the object, and Ref(r) as the manual said while a container was its bytes
+- `std::shared_ptr<SNode>`, pass by reference: **WORKS** — a hand-made Ptr{shared_ptr_SNode} to the object
+- `std::shared_ptr<SNode>`, pass by value: **WORKS** — the object, passed twice: C++ copies it, and the caller keeps its own
 - `std::shared_ptr<SNode>`, use count after a by-value pass: **WORKS**
-- `std::weak_ptr<SNode>`, return by value: **WORKS** — a struct with the object pointer as a field
-- `std::weak_ptr<SNode>`, pass by reference: **WORKS** — Ref of the returned struct
+- `std::shared_ptr<SNode>`, copied and ended by Julia: **WORKS** — copy(r) is a second owner; release!, or a collection, ends it
+- `std::weak_ptr<SNode>`, return by value: **WORKS** — the C++ object, a RepliBuild.CxxObjects.Owned{weak_ptr_SNode}; the object pointer reads as a field
+- `std::weak_ptr<SNode>`, pass by reference: **WORKS** — the returned object, and Ref of it
 
 ### span
 
@@ -426,13 +465,14 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 ### unique_ptr
 
 - `std::unique_ptr<UNode>`, make: **NO WAY** — no create function in the wrapper; the library's `up_make` is the way
-- `std::unique_ptr<UNode>`, return by value: **OPAQUE** — comes back as its bytes, a NTuple{8, UInt8}, which are the pointer it owns
-- `std::unique_ptr<UNode>`, pass by reference: **WORKS** — Ref(r), as the manual says for a returned container
-- `std::unique_ptr<UNode>`, pass by reference: **WORKS** — a hand-made Ptr{unique_ptr_UNode_std_default_delete_UNode} to the bytes
-- `std::unique_ptr<UNode>`, pass by value: **WORKS** — the bytes
-- `std::unique_ptr<UCounted> (counts live objects)`, ended by Julia: **NO WAY** — nothing ends a unique_ptr returned by value: 2 of 2 objects are still alive after GC, and the wrapper has no function that would delete them
-- `std::unique_ptr<UCounted> (counts live objects)`, ended by a by-value pass: **NO WAY** — the object is still alive after the call: passing the bytes lends the pointer, it does not move it, and nothing ends the object later
-- `std::unique_ptr<int[]>`, return by value: **OPAQUE** — its bytes, the pointer to the array
+- `std::unique_ptr<UNode>`, return by value: **OPAQUE** — comes back as the C++ object, a RepliBuild.CxxObjects.Owned{NTuple{8, UInt8}}, held where C++ built it; its bytes are the pointer it owns
+- `std::unique_ptr<UNode>`, pass by reference: **WORKS** — the object, and Ref(r) as the manual said while a container was its bytes
+- `std::unique_ptr<UNode>`, pass by reference: **WORKS** — a hand-made Ptr{unique_ptr_UNode_std_default_delete_UNode} to the object
+- `std::unique_ptr<UNode>`, pass by value: **WORKS** — moved, as C++ moves what it cannot copy: the object is spent, and passing it again is an ArgumentError
+- `std::unique_ptr<UCounted> (counts live objects)`, ended by Julia: **WORKS** — both objects were deleted when Julia collected the two unique_ptrs
+- `std::unique_ptr<UCounted> (counts live objects)`, ended by release!: **WORKS** — RepliBuild.release!(r) runs the destructor at once, and once
+- `std::unique_ptr<UCounted> (counts live objects)`, ended by a by-value pass: **WORKS** — the object is deleted when the call returns, as in C++
+- `std::unique_ptr<int[]>`, return by value: **OPAQUE** — the C++ object; its bytes are the pointer to the array
 
 ### variant
 
@@ -450,29 +490,29 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 - `std::vector<int>`, pass by reference: **WORKS** — const std::vector<int>&, a CppVector
 - `std::vector<int>`, pass by reference: **WORKS** — std::vector<int>& the library grows
 - `std::vector<int>`, pass by value: **WORKS** — a CppVector, passed twice
-- `std::vector<int>`, return by value: **OPAQUE** — comes back as its bytes, a NTuple{24, UInt8}: it passes back by value and as Ref(r), and its elements cannot be read from Julia
+- `std::vector<int>`, return by value: **OPAQUE** — comes back as the C++ object, a RepliBuild.CxxObjects.Owned{NTuple{24, UInt8}}: it passes back by value (a copy) and by reference, and its elements cannot be read from Julia
 - `std::vector<double>`, make: **WORKS**
-- `std::vector<double>`, return by value: **OPAQUE** — its bytes
+- `std::vector<double>`, return by value: **OPAQUE** — the C++ object
 - `std::vector<P2> (a library struct)`, make: **WORKS**
-- `std::vector<P2> (a library struct)`, return by value: **OPAQUE** — its bytes
+- `std::vector<P2> (a library struct)`, return by value: **OPAQUE** — the C++ object
 - `std::vector<std::string>`, make: **NO WAY** — no create function in the wrapper; the entry is in [types] templates and gets no constructor
-- `std::vector<std::string>`, return by value: **OPAQUE** — its bytes; the strings cannot be read from Julia
+- `std::vector<std::string>`, return by value: **OPAQUE** — the C++ object; the strings cannot be read from Julia
 - `std::vector<std::vector<int>>`, make: **NO WAY** — no create function in the wrapper; the entry is in [types] templates and gets no constructor
-- `std::vector<std::vector<int>>`, return by value: **OPAQUE** — its bytes
+- `std::vector<std::vector<int>>`, return by value: **OPAQUE** — the C++ object
 - `std::vector<bool>`, make: **NO WAY** — no create function in the wrapper; not in [types] templates
-- `std::vector<bool>`, return by value: **OPAQUE** — its bytes, a NTuple{40, UInt8}
+- `std::vector<bool>`, return by value: **OPAQUE** — the C++ object, a RepliBuild.CxxObjects.Owned{NTuple{40, UInt8}}
 
 ### wide_string
 
 - `std::wstring`, make: **NO WAY** — no create function in the wrapper; no Julia value is converted either: wide strings are not decoded in either direction
 - `std::wstring`, takes a Julia String: **NOT TAKEN** — a Julia String: no method pointer_arg(::DataType, ::String)
-- `std::wstring`, return by value: **OPAQUE** — comes back as its bytes, a NTuple{32, UInt8}; the characters are not decoded
+- `std::wstring`, return by value: **OPAQUE** — comes back as the C++ object, a RepliBuild.CxxObjects.Owned{NTuple{32, UInt8}}; the characters are not decoded
 - `std::wstring`, return by value: **OPAQUE** — 40 characters
-- `std::wstring`, pass by reference: **WORKS** — Ref of the bytes the library returned
-- `std::wstring`, intact after the return: **WRONG** — the library's check answers 0 on the value Julia holds, and 1 on one that never left C++
-- `std::u16string`, return by value: **OPAQUE** — its bytes, a NTuple{32, UInt8}
-- `std::u16string`, intact after the return: **WRONG** — the library's check answers 0 on the value Julia holds, and 1 on one that never left C++
-- `std::u8string`, return by value: **NO WAY** — comes back as a NTuple{32, UInt8}, and no function of the library takes one to read it
+- `std::wstring`, pass by reference: **WORKS** — Ref of the object the library returned
+- `std::wstring`, intact after the return: **WORKS**
+- `std::u16string`, return by value: **OPAQUE** — the C++ object, a RepliBuild.CxxObjects.Owned{NTuple{32, UInt8}}
+- `std::u16string`, intact after the return: **WORKS**
+- `std::u8string`, return by value: **NO WAY** — comes back as a RepliBuild.CxxObjects.Owned{NTuple{32, UInt8}}, and no function of the library takes one to read it
 
 ## What the coverage tool says of the same wrappers
 
@@ -499,16 +539,16 @@ Measured 2026-11-24 with RepliBuild 4.6.0 on Julia 1.13.4 by `test/tools/cpp_typ
 | tm_stream | 6/6 | 100.0 | 0 | 6 | 0 | 0 | 0 |  | 0/0/0/3/0 | 4.6.0 |
 | tm_string | 6/6 | 100.0 | 0 | 6 | 0 | 0 | 0 |  | 0/0/0/0/0 | 4.6.0 |
 | tm_string_view | 5/5 | 100.0 | 0 | 5 | 0 | 0 | 0 |  | 1/0/0/0/0 | 4.6.0 |
-| tm_unique_ptr | 8/8 | 100.0 | 0 | 8 | 0 | 0 | 0 |  | 2/0/0/3/0 | 4.6.0 |
+| tm_unique_ptr | 10/10 | 100.0 | 0 | 10 | 0 | 0 | 2 |  | 2/0/0/3/0 | 4.6.0 |
 | tm_variant | 2/5 | 40.0 | 0 | 2 | 3 | 0 | 0 |  | 0/0/0/2/0 | 4.6.0 |
 | tm_vector | 24/24 | 100.0 | 0 | 24 | 0 | 0 | 0 |  | 1/0/0/0/0 | 4.6.0 |
 | tm_wide_string | 9/9 | 100.0 | 0 | 9 | 0 | 0 | 0 |  | 0/0/0/0/0 | 4.6.0 |
 
 libraries measured: 22 of 22 rows
-surface (unique mangled, net of exclusions, not-exported and earlier-bound): 165
-expected drops (several C++ entry points behind one Julia method, by design): 0
-callable (surface less expected): 165
-bound:   160/165 = 96.97%  (tier 3: 0, tier 2: 160)
+surface (unique mangled, net of exclusions, not-exported and earlier-bound): 169
+expected drops (several C++ entry points behind one Julia method, by design): 2
+callable (surface less expected): 167
+bound:   162/167 = 97.01%  (tier 3: 0, tier 2: 162)
 traps:   5   dropped: 0   unexported: 0
 pure virtuals (no symbol, called through the vtable): 0 bound of 0 in the surface
 thunks in a manifest nothing invokes: 0   thunks invoked outside the surface (STL members): 0
@@ -523,11 +563,17 @@ misses by cause (count, then the first symbols):
         tm_variant  var_index(std::variant<int, double>)
         tm_variant  vars_make[abi:cxx11](int)
 
+expected drops (not misses):
+  1  constructor variant (C1/C2: one Julia method per constructor)
+        tm_unique_ptr  UCounted::UCounted(int)
+  1  destructor variant (D0/D1/D2: one Julia method per class)
+        tm_unique_ptr  UCounted::~UCounted()
+
 trapped records (functions each blocks):
   2  variant<int, double>
   1  function<int (int)>
   1  span<const int, 3UL>
   1  variant<int, std::__cxx11::basic_string<char, std::char_traits<char>,…
 
-cpp coverage: 160/165 (96.97%), traps 5, dropped 0, expected 0
+cpp coverage: 162/167 (97.01%), traps 5, dropped 0, expected 2
 ```

@@ -1534,6 +1534,17 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         t = o isa AbstractDict ? get(o, "types", nothing) : nothing
         t isa AbstractDict ? t : Dict{String,Any}()
     end
+    # Whether the build asked at all, and why it has no answer for a type
+    # (`skipped`): what a wrapper says beside a return it cannot hold.
+    ownership_asked = haskey(metadata, "ownership")
+    own_skipped = Dict{String,String}()
+    let o = get(metadata, "ownership", nothing)
+        for row in (o isa AbstractDict ? get(o, "skipped", Any[]) : Any[])
+            row isa AbstractDict || continue
+            own_skipped[String(get(row, "key", ""))] = String(get(row, "reason", ""))
+        end
+    end
+    unheld_returns = String[]
     # How each class's by-value temporary is made, the table the thunk
     # generator builds too: a class no temporary can be made for traps here
     # (`thunk_crossings`), where the thunk generator emits no thunk.
@@ -4870,6 +4881,23 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             owned_ret = own_holder !== nothing
             owned_ret && (ownership_kinds[own_ret.id] = own_ret)
             in_place_doc = owned_ret ? _owned_return_doc(doc_comment, "$(_OWNED){$own_holder}") : doc_comment
+            # A return that has to be ended, or that nothing could say need
+            # not be, and that the wrapper cannot hold: it says so beside
+            # the call, and the wrap report counts it. Only where the build
+            # asked (`ownership_asked`): older metadata wraps as it did.
+            unheld_note = ""
+            if in_place && !owned_ret && !(string_plan isa Tuple) && ownership_asked
+                ukey = JLCSIRGenerator.FunctionGen.owned_key(String(jit_c_ret), dwarf_structs, record_abi; ret = true)
+                why = ukey === nothing ? nothing :
+                      own_ret === nothing ? get(own_skipped, ukey, "the build did not ask its compiler about the type") :
+                      own_ret.ends ? "the wrapper has no plain struct of its size to keep it in " *
+                                     "(a record emitted mutable, a factory class, or an alignment above 16)" : nothing
+                if why !== nothing
+                    unheld_note = "    # C++ `$(replace(ukey, r"[\r\n]" => " "))` is returned as a copy of its bytes, and nothing ends it: " *
+                                  "$(replace(why, r"[\r\n]" => " "))\n"
+                    push!(unheld_returns, julia_name)
+                end
+            end
             in_place_body(call) = owned_ret ?
                 ((string_plan isa String ?
                      "    # $(replace(string_plan, "returned as its raw bytes" => "returned as the C++ object, not read into a String"))\n" : "") *
@@ -4877,7 +4905,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                  "$(_ownership_const(own_ret)), LIBRARY_PATH)\n" *
                  "    GC.@preserve _rb_ret $call\n" *
                  "    return RepliBuild.CxxObjects.born!(_rb_ret)") :
-                (string_plan isa String ? "    # $(string_plan)\n" : "") *
+                (string_plan isa String ? "    # $(string_plan)\n" : "") * unheld_note *
                 "    " * string_setup * "_rb_ret = RepliBuild.JITManager.return_slot($jit_ret_type)\n" *
                 "    GC.@preserve _rb_ret $call\n" *
                 (string_plan isa Tuple ?
@@ -5887,6 +5915,13 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
         _aot_thunk_slot_chunk(_funcs, aot_fptr_taken) : ""
     # ...and the ownership kinds its call sites name (`_ownership_kind_chunk`).
     thunk_slots *= _ownership_kind_chunk(_funcs, ownership_kinds)
+    # What the wrapper could not hold, said once at wrap as well as beside
+    # each call: counted over the functions the final text still defines.
+    let left = sort!(unique(String[n for n in unheld_returns if occursin("\nfunction $(n)(", _funcs)]))
+        isempty(left) || println("  wrap: $(length(left)) function(s) return a C++ object as a copy of its bytes that nothing ",
+                                 "ends, because the build could not describe its type (the reason is beside each call): ",
+                                 join(first(left, 8), ", "), length(left) > 8 ? ", …" : "")
+    end
 
     # The manifest is written on every wrap, JIT mode included: JITManager
     # compiles only the thunks it lists, and without one it compiles a thunk for
