@@ -1755,8 +1755,10 @@ function _pe_export_intent(ir_files::Vector{String})
         io = open(f)
         try
             for line in eachline(io)
-                # The macro shims and the thread-local accessors are ours.
-                is_shim = occursin("replibuild_shim_", line) || occursin("replibuild_tls_", line)
+                # The macro shims, the thread-local accessors and the
+                # ownership unit's functions are ours.
+                is_shim = occursin("replibuild_shim_", line) || occursin("replibuild_tls_", line) ||
+                          occursin("replibuild_own_", line)
                 is_shim && (saw_shim = true)
                 if occursin("dllexport", line) && !is_shim
                     saw_foreign_export = true
@@ -2072,7 +2074,10 @@ function create_library(config::RepliBuildConfig, ir_files::Union{String,Vector{
     # The thread-local accessor unit (step 4c) is in this link when its file
     # exists: `compile_project` removes it before the first.
     tls_unit = isfile(_tls_unit_path(config))
-    pe_intent = (Sys.iswindows() && (!isempty(config.wrap.macros) || !isempty(forced) || tls_unit)) ?
+    # ...and so is the ownership unit (step 4d), whose functions are
+    # `dllexport` too.
+    own_unit = isfile(_own_unit_path(config))
+    pe_intent = (Sys.iswindows() && (!isempty(config.wrap.macros) || !isempty(forced) || tls_unit || own_unit)) ?
                 _pe_export_intent(files) : nothing
     if !isempty(forced)
         (files, n) = _forced_exportable_ir(files, forced, joinpath(get_build_path(config), "ctors_exported");
@@ -5673,6 +5678,7 @@ function compile_project(config::RepliBuildConfig)
     # accessor unit (step 4c), whose presence `create_library` asks about.
     rm(_forced_symbols_path(config); force=true)
     rm(_tls_unit_path(config); force=true)
+    rm(_own_unit_path(config); force=true)
 
     # Generate macro shims
     cpp_files = generate_macro_shims(config, cpp_files)
@@ -5801,6 +5807,62 @@ function compile_project(config::RepliBuildConfig)
         forced_plans = (; inline_constructors = plan, inline_methods = mplan, default_arguments = dplan)
     end
 
+    # Step 4d: what the compiler says about each type the library returns or
+    # takes by value and will not copy bytewise (`FunctionGen.owned_key`): must
+    # it be ended, can it be copied or moved. One line per type in a generated
+    # unit (`OwnershipUnit`), which also defines the functions that end, copy
+    # and move one. Planned from the extraction above, so the forced unit's
+    # functions are among those asked about; the unit is compiled beside the
+    # others (every other IR is a cache hit), the library relinked and the
+    # metadata extracted again with the answers (`ownership`). A library that
+    # does not build with the unit is built without it, every type refused
+    # with the reason. Before step 4c, whose extraction carries these along.
+    own_plan = nothing
+    if config.wrap.language == :cpp && config.binary.type != :executable
+        Own = _ownership_unit()
+        meta_now = _read_json(metadata_path)
+        oplan = Own.plan(get(meta_now, "functions", Any[]),
+                         get(meta_now, "struct_definitions", Dict{String,Any}()),
+                         get(meta_now, "record_abi", Dict{String,Any}()))
+        if !(isempty(oplan["candidates"]) && isempty(oplan["skipped"]))
+            (cpp_files_o, oplan) = Own.generate(config, cpp_files, oplan)
+            if length(cpp_files_o) > length(cpp_files)
+                println("  ownership: $(length(oplan["rows"])) type(s) returned or taken by value that C++ " *
+                        "will not copy bytewise: asking the compiler about each")
+                relinked = try
+                    ir_o = compile_to_ir(config, cpp_files_o)
+                    Own.checked!(oplan, _ir_output_path(get_build_path(config), _own_unit_path(config)))
+                    linked_o = link_optimize_ir(config, ir_o, output_name)
+                    (ir_o, linked_o, create_library(config, linked_o; per_tu_ir=ir_o))
+                catch e
+                    e isa InterruptException && rethrow()
+                    e
+                end
+                if relinked isa Tuple
+                    cpp_files = cpp_files_o
+                    (ir_files, linked_ir, binary_path) = relinked
+                    Own.exported!(oplan, _runtime_defined_names(binary_path))
+                else
+                    why = _forced_unit_link_reason(relinked)
+                    @warn "The library did not build with RepliBuild's ownership unit; it is built " *
+                          "without it, and no object it returns by value is ended." reason = why
+                    Own.refused!(oplan, why)
+                    rm(_own_unit_path(config); force = true)
+                    ir_files = compile_to_ir(config, cpp_files)
+                    linked_ir = link_optimize_ir(config, ir_files, output_name)
+                    binary_path = create_library(config, linked_ir; per_tu_ir=ir_files)
+                end
+                nounwind = _nounwind_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
+                byval = _byval_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
+            end
+            own_plan = oplan
+            metadata_path = save_compilation_metadata(config, cpp_files, binary_path;
+                                                      nounwind=nounwind, byval=byval,
+                                                      thread_locals=thread_locals, ownership=own_plan,
+                                                      (forced_plans === nothing ? (;) : forced_plans)...)
+        end
+    end
+
     # Step 4c: one accessor per thread-local global (`_tls_accessor_plan`),
     # compiled into the library: a thread-local variable's address depends on
     # the thread that asks, and the compiler computes it. The unit is compiled
@@ -5840,14 +5902,13 @@ function compile_project(config::RepliBuildConfig)
             end
             nounwind = _nounwind_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
             byval = _byval_definitions(linked_ir isa String ? [linked_ir] : linked_ir)
-            metadata_path = forced_plans === nothing ?
-                save_compilation_metadata(config, cpp_files, binary_path;
-                                          nounwind=nounwind, byval=byval,
-                                          thread_locals=thread_locals, tls_accessors=tls_rows) :
-                save_compilation_metadata(config, cpp_files, binary_path;
-                                          nounwind=nounwind, byval=byval,
-                                          thread_locals=thread_locals, tls_accessors=tls_rows,
-                                          forced_plans...)
+            # With what steps 4b and 4d settled, when they ran.
+            settled = merge(forced_plans === nothing ? (;) : forced_plans,
+                            own_plan === nothing ? (;) : (; ownership = own_plan))
+            metadata_path = save_compilation_metadata(config, cpp_files, binary_path;
+                                                      nounwind=nounwind, byval=byval,
+                                                      thread_locals=thread_locals, tls_accessors=tls_rows,
+                                                      settled...)
         end
     end
 
@@ -6227,6 +6288,17 @@ end
 # wrapper function that also runs its initializer in each new thread), so the
 # build compiles one function per such variable into the library, which
 # returns the address, and the wrapper calls it on every use.
+
+"""
+The generated unit that asks the compiler about the types this library returns
+or takes by value and will not copy bytewise, and defines the functions that
+end, copy and move one (`OwnershipUnit`, step 4d), if this build writes one.
+"""
+_own_unit_path(config::RepliBuildConfig) = joinpath(get_cache_path(config), "replibuild_own.cpp")
+
+# `OwnershipUnit` is loaded after IRGen (which types need its facts is
+# `FunctionGen.owned_key`'s answer), so it is looked up when a build runs.
+_ownership_unit() = getfield(parentmodule(@__MODULE__), :OwnershipUnit)
 
 "The generated unit holding the thread-local accessors of this build, if it writes one."
 _tls_unit_path(config::RepliBuildConfig) =
@@ -6923,6 +6995,11 @@ function extract_symbols_from_binary(binary_path::String)
         if startswith(mangled_name, "replibuild_tls_") || _is_tls_helper(mangled_name, demangled_name)
             continue
         end
+
+        # The functions that end, copy and move an object of a type the
+        # library returns by value (`OwnershipUnit`): a wrapper calls them for
+        # the object it holds, and never offers them as functions.
+        startswith(mangled_name, "replibuild_own_") && continue
 
         push!(symbols, Dict(
             "mangled" => mangled_name,
@@ -11626,7 +11703,8 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
                                       inline_methods::Union{Nothing,AbstractDict}=nothing,
                                       default_arguments::Union{Nothing,AbstractDict}=nothing,
                                       thread_locals::Union{Nothing,Set{String}}=nothing,
-                                      tls_accessors::Union{Nothing,AbstractVector}=nothing)::Dict{String,Any}
+                                      tls_accessors::Union{Nothing,AbstractVector}=nothing,
+                                      ownership::Union{Nothing,AbstractDict}=nothing)::Dict{String,Any}
     # Extract compilation metadata
     symbols = extract_symbols_from_binary(binary_path)
 
@@ -11938,6 +12016,14 @@ function extract_compilation_metadata(config::RepliBuildConfig, source_files::Ve
 
         # STL container method symbols (for JIT thunk generation)
         "stl_methods" => stl_methods,
+
+        # What the compiler says about each type the library returns or takes
+        # by value and will not copy bytewise: must it be ended, can it be
+        # copied or moved, and the functions that do so (`OwnershipUnit`,
+        # step 4d). Filed under this extraction's keys. Empty when no unit
+        # was compiled (the extraction before step 4d, graph mode, C).
+        "ownership" => ownership === nothing ? Dict{String,Any}("types" => Dict{String,Any}(), "skipped" => Any[]) :
+                       _ownership_unit().metadata(ownership, struct_defs, record_abi),
 
         # Compiler information
         "compiler_info" => Dict(
@@ -12956,7 +13042,8 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
                                    inline_methods::Union{Nothing,AbstractDict}=nothing,
                                    default_arguments::Union{Nothing,AbstractDict}=nothing,
                                    thread_locals::Union{Nothing,Set{String}}=nothing,
-                                   tls_accessors::Union{Nothing,AbstractVector}=nothing)::String
+                                   tls_accessors::Union{Nothing,AbstractVector}=nothing,
+                                   ownership::Union{Nothing,AbstractDict}=nothing)::String
     # Extract metadata
     metadata = extract_compilation_metadata(config, source_files, binary_path;
                                             nounwind=nounwind, byval=byval,
@@ -12964,7 +13051,8 @@ function save_compilation_metadata(config::RepliBuildConfig, source_files::Vecto
                                             inline_methods=inline_methods,
                                             default_arguments=default_arguments,
                                             thread_locals=thread_locals,
-                                            tls_accessors=tls_accessors)
+                                            tls_accessors=tls_accessors,
+                                            ownership=ownership)
 
     # Static-promotion map (old static name → exported __rb_* symbol), written
     # by link_optimize_ir when the promotion pass ran. Slices resolve their

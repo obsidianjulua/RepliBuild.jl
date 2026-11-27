@@ -408,6 +408,11 @@ include("Builder.jl")
 # IRGen: MLIR bindings, IR generation, JIT execution
 include("IRGen.jl")
 
+# What the compiler says about the C++ types a library returns or takes by
+# value (must one be ended, can it be copied): a step of the build, loaded
+# here because which types those are is IRGen's answer.
+include("Builder/OwnershipUnit.jl")
+
 # What a generated Rust wrapper calls at run time (thunks, the catching frame).
 include("RustRuntime.jl")
 
