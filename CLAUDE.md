@@ -1850,7 +1850,11 @@ the test named when you touch the area.
     does not move it. A type with nothing to end is the plain value it was.
     So is every return with no facts: older metadata, a graph library, an
     alignment above 16, a record emitted `mutable`, a factory class. Never
-    guess a destructor.
+    guess a destructor. Where the build asked and the wrapper still cannot
+    hold a return that has to be ended, the body says so in a comment with
+    the build's reason and `wrap` lists the functions (`unheld_note`,
+    `unheld_returns`); metadata with no `ownership` key gets neither, so an
+    old package wraps byte for byte as before.
   - **A by-value parameter gets a copy where C++ can copy.**
     `CxxObjects.byvalue` (a container, or a record with no layout: the
     wrapper makes the temporary with the copy constructor and passes its

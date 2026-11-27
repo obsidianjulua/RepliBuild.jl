@@ -194,10 +194,12 @@ release!(o::Owned) = _end(o)
 isalive(o::Owned) = _state(o) == LIVE
 
 @noinline function _refuse_dead(o::Owned)
-    how = _state(o) == SPENT ? "was moved into a C++ call, which took it" :
-          _state(o) == ENDED ? "was released" : "was never built"
-    throw(ArgumentError("this C++ `$(_kind(o).name)` $how, and is no longer an object. " *
-                        "Pass `copy(x)`, or keep the original by not moving it."))
+    s = _state(o)
+    how = s == SPENT ? "was moved into a C++ call, which took it, and is no longer an object. " *
+                       "To keep an object you pass by value, pass it without `move`, or pass `copy(x)`." :
+          s == ENDED ? "was released, and is no longer an object." :
+                       "was never built: the call that would have made it did not return."
+    throw(ArgumentError("this C++ `$(_kind(o).name)` $how"))
 end
 @inline _alive(o::Owned) = (_state(o) == LIVE || _refuse_dead(o); o)
 
