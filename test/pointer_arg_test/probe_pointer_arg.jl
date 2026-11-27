@@ -134,7 +134,13 @@ end
 # parameter takes, and a pointer or `Ref` to an existing container still is.
 probe("container_by_value_takes_the_returned_value") do p
     v = M.vec_iota(5)
+    # What the library returned is the C++ object, held where C++ built it.
+    v isa RepliBuild.CxxObjects.Owned{NTuple{24, UInt8}} || push!(p, "vec_iota returned a $(typeof(v))")
     (got = M.vec_sum_val(v)) == 10 || push!(p, "vec_sum_val(value) = $got")
+    # By value it was copied: the caller's object passes again, and by reference as itself.
+    (got = (M.vec_sum_val(v), M.vec_sum(v))) == (10, 10) || push!(p, "by value again, then by reference: $got")
+    # Its bytes pass by value too (a copy is made from them).
+    (got = M.vec_sum_val(v[])) == 10 || push!(p, "vec_sum_val(bytes) = $got")
     r = Ref(v)
     (got = (M.vec_sum_val(r), M.vec_sum_val(r), M.vec_sum(r))) == (10, 10, 10) || push!(p, "through a Ref, twice, then by reference: $got")
     GC.@preserve r begin
@@ -213,7 +219,7 @@ end
 probe("julia_vector_is_not_a_std_vector") do p
     refused!(p, "a Vector{Cint} for `const std::vector<int>&`", () -> M.vec_sum(Cint[1, 2, 3]))
     refused!(p, "a Vector{Cint} for `std::vector<int>` by value", () -> M.vec_sum_val(Cint[1, 2, 3]))
-    refused!(p, "the bare bytes for `const std::vector<int>&`", () -> M.vec_sum(M.vec_iota(3)))
+    refused!(p, "the bare bytes for `const std::vector<int>&`", () -> M.vec_sum(M.vec_iota(3)[]))
     refused!(p, "bytes of another size for `std::vector<int>` by value", () -> M.vec_sum_val(ntuple(_ -> 0x00, 16)))
 end
 

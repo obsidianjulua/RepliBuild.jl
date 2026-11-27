@@ -196,5 +196,83 @@ if requires("The ownership unit, live", :clangxx)
             @test "own_impl_marker" in runtime || "_Z15own_impl_markerv" in runtime
         end
     end
+
+    @testset "functions no header declares: a type is asked about by its own name" begin
+        mktempdir() do dir
+            mkpath(joinpath(dir, "src"))
+            # The header declares the class and ONE function. The others are
+            # defined in the source file alone, so no line of the unit can name
+            # them, and their return types are written by name.
+            write(joinpath(dir, "src", "free.hpp"), """
+            #pragma once
+            class Node {
+            public:
+                explicit Node(int v);
+                Node(const Node&);
+                ~Node();
+                int v() const;
+            private:
+                int* p_;
+            };
+            Node make_node(int v);
+            """)
+            write(joinpath(dir, "src", "free.cpp"), """
+            #include <list>
+            #include <map>
+            #include <string>
+            #include "free.hpp"
+            Node::Node(int v) : p_(new int(v)) {}
+            Node::Node(const Node& o) : p_(new int(*o.p_)) {}
+            Node::~Node() { delete p_; }
+            int Node::v() const { return *p_; }
+            Node make_node(int v) { return Node(v); }
+            std::list<int> chain(int n) { std::list<int> l; for (int i = 0; i < n; ++i) l.push_back(i); return l; }
+            std::map<int, int> index(int n) { std::map<int, int> m; for (int i = 0; i < n; ++i) m[i] = i; return m; }
+            std::wstring wide() { return L"wide"; }
+            long walk(const std::list<int>& l) { long s = 0; for (int x : l) s += x; return s; }
+            """)
+            toml = joinpath(dir, "replibuild.toml")
+            write(toml, _own_toml(dir, [joinpath(dir, "src", "free.cpp")]))
+            lib3 = RepliBuild.build(toml)
+            @test isfile(lib3)
+            md3 = RepliBuild._read_json(joinpath(dirname(lib3), "compilation_metadata.json"))
+            own3 = md3["ownership"]
+            @test isempty(own3["skipped"])
+            # The build recorded where each standard type is declared...
+            # (libstdc++ declares `list` and `basic_string` in its `__cxx11` namespace.)
+            for (prefix, scope) in (("list<int", "std::__cxx11"), ("map<int, int", "std"), ("basic_string<wchar_t", "std::__cxx11"))
+                hits = [k for k in keys(md3["record_abi"]) if startswith(k, prefix)]
+                @test (prefix, length(hits)) == (prefix, 1)
+                isempty(hits) && continue
+                # libc++ declares all three in `std::__1`.
+                @test (prefix, get(md3["record_abi"][hits[1]], "scope", nothing) in (scope, "std::__1")) == (prefix, true)
+            end
+            # ...and each is asked about by that name: nothing declares `chain`,
+            # `index` or `wide`.
+            seen = 0
+            for prefix in ("list<int", "map<int, int", "basic_string<wchar_t")
+                (key, t) = _own_type(own3["types"], prefix)
+                @test (prefix, key === nothing) == (prefix, false)
+                key === nothing && continue
+                @test (prefix, t["from"]) == (prefix, "its own name")
+                @test (prefix, t["ends"], t["copy"]) == (prefix, true, true)
+                @test (prefix, t["size"]) == (prefix, _OWN_FG._parse_num(md3["record_abi"][key]["byte_size"]))
+                seen += 1
+            end
+            @test seen == 3
+            # The class is named through the one function its header declares.
+            # That line compiles only because the class's own-name line brought
+            # the header in: the unit is written with the include block its
+            # lines were judged with, or it would not compile and the library
+            # would be built without it.
+            (nkey, node) = _own_type(own3["types"], "Node")
+            @test nkey == "Node"
+            nkey === nothing || @test occursin("make_node", node["from"]) && node["ends"] && node["copy"]
+            unit = read(joinpath(dir, ".replibuild_cache", "replibuild_own.cpp"), String)
+            @test occursin("free.hpp", unit) && occursin("#include <list>", unit) && occursin("#include <map>", unit)
+            runtime = RepliBuild.Compiler._runtime_defined_names(lib3)
+            @test all(t -> t["end_symbol"] in runtime && t["copy_symbol"] in runtime, values(own3["types"]))
+        end
+    end
 end
 end # requires

@@ -88,11 +88,16 @@ if requires("Records named with a declarator in their template arguments, live",
     if vb !== nothing
         n = RepliBuild.JLCSIRGenerator.FunctionGen._parse_num(vb["byte_size"])
         @test occursin("function vb_make(n::Integer)\n", code)
-        @test occursin("return_slot(NTuple{$n, UInt8})", match(r"function vb_make\(.*?\nend"s, code).match)
-        @test occursin("ByValue{NTuple{$n, UInt8}}", match(r"function vb_count_val\(.*?\nend"s, code).match)
+        # (The build asked its compiler about the type, so the storage is held
+        # as the object and a by-value pass gets a copy: test_cxx_objects.jl.)
+        @test occursin("CxxObjects.slot(NTuple{$n, UInt8}, ", match(r"function vb_make\(.*?\nend"s, code).match)
+        @test occursin("CxxObjects.byvalue(NTuple{$n, UInt8}, ", match(r"function vb_count_val\(.*?\nend"s, code).match)
     end
-    # std::function by value: converted like any pointer, never passed as it came.
-    @test occursin("pointer_arg(Ptr{RepliBuild.JITManager.Opaque}, f)", match(r"function fn_apply\(.*?\nend"s, code).match)
+    # std::function by value: converted like any pointer (inside `byvalue`,
+    # which asks `pointer_arg`), never passed as it came.
+    @test occursin(r"RepliBuild\.CxxObjects\.byvalue\(NTuple\{\d+, UInt8\}, _RB_OWN_\d+, LIBRARY_PATH, f\)",
+                   match(r"function fn_apply\(.*?\nend"s, code).match)
+    @test !occursin(r"invoke\([^\n]*, f, ", match(r"function fn_apply\(.*?\nend"s, code).match)
 
     r = run_isolated(`$(joinpath(TMPLARG_DIR, "probe_records.jl")) $wrapper`)
     v = probe_verdicts(r.output)

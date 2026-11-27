@@ -415,6 +415,11 @@ Contents of the .debug_info section:
         # The declared member functions are their own key (2026-11-15, the
         # inline-method plan's rows; test_inline_methods.jl), set aside here.
         ra = Dict(k => (v isa AbstractDict ? delete!(Dict{String,Any}(v), "methods") : v) for (k, v) in ra)
+        # Each entry also carries the namespace its definition was read in
+        # (`scope`, 2026-11-27: what the ownership unit writes a type's own name
+        # under), `ee` for every record of this dump.
+        @test all(k -> get(ra[k], "scope", nothing) == "ee", ("Tag", "Guard", "Owner", "Handle", "P3"))
+        ra = Dict(k => (v isa AbstractDict ? delete!(Dict{String,Any}(v), "scope") : v) for (k, v) in ra)
         @test ra["Tag"]    == Dict("byte_size" => "0x1", "pass" => "value",     "empty" => true)
         @test ra["Guard"]  == Dict("byte_size" => "0x1", "pass" => "reference", "empty" => true)
         @test ra["Owner"]  == Dict("byte_size" => "0x4", "pass" => "reference", "empty" => false)

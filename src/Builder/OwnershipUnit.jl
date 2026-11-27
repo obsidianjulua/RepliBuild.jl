@@ -47,6 +47,9 @@ const FG = JLCSIRGenerator.FunctionGen
 const HELPER_PREFIX = "replibuild_own_"
 "How many ways of naming one type the unit tries."
 const MAX_CANDIDATES = 3
+# The rank of a type written by its own name (`own_name`): after every way
+# that names it through a declaration.
+const OWN_NAME_RANK = 9
 
 # What a row's `flags` say (`replibuild_force::own<T>::flags` in the preamble).
 const ENDS      = 0x01   # not trivially destructible: something must run its destructor
@@ -104,6 +107,93 @@ _spellable(t::AbstractString) = !(isempty(t) || occursin("(anonymous namespace)"
                                   occursin("[abi:", t) || occursin("{", t) || occursin("unnamed", t) ||
                                   occursin("...", t))
 
+# The header the C++ standard puts each of its names in. A type written by
+# its own name (a parameter's spelling, or `own_name`) needs the header that
+# declares it, and a library whose functions no header declares gives none.
+# A name not listed gets no header: its row then does not compile and is
+# skipped with the compiler's message, as any other.
+const STD_HEADERS = Dict{String,String}(
+    "vector" => "<vector>", "deque" => "<deque>", "list" => "<list>", "forward_list" => "<forward_list>",
+    "map" => "<map>", "multimap" => "<map>", "set" => "<set>", "multiset" => "<set>",
+    "unordered_map" => "<unordered_map>", "unordered_multimap" => "<unordered_map>",
+    "unordered_set" => "<unordered_set>", "unordered_multiset" => "<unordered_set>",
+    "array" => "<array>", "queue" => "<queue>", "priority_queue" => "<queue>", "stack" => "<stack>",
+    "basic_string" => "<string>", "char_traits" => "<string>", "string" => "<string>", "wstring" => "<string>",
+    "basic_string_view" => "<string_view>", "string_view" => "<string_view>",
+    "shared_ptr" => "<memory>", "unique_ptr" => "<memory>", "weak_ptr" => "<memory>",
+    "allocator" => "<memory>", "default_delete" => "<memory>",
+    "function" => "<functional>", "less" => "<functional>", "greater" => "<functional>",
+    "equal_to" => "<functional>", "hash" => "<functional>", "reference_wrapper" => "<functional>",
+    "pair" => "<utility>", "tuple" => "<tuple>", "optional" => "<optional>", "nullopt_t" => "<optional>",
+    "variant" => "<variant>", "monostate" => "<variant>", "any" => "<any>",
+    "complex" => "<complex>", "bitset" => "<bitset>", "span" => "<span>", "valarray" => "<valarray>",
+    "initializer_list" => "<initializer_list>", "byte" => "<cstddef>",
+    "filesystem" => "<filesystem>", "chrono" => "<chrono>", "ratio" => "<ratio>",
+    "atomic" => "<atomic>", "mutex" => "<mutex>", "thread" => "<thread>",
+    "future" => "<future>", "promise" => "<future>", "shared_future" => "<future>",
+    "exception_ptr" => "<exception>", "error_code" => "<system_error>", "error_condition" => "<system_error>",
+    "basic_regex" => "<regex>", "locale" => "<locale>", "type_index" => "<typeindex>",
+    "basic_ostream" => "<ostream>", "basic_istream" => "<istream>", "basic_iostream" => "<istream>",
+    "basic_stringstream" => "<sstream>", "basic_ostringstream" => "<sstream>",
+    "basic_istringstream" => "<sstream>", "basic_stringbuf" => "<sstream>",
+    "basic_ifstream" => "<fstream>", "basic_ofstream" => "<fstream>", "basic_fstream" => "<fstream>")
+
+"""
+    std_headers(expr) -> Vector{String}
+
+The standard headers the names under `std::` in the C++ type `expr` are
+declared in (`STD_HEADERS`), sorted: every segment of every `std::a::b` chain
+is looked up, so `std::filesystem::path` and `std::__cxx11::basic_string`
+both find theirs.
+"""
+function std_headers(expr::AbstractString)
+    out = Set{String}()
+    for m in eachmatch(r"\bstd::([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)", String(expr))
+        for seg in split(m.captures[1], "::")
+            h = get(STD_HEADERS, String(seg), nothing)
+            h === nothing || push!(out, h)
+        end
+    end
+    return sort!(collect(out))
+end
+
+"""
+    own_name(key, c_type, structs, record_abi) -> nothing | (spelled, toolchain)
+
+The type filed under `key`, written by its own name: the scope its
+definition was read in, then the name (`std::vector<int, std::allocator<int>
+>`). `nothing` where the build does not know the scope, where two scopes
+declare the name, and for a name no unit can write (a lambda, an unnamed
+type, a local one). `toolchain` says the definition is not the project's.
+
+The compile still judges the line: a spelling that names nothing is a row
+that does not compile, and one that names another type is a size other than
+DWARF's (`checked!`).
+"""
+function own_name(key::AbstractString, c_type::AbstractString, structs, record_abi)
+    def = get(structs, key, nothing)
+    scope = nothing
+    toolchain = true
+    if def isa AbstractDict
+        get(def, "conflict", false) == true && return nothing
+        scope = get(def, "scope", nothing)
+        toolchain = get(def, "toolchain", false) == true
+    end
+    if scope === nothing
+        for cand in FG._scope_suffixes(FG._strip_top_cv(String(c_type)))
+            facts = get(record_abi, cand, nothing)
+            facts isa AbstractDict || continue
+            (get(facts, "conflict", false) == true || get(facts, "scope_ambiguous", false) == true) && return nothing
+            scope = get(facts, "scope", nothing)
+            break
+        end
+    end
+    scope isa AbstractString || return nothing
+    spelled = isempty(scope) ? String(key) : String(scope) * "::" * String(key)
+    _spellable(spelled) || return nothing
+    return (spelled, toolchain)
+end
+
 "The bytes DWARF gives the record filed under `key`, or `nothing`: what the compiler's `sizeof` is checked against."
 function _dwarf_bytes(key::AbstractString, c_type::AbstractString, structs, record_abi)
     def = get(structs, key, nothing)
@@ -138,7 +228,13 @@ from a by-value parameter. In order of preference a type is named by:
      (`decltype` of the member, the overload picked by its parameters);
   2. a by-value parameter's own spelling in a demangled name;
   3. the return of a function no class declares, which only the umbrella
-     headers (`[wrap] shim_headers`) can have declared.
+     headers (`[wrap] shim_headers`) can have declared;
+  4. its own name under the scope its definition was read in (`own_name`),
+     which needs no declaration of any function: the one way for a library
+     whose functions no header declares. Always among the candidates, last.
+
+A line that writes a type by name (2 and 4) also gets the standard headers
+its `std::` names are declared in (`std_headers`).
 
 Passed over: a pure virtual row (no definition to name), a constructor or
 destructor (no return), and for the return route a default-argument entry
@@ -220,25 +316,53 @@ function plan(functions, structs, record_abi; demangle = Compiler._demangle)
             pkey = FG.owned_key(pc, structs, record_abi)
             pkey === nothing && continue
             if dparams !== nothing && length(dparams) == length(params) && _spellable(dparams[i])
-                add!(pkey, pc, false, isempty(headers) ? 2 : 1, String(dparams[i]), headers,
-                     "parameter $i of $mangled")
+                add!(pkey, pc, false, isempty(headers) ? 2 : 1, String(dparams[i]),
+                     unique(vcat(headers, std_headers(String(dparams[i])))), "parameter $i of $mangled")
             else
                 get!(unnamed, pkey, "its spelling in $dm cannot be written in a unit")
             end
         end
     end
 
+    # The type's own name, for every key: the headers are the standard ones
+    # its spelling names, its own where the project declares it in one, and
+    # those of the project's records its template arguments name.
+    lead_headers = Dict{String,Vector{String}}()     # a record's leading identifier => its headers
+    for name in sort!(collect(String, keys(structs)))
+        def = structs[name]
+        (def isa AbstractDict && get(def, "toolchain", false) != true) || continue
+        hs = headers_of(name)
+        isempty(hs) && continue
+        m = match(r"^[A-Za-z_][A-Za-z0-9_]*", name)
+        m === nothing || append!(get!(() -> String[], lead_headers, String(m.match)), hs)
+    end
+    for key in sort!(unique(vcat(collect(String, keys(found)), collect(String, keys(unnamed)))))
+        c_type = haskey(found, key) ? String(found[key][1]["c_type"]) : key
+        named = own_name(key, c_type, structs, record_abi)
+        named === nothing && continue
+        (spelled, toolchain) = named
+        hs = toolchain ? String[] : headers_of(key)
+        for m in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*", spelled)
+            append!(hs, get(lead_headers, String(m.match), String[]))
+        end
+        add!(key, c_type, haskey(found, key) ? found[key][1]["ret"] : true, OWN_NAME_RANK, spelled,
+             unique(vcat(hs, std_headers(spelled))), "its own name")
+    end
+
     candidates = Dict{String,Any}[]
     for key in sort!(collect(keys(found)))
         ways = found[key]
-        # One line per distinct expression, best first.
+        # One line per distinct expression, best first. The type's own name
+        # is kept beside the `MAX_CANDIDATES` best of the others: it is the
+        # one line that needs no function declared.
         sort!(ways; by = w -> (w["rank"], w["from"]))
         seen = Set{String}()
         kept = 0
         for w in ways
-            (w["expr"] in seen || kept >= MAX_CANDIDATES) && continue
+            w["expr"] in seen && continue
+            (kept >= MAX_CANDIDATES && w["rank"] != OWN_NAME_RANK) && continue
             push!(seen, w["expr"])
-            kept += 1
+            w["rank"] == OWN_NAME_RANK || (kept += 1)
             w["id"] = length(candidates)
             w["bytes"] = bytes[key]
             push!(candidates, w)
@@ -531,12 +655,17 @@ function generate(config, cpp_files::Vector{String}, plan::AbstractDict)
     for key in sort!(collect(keys(why)))
         key in have || push!(skipped, Dict{String,Any}("key" => key, "reason" => why[key]))
     end
+    # The include block the rows were judged with, whole: a row may compile
+    # only because another candidate's header declares what it names (a
+    # function's return named beside the type's own header), and the block
+    # of the winners alone would leave that header out.
+    judged_with = headers()
     rows = best
     if isempty(rows)
         rm(path; force = true)
         return done(cpp_files)
     end
-    Compiler._write_if_changed(path, unit_text(headers(), rows))
+    Compiler._write_if_changed(path, unit_text(judged_with, rows))
     return done(vcat(cpp_files, [path]))
 end
 

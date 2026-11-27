@@ -79,7 +79,7 @@ if requires("A pass-by-reference return is built in the caller's buffer", :libJL
     @test r.ok
     @test haskey(v, "PROBE_DONE")
     names = ["built_in_the_callers_buffer", "stl_string_built_in_the_callers_buffer",
-             "std_string_is_a_julia_string", "wstring_keeps_its_bytes",
+             "std_string_is_a_julia_string", "wstring_is_held_not_decoded",
              "wrapper_call_site", "stale_call_says_rewrap",
              "std_string_parameter_from_julia_string", "std_string_overload_beside_const_char",
              "std_string_parameter_pointer_passthrough", "std_string_parameter_ended_on_throw",

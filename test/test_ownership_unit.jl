@@ -151,8 +151,12 @@ end
     @test all(r -> r["bytes"] == 24, v)
 
     t = of("Tracked")
+    @test length(t) == 3
     @test t[1]["expr"] == "decltype(replibuild_force::own_args<int>::mc(&own::Shape::tracked))"
-    @test t[end]["expr"] == "decltype(replibuild_force::own_args<>::m(&::make))"
+    @test t[2]["expr"] == "decltype(replibuild_force::own_args<>::m(&::make))"
+    # Last, its own name under the scope its definition was read in, with its own header.
+    @test t[3]["expr"] == "own::Tracked" && t[3]["from"] == "its own name" && t[3]["rank"] == _OU.OWN_NAME_RANK
+    @test t[3]["headers"] == ["/src/own.hpp"]
     @test all(r -> r["bytes"] == 8, t)
 
     f = of(fn)
@@ -165,6 +169,93 @@ end
     @test length(_OU.plan(many, structs, abi)["candidates"]) == _OU.MAX_CANDIDATES
     # The same plan whatever order the functions come in.
     @test _OU.plan(reverse(functions), structs, abi; demangle = _ -> nothing) == p
+end
+
+@testset "a type's own name, where no function is declared" begin
+    (structs, abi, vec, fn) = _ou_tables()
+    # The scope a record's facts carry is the one its definition was read in.
+    abi[vec]["scope"] = "std"
+    lst = "list<int, std::allocator<int> >"
+    wide = "basic_string<wchar_t, std::char_traits<wchar_t>, std::allocator<wchar_t> >"
+    abi[lst] = Dict{String,Any}("byte_size" => "0x18", "pass" => "reference", "empty" => false, "scope" => "std")
+    abi[wide] = Dict{String,Any}("byte_size" => "0x20", "pass" => "reference", "empty" => false, "scope" => "std::__cxx11")
+    @test _OU.own_name(vec, vec, structs, abi) == ("std::vector<int, std::allocator<int> >", true)
+    @test _OU.own_name(wide, "const " * wide, structs, abi) ==
+          ("std::__cxx11::basic_string<wchar_t, std::char_traits<wchar_t>, std::allocator<wchar_t> >", true)
+    # A library record: its definition's scope, and it is the project's.
+    @test _OU.own_name("Tracked", "Tracked", structs, abi) == ("own::Tracked", false)
+    structs["Top"] = Dict{String,Any}("kind" => "struct", "byte_size" => "0x8", "scope" => "")
+    @test _OU.own_name("Top", "Top", structs, abi) == ("Top", false)
+    # No scope known, two scopes, two layouts, or a name no unit can write: nothing.
+    @test _OU.own_name(fn, fn, structs, abi) === nothing
+    abi["Twice"] = Dict{String,Any}("byte_size" => "0x8", "pass" => "reference", "empty" => false, "scope_ambiguous" => true)
+    @test _OU.own_name("Twice", "Twice", structs, abi) === nothing
+    abi["Clash"] = Dict{String,Any}("byte_size" => "0x8", "pass" => "reference", "empty" => false, "scope" => "a", "conflict" => true)
+    @test _OU.own_name("Clash", "Clash", structs, abi) === nothing
+    structs["Both"] = Dict{String,Any}("kind" => "struct", "byte_size" => "0x8", "scope" => "a", "conflict" => true)
+    @test _OU.own_name("Both", "Both", structs, abi) === nothing
+    for bad in ("(lambda at /src/x.cpp:3:5)", "function<void ((anonymous namespace)::T)>")
+        abi[bad] = Dict{String,Any}("byte_size" => "0x8", "pass" => "reference", "empty" => false, "scope" => "std")
+        @test _OU.own_name(bad, bad, structs, abi) === nothing
+    end
+
+    # The standard headers a spelling's names are declared in.
+    @test _OU.std_headers("std::vector<int, std::allocator<int> >") == ["<memory>", "<vector>"]
+    @test _OU.std_headers("std::map<int, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, " *
+                          "std::less<int>, std::allocator<std::pair<const int, int> > >") ==
+          ["<functional>", "<map>", "<memory>", "<string>", "<utility>"]
+    @test _OU.std_headers("std::filesystem::path") == ["<filesystem>"]
+    @test _OU.std_headers("std::__1::unique_ptr<own::Tracked, std::__1::default_delete<own::Tracked> >") == ["<memory>"]
+    @test _OU.std_headers("std::optional<std::chrono::duration<long, std::ratio<1L, 1000L> > >") ==
+          ["<chrono>", "<optional>", "<ratio>"]
+    @test isempty(_OU.std_headers("own::Tracked")) && isempty(_OU.std_headers("mystd::vector<int>"))
+    @test isempty(_OU.std_headers("std::not_a_standard_name<int>"))      # no header: the compile says so
+
+    # A library whose functions no header declares: the return's line cannot
+    # compile, and the type's own name is there beside it.
+    free = Any[_ou_fn("_Z4makei", "make(int)", lst), _ou_fn("_Z4widev", "wide()", wide)]
+    p = _OU.plan(free, structs, abi)
+    rows = [r for r in p["candidates"] if r["key"] == lst]
+    @test [r["expr"] for r in rows] == ["decltype(replibuild_force::own_args<int>::m(&::make))",
+                                        "std::list<int, std::allocator<int> >"]
+    @test rows[2]["headers"] == ["<list>", "<memory>"] && rows[2]["ret"] == true && rows[2]["bytes"] == 24
+    @test [r["headers"] for r in p["candidates"] if r["key"] == wide][end] == ["<memory>", "<string>"]
+    # It is kept beside the cap, however many functions return the type.
+    many = Any[_ou_fn("_ZN3own1f$(i)Ev", "own::f$(i)()", vec) for i in 1:9]
+    q = _OU.plan(many, structs, abi)["candidates"]
+    @test length(q) == _OU.MAX_CANDIDATES + 1
+    @test q[end]["expr"] == "std::vector<int, std::allocator<int> >" && q[end]["rank"] == _OU.OWN_NAME_RANK
+    # A type only a function template returns had no line at all: now it has its name.
+    tmpl = Any[_ou_fn("_ZN3own4makeIiEESt4listIT_SaIS2_EEi", "std::list<int> own::make<int>(int)", lst)]
+    q = _OU.plan(tmpl, structs, abi)
+    @test isempty(q["skipped"]) && [r["expr"] for r in q["candidates"]] == ["std::list<int, std::allocator<int> >"]
+    # A parameter written by name gets its standard headers too.
+    take = Any[_ou_fn("_Z4takeSt6vectorIiSaIiEE", "take(std::vector<int, std::allocator<int> >)", "long";
+                      params = Any[Dict{String,Any}("name" => "v", "c_type" => vec)])]
+    q = _OU.plan(take, structs, Dict{String,Any}(vec => Dict{String,Any}("byte_size" => "0x18", "pass" => "reference", "empty" => false)))
+    @test [(r["expr"], r["headers"]) for r in q["candidates"]] == [("std::vector<int, std::allocator<int> >", ["<memory>", "<vector>"])]
+    # The project's records a template argument names bring their header.
+    vt = "vector<own::Tracked, std::allocator<own::Tracked> >"
+    abi[vt] = Dict{String,Any}("byte_size" => "0x18", "pass" => "reference", "empty" => false, "scope" => "std")
+    q = _OU.plan(Any[_ou_fn("_Z3allv", "all()", vt)], structs, abi)["candidates"]
+    @test q[end]["expr"] == "std::vector<own::Tracked, std::allocator<own::Tracked> >"
+    @test q[end]["headers"] == ["/src/own.hpp", "<memory>", "<vector>"]
+
+    # The facts of one name read in two scopes carry no scope.
+    C = RepliBuild.Compiler
+    facts = Dict{String,Dict{String,Any}}()
+    entry(scope) = Dict{String,Any}("byte_size" => "0x8", "pass" => "reference", "empty" => false, "scope" => scope)
+    C._merge_record_facts!(facts, "T", entry("a"))
+    C._merge_record_facts!(facts, "T", entry("a"))
+    @test facts["T"]["scope"] == "a" && !haskey(facts["T"], "scope_ambiguous") && !haskey(facts["T"], "conflict")
+    C._merge_record_facts!(facts, "T", entry("b"))
+    @test !haskey(facts["T"], "scope") && facts["T"]["scope_ambiguous"] == true && !haskey(facts["T"], "conflict")
+    C._merge_record_facts!(facts, "T", entry("a"))
+    @test !haskey(facts["T"], "scope")                      # once ambiguous, it stays so
+    # A definition whose scope the tree did not settle is no evidence for the other's.
+    C._merge_record_facts!(facts, "U", entry("a"))
+    C._merge_record_facts!(facts, "U", delete!(entry("a"), "scope"))
+    @test !haskey(facts["U"], "scope") && facts["U"]["scope_ambiguous"] == true
 end
 
 @testset "what a line cannot name is said, never guessed" begin

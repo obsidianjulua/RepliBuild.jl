@@ -10,7 +10,7 @@ case(T, "make (holding a value)") do
 end
 case(T, "return by value") do
     a = M.any_int(5)
-    opaque(M.any_get(Ref(a)), 5, "a struct of bytes, a $(describe(a)); what it holds is read only through the library")
+    opaque(M.any_get(Ref(a)), 5, "the C++ object, a $(describe(a)); what it holds is read only through the library")
 end
 case(T, "pass by reference") do
     works(M.any_get(Ref(M.any_int(41))), 41, "Ref of the returned struct")

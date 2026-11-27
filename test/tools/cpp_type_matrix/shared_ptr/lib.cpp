@@ -1,5 +1,5 @@
 #include <memory>
-struct SNode { int v; };
+#include "lib.hpp"
 std::shared_ptr<SNode> sp_make(int v) { return std::make_shared<SNode>(SNode{v}); }
 int sp_read(const std::shared_ptr<SNode>& p) { return p ? p->v : -1; }
 int sp_take(std::shared_ptr<SNode> p) { return p ? p->v : -1; }

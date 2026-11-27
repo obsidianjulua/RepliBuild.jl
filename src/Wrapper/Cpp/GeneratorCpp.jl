@@ -4871,7 +4871,9 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             owned_ret && (ownership_kinds[own_ret.id] = own_ret)
             in_place_doc = owned_ret ? _owned_return_doc(doc_comment, "$(_OWNED){$own_holder}") : doc_comment
             in_place_body(call) = owned_ret ?
-                ("    " * string_setup * "_rb_ret = RepliBuild.CxxObjects.slot($own_holder, " *
+                ((string_plan isa String ?
+                     "    # $(replace(string_plan, "returned as its raw bytes" => "returned as the C++ object, not read into a String"))\n" : "") *
+                 "    " * string_setup * "_rb_ret = RepliBuild.CxxObjects.slot($own_holder, " *
                  "$(_ownership_const(own_ret)), LIBRARY_PATH)\n" *
                  "    GC.@preserve _rb_ret $call\n" *
                  "    return RepliBuild.CxxObjects.born!(_rb_ret)") :

@@ -641,8 +641,11 @@ end
         @test [m["name"] for m in sd["Poly"]["members"]] == ["_vptr\$Poly", "id"]
         # `record_abi` says what it said: emptiness is about bytes a callee reads.
         # (`P` declares `operator()`, which is its `methods` row; set aside.)
-        @test delete!(Dict{String,Any}(ra["P"]), "methods") == Dict("byte_size" => "0x1", "pass" => "value", "empty" => true)
-        @test ra["Derived"] == Dict("byte_size" => "0x10", "pass" => "value", "empty" => false)
+        # (And the namespace each is declared in, `scope`, since 2026-11-27: what
+        # the ownership unit writes a type's own name under.)
+        @test delete!(Dict{String,Any}(ra["P"]), "methods") ==
+              Dict("byte_size" => "0x1", "pass" => "value", "empty" => true, "scope" => "mb")
+        @test ra["Derived"] == Dict("byte_size" => "0x10", "pass" => "value", "empty" => false, "scope" => "mb")
         @test ra["VB"]["pass"] == "reference"
     end
 

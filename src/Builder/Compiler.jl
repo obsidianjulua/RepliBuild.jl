@@ -10209,14 +10209,23 @@ function parse_dwarf_dump(output::Union{AbstractString, LibDW.DumpLines};
                 if haskey(type_info, "byte_size")
                     has_base = any(d -> isa(d, Dict) && get(d, "kind", nothing) == "inheritance",
                                    get(children_by_parent, offset, ()))
-                    _merge_record_facts!(record_facts, String(struct_name), Dict{String,Any}(
+                    facts_entry = Dict{String,Any}(
                         "byte_size" => type_info["byte_size"],
                         "pass" => _record_pass_convention(get(type_info, "calling_convention", nothing)),
                         # No data member and no base: the record has no bytes a
                         # callee reads. A union is never counted, and a class
                         # with virtuals has its `_vptr` member.
                         "empty" => type_info["kind"] != "union" &&
-                                   isempty(get(type_info, "members", [])) && !has_base))
+                                   isempty(get(type_info, "members", [])) && !has_base)
+                    # Where the record is declared (`std`, `std::__cxx11`, ""
+                    # at global scope), when the tree settled it: what lets the
+                    # ownership unit write the type's own name
+                    # (`OwnershipUnit.plan`).
+                    let sp = get(type_info, "scope_parent", missing)
+                        sc = sp === missing ? nothing : _scope_of(sp, type_refs)
+                        sc === nothing || (facts_entry["scope"] = sc)
+                    end
+                    _merge_record_facts!(record_facts, String(struct_name), facts_entry)
                 end
 
                 # Resolve member types to Julia types
@@ -11102,9 +11111,16 @@ function _merge_record_facts!(facts::Dict{String,Dict{String,Any}}, name::String
     prev = get(facts, name, nothing)
     if prev === nothing
         facts[name] = entry
-    elseif get(prev, "conflict", false) != true &&
-           any(k -> get(prev, k, nothing) != get(entry, k, nothing), ("byte_size", "pass", "empty"))
+        return facts
+    end
+    if get(prev, "conflict", false) != true &&
+       any(k -> get(prev, k, nothing) != get(entry, k, nothing), ("byte_size", "pass", "empty"))
         prev["conflict"] = true
+    end
+    # One name declared in two scopes has no scope to be written under.
+    if get(prev, "scope", nothing) != get(entry, "scope", nothing)
+        delete!(prev, "scope")
+        prev["scope_ambiguous"] = true
     end
     return facts
 end
