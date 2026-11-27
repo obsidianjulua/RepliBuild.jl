@@ -32,6 +32,18 @@ private:
     int* box_;
 };
 
+// A class C++ can move and cannot copy. Counted like Tracked.
+class Token {
+public:
+    explicit Token(int id);
+    Token(const Token&) = delete;
+    Token(Token&&) noexcept;
+    ~Token();
+    int id() const;
+private:
+    int* id_;
+};
+
 class Shape {
 public:
     Shape();
@@ -47,6 +59,10 @@ public:
     int adopt(std::unique_ptr<Tracked> t);           // takes what cannot be copied
     int see(Tracked t) const;                        // a class by value
     long kept() const;
+    Token token(int id) const;                       // a class that cannot be copied
+    int redeem(Token t) const;                       // ...taken by value
+    long fail(std::vector<int> v) const;             // throws with its parameter alive
+    Tracked broken(int v) const;                     // throws before it returns
 private:
     std::vector<int> kept_;
 };
@@ -57,6 +73,10 @@ long sum(const std::vector<int>& v);
 int map_last(const std::map<int, int>& m);           // the last key, found from the end
 long list_sum(const std::list<int>& l);              // a walk to the end
 int live_count();
+void append(std::vector<int>& v, int x);             // writes through the reference
+int peek(const Tracked& t);                          // an overload set that differs
+int peek(const std::vector<int>& v);                 //   in what the reference is to
+int boxed_value(const std::unique_ptr<Tracked>& p);  // a reference to a smart pointer
 
 }  // namespace own
 

@@ -73,7 +73,8 @@ const _OWN_EXPECTED = (("Tracked", true, true, true),
                        ("vector<int", true, true, true),
                        ("map<int, int", true, true, true),
                        ("list<int", true, true, true),
-                       ("unique_ptr<own::Tracked", true, false, true))
+                       ("unique_ptr<own::Tracked", true, false, true),
+                       ("Token", true, false, true))
 
 if requires("The ownership unit, live", :clangxx)
 @testset "The ownership unit, live" begin
@@ -121,9 +122,10 @@ if requires("The ownership unit, live", :clangxx)
                 pkey === nothing || (asked += 1; @test (f["mangled"], haskey(types, pkey)) == (f["mangled"], true))
             end
         end
-        # 7 by-value returns (points, index, chain, boxed, tracked, copied,
-        # iota) and 4 by-value parameters (take, keep, adopt, see).
-        @test asked == 11
+        # 9 by-value returns (points, index, chain, boxed, tracked, copied,
+        # token, broken, iota) and 6 by-value parameters (take, keep, adopt,
+        # see, redeem, fail).
+        @test asked == 15
     end
 
     @testset "nothing of the unit is the library's API" begin

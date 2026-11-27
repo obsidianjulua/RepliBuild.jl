@@ -191,13 +191,99 @@ parameter keeps `ctype`. The function loop and the overload prediction both
 spell a position through this.
 """
 function _by_address_ctype(ctype::AbstractString, c_type::AbstractString; object_address::Bool = false,
-                           value_ref_bytes::Int = 0)
+                           value_ref_bytes::Int = 0, owned_value::Bool = false, owned_ref::Bool = false,
+                           owned_class_ref::Bool = false)
     (object_address || JLCSIRGenerator.FunctionGen._stl_by_value(c_type)) && return "Ptr{Cvoid}"
     # A reference to a container the wrapper returns as its bytes and has only
     # a placeholder struct for (`_value_ref_bytes`): the typed pointer, or a
-    # `Ref` of exactly those bytes.
-    value_ref_bytes > 0 && return "Union{$(ctype), Base.RefValue{NTuple{$(value_ref_bytes), UInt8}}}"
+    # `Ref` of exactly those bytes. Where the wrapper returns one as the
+    # object itself (`owned_ref`), that object and a `Ref` of it as well.
+    if value_ref_bytes > 0
+        bytes = "NTuple{$(value_ref_bytes), UInt8}"
+        owned = owned_ref ? ", $(_OWNED){$bytes}, Base.RefValue{$(_OWNED){$bytes}}" : ""
+        return "Union{$(ctype), Base.RefValue{$bytes}$owned}"
+    end
+    # A library class taken by value that the wrapper returns as the object
+    # itself (`owned_value`): the plain value, the object, or `move` of it.
+    owned_value && return "Union{$(ctype), $(_OWNED){$(ctype)}, $(_MOVED){$(ctype)}}"
+    # A reference to such a class (`owned_class_ref`): what `Ref{T}` takes,
+    # the object, or a `Ref` of the object (how the plain value was passed).
+    if owned_class_ref
+        m = match(r"^Ref\{([A-Za-z_][A-Za-z0-9_]*)\}$", String(ctype))
+        m === nothing || return "Union{$(ctype), $(_OWNED){$(m.captures[1])}, Base.RefValue{$(_OWNED){$(m.captures[1])}}}"
+    end
     return String(ctype)
+end
+
+const _OWNED = "RepliBuild.CxxObjects.Owned"
+const _MOVED = "RepliBuild.CxxObjects.Moved"
+
+"""
+    _ownership_kind(c_type, own_types, structs, record_abi; ret) -> nothing | NamedTuple
+
+What the build's compiler said about the C++ type a by-value parameter or
+return (`ret`) crosses as: the metadata's `ownership` entry under
+`FunctionGen.owned_key`, with the number of its three functions
+(`replibuild_own_end_<id>`). `nothing` for a type that does not cross by value
+through an address, and for metadata built before the question was asked: the
+wrapper then does what it did.
+"""
+function _ownership_kind(c_type::AbstractString, own_types, structs, record_abi; ret::Bool = false)
+    isempty(own_types) && return nothing
+    key = JLCSIRGenerator.FunctionGen.owned_key(String(c_type), structs, record_abi; ret)
+    key === nothing && return nothing
+    facts = get(own_types, key, nothing)
+    facts isa AbstractDict || return nothing
+    m = match(r"_(\d+)$", String(get(facts, "end_symbol", "")))
+    m === nothing && return nothing
+    return (id = parse(Int, m.captures[1]), key = String(key),
+            size = Int(get(facts, "size", 0)), align = Int(get(facts, "align", 0)),
+            ends = get(facts, "ends", false) == true, copies = get(facts, "copy", false) == true,
+            moves = get(facts, "move", false) == true,
+            end_symbol = String(get(facts, "end_symbol", "")), copy_symbol = String(get(facts, "copy_symbol", "")),
+            move_symbol = String(get(facts, "move_symbol", "")))
+end
+
+"The wrapper's constant for an ownership kind (`_ownership_kind_chunk` defines the ones its text names)."
+_ownership_const(kind) = "_RB_OWN_$(kind.id)"
+
+"""
+    _ownership_kind_chunk(text, kinds) -> String
+
+One `const _RB_OWN_<id> = RepliBuild.CxxObjects.Kind(…)` per kind the FINAL
+text names, in id order: derived from the text, like the thunk slots, so a
+chunk the dedup dropped leaves no constant and a call site never names one
+that is not defined.
+"""
+function _ownership_kind_chunk(text::AbstractString, kinds::AbstractDict)
+    ids = sort!(unique(Int[parse(Int, m.captures[1]) for m in eachmatch(r"\b_RB_OWN_(\d+)\b", text)]))
+    isempty(ids) && return ""
+    io = IOBuffer()
+    println(io, "# What the build's compiler said about each C++ type this wrapper holds where C++")
+    println(io, "# built it, or passes by value: its size, whether it is ended, copied and moved, and")
+    println(io, "# the three functions the build compiled for it (found in the library at first use).")
+    for id in ids
+        haskey(kinds, id) || Base.error("internal error: the wrapper names _RB_OWN_$id and no kind was recorded for it")
+        k = kinds[id]
+        println(io, "const _RB_OWN_$id = RepliBuild.CxxObjects.Kind($(repr(k.key)), $(k.size), $(k.align), ",
+                "$(k.ends), $(k.copies), $(k.moves), $(repr(k.end_symbol)), $(repr(k.copy_symbol)), $(repr(k.move_symbol)))")
+    end
+    println(io)
+    return String(take!(io))
+end
+
+"""
+    _owned_return_doc(doc, owned_type) -> String
+
+`doc`, a function's docstring, saying that it returns `owned_type`, the C++
+object held where C++ built it, in the signature line and under `# Returns`.
+"""
+function _owned_return_doc(doc::AbstractString, owned_type::AbstractString)
+    isempty(doc) && return String(doc)
+    out = replace(String(doc), r"(\) -> )[^\n]*" => SubstitutionString("\\1" * escape_string(owned_type)); count = 1)
+    return replace(out, r"(# Returns\n\s*- )`[^\n]*" =>
+        SubstitutionString("\\1`" * escape_string(owned_type) * "`: the C++ object, held where C++ built it. Its destructor " *
+                           "runs when Julia collects it, or at `RepliBuild.release!(x)`."); count = 1)
 end
 
 """
@@ -472,7 +558,8 @@ function _integer_width_overloads(functions, struct_types, ccall_param_type;
                                   concrete = _concrete_ctype, bound = _ -> true,
                                   owners = _ -> String[], is_enum = _ -> false,
                                   string_param = _ -> false, object_address = _ -> false,
-                                  value_ref_bytes = (_, _) -> 0)
+                                  value_ref_bytes = (_, _) -> 0, owned_value = (_, _) -> false,
+                                  owned_ref = _ -> false, owned_class_ref = _ -> false)
     groups = Dict{String,Vector{Tuple{String,Vector{String}}}}()
     for func in functions
         get(func, "is_vararg", false) == true && continue
@@ -492,7 +579,10 @@ function _integer_width_overloads(functions, struct_types, ccall_param_type;
         ctypes = String[(ct = ccall_param_type(String(get(p, "julia_type", "Any")), String(get(p, "c_type", "")));
                          _by_address_ctype(ct, String(get(p, "c_type", ""));
                                            object_address = object_address(String(get(p, "c_type", ""))),
-                                           value_ref_bytes = value_ref_bytes(ct, String(get(p, "c_type", "")))))
+                                           value_ref_bytes = value_ref_bytes(ct, String(get(p, "c_type", ""))),
+                                           owned_value = owned_value(ct, String(get(p, "c_type", ""))),
+                                           owned_ref = owned_ref(String(get(p, "c_type", ""))),
+                                           owned_class_ref = owned_class_ref(ct)))
                         for p in raw]
         # A `std::string` parameter the wrapper builds from a Julia string
         # (`_string_param_plan`) is spelled `_STD_STRING_PARAM` here as in the
@@ -1437,6 +1527,13 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # branch below). Absent from metadata built before it existed: every
     # record outside `struct_definitions` is then untypable, which traps.
     record_abi = get(metadata, "record_abi", Dict{String,Any}())
+    # What the build's compiler said about each type that crosses by value
+    # through an address (`Builder/OwnershipUnit.jl`). Empty for metadata
+    # built before the question was asked, and the wrapper is then what it was.
+    own_types = let o = get(metadata, "ownership", nothing)
+        t = o isa AbstractDict ? get(o, "types", nothing) : nothing
+        t isa AbstractDict ? t : Dict{String,Any}()
+    end
     # How each class's by-value temporary is made, the table the thunk
     # generator builds too: a class no temporary can be made for traps here
     # (`thunk_crossings`), where the thunk generator emits no thunk.
@@ -4035,12 +4132,69 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
     # enums it emitted, which the loop below spells the same way.
     _sig_type_bound(t) = _type_name_bound(t, defined_struct_names)
     _sig_is_enum(t) = haskey(emitted_enum_base, String(t))
+    # Ownership (`_ownership_kind`): the kinds the final text may name, by id,
+    # and what holds an object in place. `Owned{T}` needs a `T` that is plain
+    # bits: the bytes of a container, or a record this module emits as an
+    # immutable struct. A record emitted `mutable` (a named union, a bitfield
+    # record) keeps what it had.
+    ownership_kinds = Dict{Int,Any}()
+    mutable_struct_names = isempty(own_types) ? Set{String}() :
+        Set{String}(String(m.captures[1]) for m in
+                    eachmatch(r"^[ \t]*mutable struct ([A-Za-z_][A-Za-z0-9_]*)"m, join(struct_chunks)))
+    _own_kind(c; ret::Bool = false) = _ownership_kind(c, own_types, dwarf_structs, record_abi; ret)
+    # A factory class's name is bound to its owning handle type, never to
+    # the bytes of an object.
+    _value_struct(jt) = jt in defined_struct_names && !(jt in mutable_struct_names) &&
+                        !(jt in placeholder_struct_names) && !haskey(idiomatic_classes, jt)
+    # The Julia type that holds an object of `kind` in place where a return
+    # is typed `jt`, or `nothing`: a container's bytes at the COMPILER's
+    # size (the table a wrapper sizes one from when the DWARF has no fact
+    # must never decide how much storage C++ builds into), or the record's
+    # own struct.
+    _holder_type(jt, kind) = (kind.align > 16 || kind.size <= 0) ? nothing :
+        occursin(r"^NTuple\{\d+, UInt8\}$", jt) ? "NTuple{$(kind.size), UInt8}" :
+        (_value_struct(jt) && _sanitize_cpp_type_name(kind.key) == jt) ? String(jt) : nothing
+    _holds_in_place(jt, kind) = _holder_type(jt, kind) !== nothing
+    # A library class taken by value that a return hands back as the object
+    # itself: the position takes the plain value, the object, or `move` of it.
+    _owned_value(ct, c) = begin
+        isempty(own_types) && return false
+        FG = JLCSIRGenerator.FunctionGen
+        (FG._stl_by_value(String(c)) || FG.takes_object_address(String(c), dwarf_structs, record_abi)) && return false
+        k = _own_kind(c)
+        k !== nothing && k.ends && _value_struct(String(ct)) && _holds_in_place(String(ct), k)
+    end
+    # A reference to a smart pointer the wrapper returns as the object itself.
+    _owned_ref(c) = begin
+        isempty(own_types) && return false
+        FG = JLCSIRGenerator.FunctionGen
+        t = FG._strip_top_cv(String(strip(String(c))))
+        t = endswith(t, "&&") ? chop(t; tail = 2) : endswith(t, "&") ? chop(t) : return false
+        k = _own_kind(FG._strip_top_cv(String(t)); ret = true)
+        k !== nothing && k.ends && k.align <= 16
+    end
+    owned_struct_names = Set{String}()
+    for key in sort!(collect(keys(own_types)))
+        facts = own_types[key]
+        (facts isa AbstractDict && get(facts, "ends", false) == true) || continue
+        jn = _sanitize_cpp_type_name(String(key))
+        _value_struct(jn) && push!(owned_struct_names, jn)
+    end
+    # A reference to a class a return hands back as the object itself.
+    _owned_class_ref(ct) = begin
+        isempty(owned_struct_names) && return false
+        m = match(r"^Ref\{([A-Za-z_][A-Za-z0-9_]*)\}$", String(ct))
+        m !== nothing && String(m.captures[1]) in owned_struct_names
+    end
     _sig_owners(t) = begin
         jn = String(t)
         out = String[]
         haskey(idiomatic_classes, jn) && push!(out, jn)
         any(k -> _sanitize_cpp_type_name(k) == jn && !haskey(idiomatic_classes, jn), keys(deleters)) &&
             push!(out, "Managed" * jn)
+        # A class a by-value return hands back as the object itself passes
+        # where its pointer or reference is taken.
+        jn in owned_struct_names && push!(out, "$(_OWNED){$jn}")
         out
     end
     # An rvalue-reference overload beside its lvalue twin is not emitted at
@@ -4086,7 +4240,8 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         bound = _sig_type_bound, owners = _sig_owners, is_enum = _sig_is_enum,
         string_param = c -> _string_param_plan(c, record_abi) isa Tuple,
         object_address = c -> JLCSIRGenerator.FunctionGen.takes_object_address(c, dwarf_structs, record_abi),
-        value_ref_bytes = (ct, c) -> _value_ref_bytes(ct, c, placeholder_struct_names, record_abi))
+        value_ref_bytes = (ct, c) -> _value_ref_bytes(ct, c, placeholder_struct_names, record_abi),
+        owned_value = _owned_value, owned_ref = _owned_ref, owned_class_ref = _owned_class_ref)
 
     # What a pointer or reference return may be typed with (`_typed_pointer_return`).
     typed_return_names = _typed_return_names(join(struct_chunks))
@@ -4307,6 +4462,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
         pointer_types = Union{Nothing,String}[]   # per parameter: what `pointer_arg` is told (`_pointer_arg_type`)
         cstring_args = Union{Nothing,String}[]    # per parameter: the `ccall` path's string conversion (`_cstring_param_arg`)
         value_ref_params = Bool[]                 # per parameter: also takes a `Ref` of a value's bytes (`_value_ref_bytes`)
+        own_plans = Any[]                         # per parameter: nothing, or (:address | :lend, kind) for a by-value object
 
         for (i, param) in enumerate(params)
             # Sanitize parameter name (e.g., avoid 'end', 'function' keywords)
@@ -4345,8 +4501,24 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             value_ref_bytes = _value_ref_bytes(actual_c_type, String(get(param, "c_type", "")),
                                                placeholder_struct_names, record_abi)
             push!(value_ref_params, value_ref_bytes > 0)
+            # What C++ does with a by-value argument of this type, where the
+            # build asked its compiler (`_ownership_kind`): `:address`, the
+            # call takes the address of a temporary the wrapper makes
+            # (`CxxObjects.byvalue`); `:lend`, the thunk makes the temporary
+            # and the wrapper lends it the caller's value or object
+            # (`CxxObjects.lend`).
+            let c = String(get(param, "c_type", "")), kind = splan isa Tuple ? nothing : _own_kind(c)
+                FG = JLCSIRGenerator.FunctionGen
+                push!(own_plans,
+                      kind === nothing || kind.align > 16 || kind.size <= 0 ? nothing :
+                      (FG._stl_by_value(c) || object_address) ? (:address, kind) :
+                      _owned_value(actual_c_type, c) ? (:lend, kind) : nothing)
+            end
             sig_c_type = _by_address_ctype(actual_c_type, String(get(param, "c_type", ""));
-                                           object_address, value_ref_bytes)
+                                           object_address, value_ref_bytes,
+                                           owned_value = _owned_value(actual_c_type, String(get(param, "c_type", ""))),
+                                           owned_ref = value_ref_bytes > 0 && _owned_ref(String(get(param, "c_type", ""))),
+                                           owned_class_ref = _owned_class_ref(actual_c_type))
             push!(julia_param_types,
                   splan isa Tuple ? _STD_STRING_PARAM :
                   strict ? _strict_param_spelling(sig_c_type; bound = _sig_type_bound,
@@ -4560,11 +4732,36 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                     invoke_names[si] = "RepliBuild.StdStrings.address($sym)"
                 end
             end
-            _with_strings(call) = isempty(string_syms) ? call :
-                "(try GC.@preserve $(join(string_syms, " ")) $call finally " *
-                join(("RepliBuild.StdStrings.release!($s)" for s in string_syms), "; ") * " end)"
+            # A by-value object the build asked its compiler about
+            # (`own_plans`): `_rb_vN` is what the call is given, made before
+            # the call and settled after it, whether it returns or throws.
+            # C++ copies where it can and moves where it cannot; a moved
+            # object is spent (`CxxObjects.byvalue`, `lend`, `settle!`).
+            own_syms = String[]
+            invoke_pointer_types = copy(pointer_types)
+            for (vi, oplan) in enumerate(own_plans)
+                oplan === nothing && continue
+                (how, kind) = oplan
+                ownership_kinds[kind.id] = kind
+                sym = "_rb_v$(vi)"
+                push!(own_syms, sym)
+                if how === :address
+                    string_setup *= "$sym = RepliBuild.CxxObjects.byvalue(NTuple{$(kind.size), UInt8}, " *
+                                    "$(_ownership_const(kind)), LIBRARY_PATH, $(param_names[vi]))\n    "
+                    invoke_names[vi] = "$sym.ptr"
+                    invoke_pointer_types[vi] = nothing
+                else
+                    string_setup *= "$sym = RepliBuild.CxxObjects.lend($(param_types[vi]), " *
+                                    "$(_ownership_const(kind)), LIBRARY_PATH, $(param_names[vi]))\n    "
+                    invoke_names[vi] = "$sym.arg"
+                end
+            end
+            _with_strings(call) = (isempty(string_syms) && isempty(own_syms)) ? call :
+                "(try GC.@preserve $(join(vcat(string_syms, own_syms), " ")) $call finally " *
+                join(vcat(["RepliBuild.StdStrings.release!($s)" for s in string_syms],
+                          ["RepliBuild.CxxObjects.settle!($v)" for v in own_syms]), "; ") * " end)"
             invoke_args = join(_tier2_invoke_args(invoke_names, param_types, needs_conversion,
-                                                  emitted_enum_base, pointer_types), ", ")
+                                                  emitted_enum_base, invoke_pointer_types), ", ")
             jit_ret_type = return_type["julia_type"]
             jit_c_ret = get(return_type, "c_type", "void")
 
@@ -4662,7 +4859,22 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
             # (`_string_return_plan`, `StdStrings.take_string!`), or keeps
             # its bytes with the reason written beside the call.
             string_plan = in_place ? _string_return_plan(jit_c_ret, record_abi) : nothing
-            in_place_body(call) =
+            # An object that has to be ended (the build asked its compiler:
+            # `_ownership_kind`) stays where C++ built it: the wrapper returns
+            # the storage itself, a `CxxObjects.Owned`, whose finalizer runs
+            # the type's destructor. C++ never moves such an object by its
+            # bytes, and neither does the wrapper. A type with nothing to end
+            # is returned as its value, as before.
+            own_ret = (in_place && !(string_plan isa Tuple)) ? _own_kind(jit_c_ret; ret = true) : nothing
+            own_holder = (own_ret !== nothing && own_ret.ends) ? _holder_type(String(jit_ret_type), own_ret) : nothing
+            owned_ret = own_holder !== nothing
+            owned_ret && (ownership_kinds[own_ret.id] = own_ret)
+            in_place_doc = owned_ret ? _owned_return_doc(doc_comment, "$(_OWNED){$own_holder}") : doc_comment
+            in_place_body(call) = owned_ret ?
+                ("    " * string_setup * "_rb_ret = RepliBuild.CxxObjects.slot($own_holder, " *
+                 "$(_ownership_const(own_ret)), LIBRARY_PATH)\n" *
+                 "    GC.@preserve _rb_ret $call\n" *
+                 "    return RepliBuild.CxxObjects.born!(_rb_ret)") :
                 (string_plan isa String ? "    # $(string_plan)\n" : "") *
                 "    " * string_setup * "_rb_ret = RepliBuild.JITManager.return_slot($jit_ret_type)\n" *
                 "    GC.@preserve _rb_ret $call\n" *
@@ -4733,7 +4945,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         cstring_free_sym; doc_comment=doc_comment)
                 elseif in_place
                     func_def = """
-                    $doc_comment
+                    $in_place_doc
                     function $julia_name($param_sig)
                         # [Tier 2] Dispatch to MLIR AOT Thunk, built in the caller's buffer
                     $(in_place_body(invoke_call))
@@ -4774,7 +4986,7 @@ function generate_introspective_module_cpp(config::RepliBuildConfig, lib_path::S
                         cstring_free_sym; doc_comment=doc_comment)
                 elseif in_place
                     func_def = """
-                    $doc_comment
+                    $in_place_doc
                     function $julia_name($param_sig)
                         # [Tier 2] Dispatch to MLIR JIT, built in the caller's buffer
                     $(in_place_body(invoke_call))
@@ -5671,6 +5883,8 @@ $_preload_snippet                # Load library explicitly to ensure symbols are
     # slot behind, and a slot a surviving chunk reads must exist.
     thunk_slots = config.compile.aot_thunks ?
         _aot_thunk_slot_chunk(_funcs, aot_fptr_taken) : ""
+    # ...and the ownership kinds its call sites name (`_ownership_kind_chunk`).
+    thunk_slots *= _ownership_kind_chunk(_funcs, ownership_kinds)
 
     # The manifest is written on every wrap, JIT mode included: JITManager
     # compiles only the thunks it lists, and without one it compiles a thunk for

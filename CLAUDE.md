@@ -502,6 +502,13 @@ If you are asked to work on it:
   every AOT package is wrapped again (`hub_sweep.jl --rewrap`), and until
   then it fails at load with that message. (`test_jlcs_soname.jl`, devtests
   `test_jlcs_soname_live.jl`.)
+- `Builder/OwnershipUnit.jl`, `CxxObjects.jl` — C++ ownership. The first is
+  the build's step 4d: text in, tables out (`plan`, `unit_text`, `facts`,
+  `metadata`), plus `generate`, which compiles. The second is what a
+  generated wrapper calls at run time (`Owned`, `Kind`, `slot`, `born!`,
+  `byvalue`, `lend`, `settle!`, `move`, `release!`); it loads after
+  `JITManager`, whose `_pointer_arg` it extends. The rule is under JLCS
+  dialect and ABI.
 - `Builder/SysConfigGen.jl`, `Builder/VisibilityProbe.jl` — probes, run once per
   package or version bump, not on the build path.
 - `Builder/BuildGraph.jl` — the build-graph contract: a `TargetGraph` of targets
@@ -1743,7 +1750,9 @@ the test named when you touch the area.
   as an address. `_pointer_arg_type` names the position (`Ptr{T}`,
   `Ptr{Cvoid}`, `Cstring` for a pointer to plain `char`, `Ptr{Opaque}`,
   `Ptr{Code}`, `ByValue{V}` for an STL container taken by value, which the
-  thunk takes by address); `pointer_arg` alone says what is accepted, and the
+  thunk takes by address; where the build described the type, the body
+  makes a temporary with `CxxObjects.byvalue` instead and passes its
+  address); `pointer_arg` alone says what is accepted, and the
   rest is its `MethodError`. A new owning type defines
   `Base.unsafe_convert(::Type{Ptr{Cvoid}}, x)`; a by-value parameter the thunk
   takes by address is spelled through `_by_address_ctype` in the function loop
@@ -1788,12 +1797,64 @@ the test named when you touch the area.
   same predicate and name (GeneratorCpp allocates the buffer with
   `JITManager.return_slot`, calls the void `invoke`/`invoke_aot_ptr` with
   `slot_address` first under `GC.@preserve`, and returns `slot_value`, so the
-  Julia return type does not change); an AOT slot's table entry is the thunk it
+  Julia return type does not change; a type that has to be ended is held in
+  that storage instead, the rule below); an AOT slot's table entry is the thunk it
   resolves (`_aot_fptr_const_name!`'s `thunk`), and the manifest scan maps both
   spellings back to the mangled symbol (`_thunks_named_in_text`). The new name
   makes a stale wrapper fail as a missing thunk, with a message saying to
   re-wrap, instead of passing arguments where the buffer goes.
   (`test_by_value_crossing.jl`, devtests `test_sret_in_caller_buffer.jl`.)
+- **A C++ object that has to be ended is held where C++ built it, ended
+  once, and copied only by its own copy constructor** (John, 2026-11-27: "by
+  value and whatever best supports that").
+  - **The compiler answers, never a shape.** `compile_project`'s step 4d
+    (`Builder/OwnershipUnit.jl`) writes `replibuild_own.cpp`, one row per
+    type a function returns or takes by value through an address
+    (`FunctionGen.owned_key`: a pass-by-reference record with a layout, an
+    STL container, a record with no layout taken by the caller's object's
+    address). The compiler states the type's size, alignment and whether it
+    is trivially destructible, copy- and move-constructible, in the NAME of
+    an instantiation (`replibuild_force::own_facts<n, size, align, flags>`,
+    read off the unit's IR), and compiles `replibuild_own_end_<n>`,
+    `_copy_<n>` and `_move_<n>`. The metadata's `ownership.types[key]`
+    carries both. A return type is named through `decltype` of the member
+    that returns it, never spelled from DWARF. The unit follows the forced
+    unit's rules: one row per line, the include block checked alone, no
+    strong definition but its own helpers, and a relink that fails falls
+    back to the library without it (`refused!`). The helpers are not API
+    (`extract_symbols_from_binary`) and are shims to `_pe_export_intent`.
+  - **A return the facts say `ends` is a `CxxObjects.Owned{T}`**: the
+    storage the call built into (`slot`, then `born!` once the call has
+    returned, so a call that throws leaves nothing to end), whose finalizer
+    runs the type's destructor. `T` is what the return was
+    (`NTuple{N, UInt8}` at the compiler's size, or the wrapper's immutable
+    struct); the C++ object is the Julia object's first bytes, and Julia
+    does not move it. A type with nothing to end is the plain value it was.
+    So is every return with no facts: older metadata, a graph library, an
+    alignment above 16, a record emitted `mutable`, a factory class. Never
+    guess a destructor.
+  - **A by-value parameter gets a copy where C++ can copy.**
+    `CxxObjects.byvalue` (a container, or a record with no layout: the
+    wrapper makes the temporary with the copy constructor and passes its
+    address) and `CxxObjects.lend` (a library class with a layout: the THUNK
+    makes the temporary, `value_temporary`, from the object where it is) are
+    settled in a `finally` (`settle!`): a copy is ended, and an object the
+    call took (a type C++ cannot copy, or `RepliBuild.move(x)`) is ended and
+    marked spent, after which every use is an `ArgumentError`. Never lend
+    the caller's object to a by-value parameter of a copyable type: the
+    callee may move out of it.
+  - **One spelling for the signature**: `_by_address_ctype` (`owned_value`,
+    `owned_ref`, `owned_class_ref`) in the loop and in
+    `_integer_width_overloads`' prediction, and `_sig_owners` at a strict
+    pointer position. The `Kind` constants (`_RB_OWN_<n>`) are derived from
+    the final text (`_ownership_kind_chunk`); their three functions are
+    found in the library at first use, per process (`CxxObjects.resolve!`),
+    never at wrap or precompile.
+  - Metadata without `ownership` wraps exactly as before: a package gets
+    these rules on a rebuild, not a re-wrap.
+
+  (`test_ownership_unit.jl`, `test_cxx_objects.jl`, devtests
+  `test_ownership_unit_live.jl`, `test_cxx_objects_live.jl`.)
 - **A `std::basic_string<char>` returned by value is a Julia `String`**
   (2026-11-13, `StdStrings`). It is read where C++ built it (the caller's buffer,
   above) and ended there, never from a copy: libstdc++'s short string points
@@ -3004,10 +3065,6 @@ struct. Still open:
 - **Same-named enums in two scopes collapse** (`Mode`, `ns::Mode`): one's
   enumerators are bound nowhere and its functions return the other type. The
   bare-name problem above, with constants lost.
-- **A value moved into a by-value parameter is stale afterwards.** The thunk
-  moves as C++ does, but the caller's Julia value is an immutable bits copy,
-  so using it again is a use-after-free. What owns a move-only object on the
-  Julia side is John's call.
 - **Two library names that collide after a move are refused, not resolved**:
   a library that defines both a struct-named global `conf` and its own
   `conf_`, or a global `conf` beside a function `conf_ptr(void)`. The
@@ -3054,18 +3111,14 @@ a smart pointer refused `Ref` of the bytes one is returned as, and a
 `std::function*` return was untyped. The matrix was measured again that day
 and no case kills the process. Still open:
 
-- **A by-value return is built in the caller's buffer and then moved.**
-  `slot_value` copies the bytes into a Julia value, and `Ref(r)` or a
-  by-value pass (`pointer_arg(ByValue{V}, x)`) copies them again. A type that
-  points into itself is not valid at the new address: `std::list`,
-  `std::map`, `std::set` and `std::unordered_map` (a marker inside the
-  object), and a short `std::string` wherever `take_string!` does not read it
-  in place (inside a `pair`, an `optional`, a `filesystem::path`;
-  `std::wstring`, `std::u16string`). Lookups happen to work, `rbegin()`
-  answers wrong, and a walk to `end()` does not stop. The same values are
-  never ended: nothing runs a destructor on the bytes, and a by-value pass
-  lends where C++ moves. What owns such an object on the Julia side is John's
-  call, the same one as for a move-only parameter above.
+- **A by-value return with nothing to end, or with no facts, is still moved
+  by its bytes** (narrowed 2026-11-27: a type the build's compiler says has
+  to be ended is held where C++ built it, the JLCS invariants). What is
+  left: a class with a trivial destructor that points into itself, which
+  C++ allows and no library measured has; a short `std::string` inside a
+  `pair`, an `optional` or a `filesystem::path`, which is now ended and not
+  moved but still cannot be read from Julia; and every package not yet
+  rebuilt.
 - **Nothing makes a `std::function`, a `std::variant` or a stream.** A
   reference to one is typed `Ref{<empty struct>}` and takes a typed pointer
   the library returned: a `std::function` it owns passes by value and by
@@ -3189,6 +3242,18 @@ DWARF-resolved destructors — **is** built.)
 - A value for a `constexpr` or in-class `static const` member with no symbol
   (2026-11-18): the metadata lists it in `global_constants`; decoding
   `DW_AT_const_value` is not built.
+- C++ ownership, what is left (2026-11-27). A graph-mode library and an
+  ingested one have no step 4d and keep the old by-value behaviour. So do a
+  record the wrapper emits `mutable` (a class with bitfields and a
+  destructor: its storage is already the Julia object, and only a finalizer
+  is missing), a factory class returned by value, and a type aligned above
+  16. `Owned` reads a record's fields and has no setters. Nothing reads the
+  elements of a held container from Julia (the `create_std_*` wrappers are a
+  separate type). A finalizer runs on the collector's thread, which a
+  thread-affine destructor would not accept. The helpers' PE path
+  (`dllexport`, the export gate) has not run on a Windows host. The build
+  cost is one more relink and extraction for a C++ package with such types;
+  folding it into step 4b's relink is not done.
 - Thread-local globals without an accessor (2026-11-23): a static
   `thread_local` data member (the unit would need its class's definition,
   as the forced unit includes record headers), a graph-mode library (no
