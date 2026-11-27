@@ -2236,6 +2236,14 @@ beside it that `path =` does not name is stale and lacks recent versions. 3.3.2
 is a permanent hole there. Registration is manual and
 outward-facing, so ask first.
 
+**The gate for the next registration is `docs/updates/NEXT_RELEASE.md`**
+(2026-11-27): a list of boxes, each checked by the pull request or run that
+makes it true. Nothing is registered while one is open unless John strikes
+it, and a pull request that completes a box checks it there. **C's stable
+surface is the `ccall` path** (John, 2026-11-27: "c stable is ccall"):
+`[wrap.tier1]`, `[link] enable_lto` and `ingest` are outside the claim, and
+evidence for it is a run on plain calls.
+
 ### Rust front end (in progress)
 
 - **A Rust project never enters the C/C++ pipeline.** `compile_project`, the
