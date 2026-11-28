@@ -34,7 +34,7 @@ emitted(prefix) = getfield(M, only(n for n in names(M; all = true)
 # in a register instead, the callee stored through the first argument register.
 probe("unique_ptr_array_return") do p
     r = Ref(M.upa_make(5))
-    check(p, "the value's size", sizeof(r[]), 8)
+    check(p, "the value's size", sizeof(r[][]), 8)
     GC.@preserve r begin
         a = typed(emitted("unique_ptr_int"), r)
         check(p, "upa_at", [M.upa_at(a, i) for i in 0:4], [0, 3, 6, 9, 12])
@@ -43,7 +43,7 @@ end
 
 probe("shared_ptr_array_return") do p
     r = Ref(M.spa_make(4))
-    check(p, "the value's size", sizeof(r[]), 16)
+    check(p, "the value's size", sizeof(r[][]), 16)
     GC.@preserve r begin
         a = typed(emitted("shared_ptr_int"), r)
         check(p, "spa_at", [M.spa_at(a, i) for i in 0:3], [100, 101, 102, 103])
@@ -59,8 +59,9 @@ end
 # The wrapper's value for a std::vector<bool> is as large as the library says
 # the object is, whatever that is in this C++ library.
 probe("vector_bool_size") do p
-    check(p, "sizeof the returned value", sizeof(M.vb_make(1)), M.vb_sizeof())
-    check(p, "a vector<int> is still its own size", sizeof(M.vp_make()), M.vi_sizeof())
+    # (`x[]` is the bytes of the object a return hands back.)
+    check(p, "sizeof the returned value", sizeof(M.vb_make(1)[]), M.vb_sizeof())
+    check(p, "a vector<int> is still its own size", sizeof(M.vp_make()[]), M.vi_sizeof())
 end
 
 # Enough bits to need more than one word, and a second vector after it: a

@@ -12,7 +12,7 @@ case(W, "takes a Julia String") do
 end
 case(W, "return by value") do
     r = fn(:ws_make)(3)
-    opaque(M.ws_len(Ref(r)), 3, "comes back as its bytes, a $(describe(r)); the characters are not decoded")
+    opaque(M.ws_len(Ref(r)), 3, "comes back as the C++ object, a $(describe(r)); the characters are not decoded")
 end
 case(W, "return by value") do
     # Enough characters to be on the heap.
@@ -21,7 +21,7 @@ case(W, "return by value") do
 end
 case(W, "pass by reference") do
     r = fn(:ws_make)(3)
-    works(M.ws_len(Ref(r)), 3, "Ref of the bytes the library returned")
+    works(M.ws_len(Ref(r)), 3, "Ref of the object the library returned")
 end
 case(W, "intact after the return") do
     # A short string keeps its characters inside itself; the library checks
@@ -33,7 +33,7 @@ end
 const U = "std::u16string"
 case(U, "return by value") do
     r = fn(:u16_make)(4)
-    opaque(M.u16_len(Ref(r)), 4, "its bytes, a $(describe(r))")
+    opaque(M.u16_len(Ref(r)), 4, "the C++ object, a $(describe(r))")
 end
 case(U, "intact after the return") do
     r = fn(:u16_make)(4)

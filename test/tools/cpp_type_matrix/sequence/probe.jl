@@ -7,7 +7,7 @@ case(DQ, "make") do
 end
 case(DQ, "return by value") do
     r = M.dq_make(5)
-    opaque(M.dq_sum(Ref(r)), 10, "comes back as its bytes, a $(describe(r))")
+    opaque(M.dq_sum(Ref(r)), 10, "comes back as the C++ object, a $(describe(r))")
 end
 
 const LI = "std::list<int>"
@@ -24,7 +24,7 @@ case(LI, "return by value") do
     r = fn(:list_make)(4)
     # Not walked when the end marker is gone: the walk would not stop.
     M.list_intact(Ref(r)) == 1 || return "WRONG the list's last node points at the buffer it was returned in, not at the copy Julia holds: a walk to end() never arrives (not run)"
-    opaque(M.list_sum(Ref(r)), 6, "its bytes, a $(describe(r))")
+    opaque(M.list_sum(Ref(r)), 6, "the C++ object, a $(describe(r))")
 end
 
 const BS = "std::bitset<8>"

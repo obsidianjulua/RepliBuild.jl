@@ -12,7 +12,7 @@ case(T, "takes a Julia String") do
 end
 case(T, "return by value") do
     p = fn(:path_make)("a/b.txt")
-    opaque(M.path_len(Ref(p)), 7, "a struct of bytes, a $(describe(p)); its text is read only through the library")
+    opaque(M.path_len(Ref(p)), 7, "the C++ object, a $(describe(p)); its text is read only through the library")
 end
 case(T, "pass by reference") do
     p = fn(:path_make)("a/b.txt")

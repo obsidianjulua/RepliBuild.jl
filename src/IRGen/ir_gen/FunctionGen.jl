@@ -671,6 +671,45 @@ function stl_value_bytes(c_type::AbstractString, record_abi)::Int
 end
 
 """
+    owned_key(c_type, structs, record_abi; abi, ret) -> Union{Nothing,String}
+
+The name ownership facts are filed under (the metadata's `ownership`) for the
+record a by-value `c_type` names, when it is one C++ will not copy bytewise
+(DWARF's `DW_CC_pass_by_reference`: a destructor, a copy or move constructor
+of its own, or a member with one). `nothing` for everything else: a scalar, a
+pointer or reference, an enum, a record C++ passes in registers or as bytes.
+
+Three shapes have a key:
+
+  * a record with a layout here → its key in `structs`;
+  * a standard container by value (`std::vector<int>`, `std::map<…>`), which
+    has no layout of its own here → its spelling, top-level cv cut;
+  * a record with no layout here that passes by reference (`:indirect`:
+    `std::function<int (int)>`, a class only declared) → its spelling.
+
+Such an object is built where it will live and may point into itself, own
+memory, or both. Whether it must be ENDED and whether it can be COPIED are the
+compiler's answers, which the build asks for per key (`OwnershipUnit`); the
+build and both generator paths ask this one function which types those are,
+so a fact is looked up under the key it was filed under.
+"""
+function owned_key(c_type::AbstractString, structs, record_abi;
+                   abi::Symbol = host_record_abi(), ret::Bool = false)
+    t = _strip_top_cv(String(c_type))
+    (isempty(t) || t == "void") && return nothing
+    occursin(r"[*&(\[]", _outside_template_args(t)) && return nothing
+    (kind, key) = by_value_crossing(t, structs, record_abi; abi, ret)
+    if kind === :layout
+        return record_passes_by_reference(t, key, record_abi) ? String(key) : nothing
+    elseif kind === :direct
+        return (_stl_by_value(t) && record_passes_by_reference(t, nothing, record_abi)) ? t : nothing
+    elseif kind === :indirect
+        return t
+    end
+    return nothing
+end
+
+"""
     takes_object_address(c_type, structs, record_abi) -> Bool
 
 Whether a by-value parameter of `c_type` reaches its thunk as an ADDRESS the

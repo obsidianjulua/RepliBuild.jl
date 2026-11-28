@@ -38,7 +38,7 @@ const BYVALUE_CLASS_DIR = joinpath(@__DIR__, "byvalue_class_test")
 const BYVALUE_CLASS_PROBE = joinpath(BYVALUE_CLASS_DIR, "probe_bv.jl")
 const BYVALUE_CLASS_PROBES = ["thunks_loaded", "copy_keeps_the_callers", "move_consumes_once",
     "no_copy_no_move_is_refused", "private_copy_is_refused", "trivial_copy_is_bytes",
-    "defaulted_copy_is_bytes", "implicit_nontrivial_copy_is_refused", "copy_constructor_runs",
+    "defaulted_copy_is_bytes", "implicit_nontrivial_copy_is_made", "copy_constructor_runs",
     "virtual_destructor", "implicit_virtual_destructor", "aligned_temporary", "nested_class", "namespaced_copy", "namespaced_move", "template_class",
     "shared_name_is_refused", "two_temporaries"]
 
@@ -108,13 +108,17 @@ if requires("a class taken by value through a thunk, live", :libJLCS, :clangxx)
     @testset "the wrapper: a call where a temporary can be made, a trap that says why where it cannot" begin
         body(name) = (m = match(Regex("\nfunction " * name * "\\([^\n]*\n(.*?)\nend\n", "s"), txt);
                       m === nothing ? "no function $name" : String(m.captures[1]))
+        # `take_holder` was a refusal ("its copy constructor is implicit and
+        # not trivial": no symbol, and a missing symbol never means trivial).
+        # The build's ownership unit copies one `Holder`, so the compiler
+        # defines that constructor and the library has it (2026-11-27). The
+        # refusal itself is test_byvalue_class_temporaries.jl's.
         for name in ("take_res", "consume_uniq", "take_plain", "take_dflt", "take_tracked", "take_poly", "take_wide", "take_vkid",
-                     "take_inner", "ns_take_nres", "ns_consume_nuniq", "ns_take_box", "take_both")
+                     "take_inner", "ns_take_nres", "ns_consume_nuniq", "ns_take_box", "take_both", "take_holder")
             @test (name, occursin("ABI Safety Trap", body(name)), occursin("_mlir_ciface_", body(name))) == (name, false, true)
         end
         for (name, part) in (("take_pinned", "its copy constructor is deleted and it has no move constructor"),
                              ("take_guarded", "its copy constructor is private"),
-                             ("take_holder", "its copy constructor is implicit and not trivial"),
                              ("take_twin", "distinct classes in this library are named `Twin` (one::Twin; two::Twin)"))
             b = body(name)
             @test (name, occursin("ABI Safety Trap", b), occursin("cannot be passed by value", b), occursin(part, b)) ==
@@ -144,9 +148,15 @@ if requires("a class taken by value through a thunk, live", :libJLCS, :clangxx)
         vkid_dtor = "_ZN4VKidD1Ev" in own ? "_ZN4VKidD1Ev" : "_ZN4VKidD2Ev"
         @test vkid_dtor in own
         @info "VKid's temporary is ended by" vkid_dtor
+        # `Holder`'s copy constructor is implicit: the ownership unit made the
+        # compiler define it, as the complete-object variant where a
+        # toolchain emits one, else the base-object one.
+        holder_ctor = "_ZN6HolderC1ERKS_" in own ? "_ZN6HolderC1ERKS_" : "_ZN6HolderC2ERKS_"
+        @test holder_ctor in own
         # The complete constructors and destructors of every class a thunk
         # makes a temporary of. Itanium names, on every host.
         want = Set(["_ZN3ResC1ERKS_", "_ZN3ResD1Ev", "_ZN4UniqC1EOS_", "_ZN4UniqD1Ev", "_ZN5PlainD1Ev", "_ZN4DfltD1Ev",
+                    holder_ctor, "_ZN6HolderD1Ev",
                     "_ZN4VKidC1ERKS_", vkid_dtor,
                     "_ZN7TrackedC1ERKS_", "_ZN7TrackedD1Ev", "_ZN4PolyC1ERKS_", "_ZN4PolyD1Ev",
                     "_ZN4WideC1ERKS_", "_ZN4WideD1Ev",
