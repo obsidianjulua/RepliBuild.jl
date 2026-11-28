@@ -351,6 +351,31 @@ end
 # Ahead of time
 # =============================================================================
 
+"""
+The entry point of a thunks DLL (`aot_library`): the loader calls it when the
+library is mapped and unmapped, and a nonzero answer lets the load go on.
+"""
+const AOT_DLL_ENTRY = """
+/* Written by RepliBuild: the entry point of a thunks library linked with no C runtime. */
+int DllMainCRTStartup(void *instance, unsigned long reason, void *reserved) {
+    (void)instance; (void)reason; (void)reserved;
+    return 1;
+}
+"""
+
+"""
+    _aot_link_args(path, object; entry = nothing) -> Vector{String}
+
+The clang arguments that link the thunks library `path` from `object`, and
+from `entry`, the source of a DLL's entry point, where the host needs one.
+"""
+function _aot_link_args(path::AbstractString, object::AbstractString;
+                        entry::Union{Nothing,AbstractString} = nothing)::Vector{String}
+    args = String["-shared", "-fPIC", "-nostdlib", "-o", path, object]
+    entry === nothing || push!(args, entry)
+    return append!(args, Compiler._reproducible_link_flags())
+end
+
 "The file name of a library's ahead-of-time thunks: `librb_fix.so` gives `librb_fix_thunks.so`."
 function aot_library_name(library::AbstractString)::String
     (stem, ext) = splitext(basename(String(library)))
@@ -372,6 +397,11 @@ compiler and linker the C bucket links with, which a Julia installation
 brings; a thunk is loads, stores and one call, and asks the C runtime for
 nothing.
 
+A DLL must name an entry point, the C runtime's `DllMainCRTStartup` under
+MinGW, and its lld has no switch for a library without one. On Windows the
+link also compiles `AOT_DLL_ENTRY`, an entry that does nothing, so the
+library still imports nothing.
+
 Any earlier file of that name is removed first: a failure leaves no thunks
 library, and the wrapper then JITs.
 """
@@ -385,6 +415,7 @@ function aot_library(library::AbstractString, metadata::AbstractDict, symbols;
     (ir, made, skipped) = thunk_module(metadata["functions"], metadata["types"]; only = wanted)
     isempty(made) && error("RustThunks.aot_library: none of the $(length(wanted)) function(s) asked for has a thunk")
     object = joinpath(String(output), "rust_thunks.o")
+    entry = Sys.iswindows() ? joinpath(String(output), "rust_thunks_entry.c") : nothing
     ctx = MLIRNative.create_context()
     try
         mod = MLIRNative.parse_module(ctx, ir; debug_base = MLIRNative.debug_dir_for(String(library)))
@@ -394,8 +425,8 @@ function aot_library(library::AbstractString, metadata::AbstractDict, symbols;
         MLIRNative.emit_object(mod, object) ||
             error("RustThunks.aot_library: no object file was written for the thunks of $library")
         lld = Compiler._bundled_linker(:c)
-        args = String["-shared", "-fPIC", "-nostdlib", "-o", path, object,
-                      Compiler._reproducible_link_flags()...]
+        entry === nothing || write(entry, AOT_DLL_ENTRY)
+        args = _aot_link_args(path, object; entry)
         lld === nothing || push!(args, "--ld-path=" * lld)
         (out, code) = Compiler._clang_for_c_bucket("clang", args)
         (code == 0 && isfile(path)) ||
@@ -405,6 +436,7 @@ function aot_library(library::AbstractString, metadata::AbstractDict, symbols;
         rethrow()
     finally
         rm(object; force = true)
+        entry === nothing || rm(entry; force = true)
         MLIRNative.destroy_context(ctx)
     end
     return (path, made, skipped)

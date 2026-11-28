@@ -26,11 +26,11 @@ const _SN_MLIR = joinpath(dirname(@__DIR__), "src", "mlir")
 @testset "the soname is the dialect's ABI version" begin
     cmake = read(joinpath(_SN_MLIR, "CMakeLists.txt"), String)
     abi = parse(Int, strip(read(joinpath(_SN_MLIR, "ABI_VERSION"), String)))
-    version = VersionNumber(strip(read(joinpath(_SN_MLIR, "VERSION"), String)))
+    version = VersionNumber(strip(read(joinpath(_SN_MLIR, "JLCS_VERSION"), String)))
 
     # libJLCS.so.<ABI> is a link to libJLCS.so.<VERSION>: one major.
     @test version.major == abi
-    @test occursin("file(STRINGS \"\${CMAKE_CURRENT_SOURCE_DIR}/VERSION\" JLCS_VERSION", cmake)
+    @test occursin("file(STRINGS \"\${CMAKE_CURRENT_SOURCE_DIR}/JLCS_VERSION\" JLCS_VERSION", cmake)
 
     # Set on the target, AFTER add_llvm_library, which sets LLVM's: the later
     # call is the one that holds.

@@ -21,8 +21,8 @@ using BinaryBuilder, Pkg
 const REPO = normpath(joinpath(@__DIR__, "..", ".."))
 
 name = "JLCS"
-# The dialect's own version: src/mlir/VERSION, not RepliBuild's.
-version = VersionNumber(strip(read(joinpath(REPO, "src", "mlir", "VERSION"), String)))
+# The dialect's own version: src/mlir/JLCS_VERSION, not RepliBuild's.
+version = VersionNumber(strip(read(joinpath(REPO, "src", "mlir", "JLCS_VERSION"), String)))
 
 # src/mlir less what git ignores (tracked files and new ones not yet added),
 # and the licence, staged where a clone of the repository would have them: a

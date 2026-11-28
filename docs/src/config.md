@@ -24,7 +24,7 @@ folder holding `replibuild.toml` unless they are absolute.
 
 | Key | Default | Meaning |
 |:----|:--------|:--------|
-| `flags` | `["-std=c++17", "-fPIC"]` | Compiler flags for every file. `discover` writes `["-fPIC"]` for C. Add `-O2`; neither default optimizes. |
+| `flags` | `["-std=c++17", "-fPIC"]` | Compiler flags for every file. `discover` writes `["-fPIC"]` for C. Add `-O2`; neither default optimizes. Debug information is always on (`-g`); on Windows it is DWARF 5 (`-gdwarf-5`) unless a flag here names a version. |
 | `defines` | none | A table: `NAME = "value"` becomes `-DNAME=value`. For a define with no value, put `-DNAME` in `flags`. |
 | `include_dirs` | written by `discover` | Folders to search for headers. Added automatically: a git or archive dependency's top folder, `include/` and `src/`; a local dependency's folder and `include/`. |
 | `source_files` | written by `discover` | The project's own files to compile, one by one. `build` does not search the project folder: a file not listed is not compiled. A dependency's files are **added** to these. Each listed file must exist. |

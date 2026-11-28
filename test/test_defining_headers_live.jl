@@ -85,7 +85,16 @@ include_string(@__MODULE__, DH_PROJECT)
 
 dh_classes(plan, key) = sort!(String[String(f["class"]) for f in get(plan, key, Any[])])
 dh_reason(plan, class) = something((String(f["reason"]) for f in get(plan, "skipped", Any[]) if f["class"] == class)..., "")
-dh_exports(lib, sym) = Libdl.dlsym(Libdl.dlopen(lib), Symbol(sym); throw_error = false) !== nothing
+# Opened and closed again: the child below builds the same project, and Windows
+# deletes neither a loaded DLL nor the folder it is in.
+function dh_exports(lib, sym)
+    h = Libdl.dlopen(lib)
+    try
+        return Libdl.dlsym(h, Symbol(sym); throw_error = false) !== nothing
+    finally
+        Libdl.dlclose(h)
+    end
+end
 
 if requires("a header that defines functions and the forced unit, live", :clangxx)
 @testset "A header that defines functions, and the forced unit, live" begin
@@ -161,8 +170,9 @@ if requires("a header that defines functions and the forced unit, live", :clangx
             classes = sort!(String[String(f["class"]) for f in c["skipped"]])
             probe("all_reported", classes == ["Gadget", "Shape", "Widget"], classes)
             reasons = unique(String[String(f["reason"]) for f in vcat(c["skipped"], m["skipped"])])
+            # The linker's own words: GNU ld's "multiple definition", lld's "duplicate symbol".
             probe("reason", length(reasons) == 1 && startswith(reasons[1], "the library did not link with the forced unit: ") &&
-                            occursin("multiple definition", reasons[1]), reasons)
+                            (occursin("multiple definition", reasons[1]) || occursin("duplicate symbol", reasons[1])), reasons)
             h = Libdl.dlopen(lib)
             has(s) = Libdl.dlsym(h, Symbol(s); throw_error = false) !== nothing
             probe("library_as_first_linked", has("export_version") && has("_Z12gadget_totalRK6Gadget") &&

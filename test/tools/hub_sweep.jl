@@ -293,11 +293,16 @@ sweep_thunks_libraries(julia_dir) = sweep_files(julia_dir, f -> occursin(r"_thun
 function sweep_generators(julia_dir::AbstractString)::Vector{String}
     found = String[]
     for w in sweep_wrappers(julia_dir)
-        for l in eachline(w)        # the first stamp of each wrapper
-            m = match(r"^const BUILD_GENERATOR\s*=\s*\"([^\"]*)\"", l)
-            m === nothing && continue
-            push!(found, String(m.captures[1]))
-            break
+        # `open … do`, never `eachline(w)`: leaving that loop early keeps the
+        # file open until the iterator is collected, and on Windows the
+        # rebuild's `clean` then cannot delete the wrapper folder.
+        open(w) do io
+            for l in eachline(io)   # the first stamp of each wrapper
+                m = match(r"^const BUILD_GENERATOR\s*=\s*\"([^\"]*)\"", l)
+                m === nothing && continue
+                push!(found, String(m.captures[1]))
+                break
+            end
         end
     end
     return sort!(unique!(found))
@@ -377,12 +382,15 @@ end
 "The first line of a log that says what went wrong, for the table."
 function sweep_first_error(log::AbstractString)::String
     isfile(log) || return ""
-    for l in eachline(log)
-        s = strip(replace(l, r"\e\[[0-9;]*m" => ""))
-        occursin(r"^(ERROR|error)\b|\berror:|Test Failed|Got exception|signal \(\d+|FAILED ", s) || continue
-        return length(s) > 160 ? first(s, 160) * "…" : String(s)
+    # `open … do`: the early return must close the log (see sweep_generators).
+    return open(log) do io
+        for l in eachline(io)
+            s = strip(replace(l, r"\e\[[0-9;]*m" => ""))
+            occursin(r"^(ERROR|error)\b|\berror:|Test Failed|Got exception|signal \(\d+|FAILED ", s) || continue
+            return length(s) > 160 ? first(s, 160) * "…" : String(s)
+        end
+        return ""
     end
-    return ""
 end
 
 # ── Running a step ───────────────────────────────────────────────────────────

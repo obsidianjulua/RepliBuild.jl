@@ -1992,12 +1992,36 @@ the other visibility and the wrapper's API silently belongs to the previous sett
 
 Idempotent against the legacy spelling — a package carrying `-fvisibility=hidden` in
 `flags` directly (argon2, box2d3 and zstd all predate the key) gets one flag, not two.
+
+The DWARF version is folded in here for the same reason (`dwarf_version_flags`).
+`windows` is the host, passed in so a test drives both answers.
 """
-function get_compile_flags(c::RepliBuildConfig)
+function get_compile_flags(c::RepliBuildConfig; windows::Bool = Sys.iswindows())
     flags = c.compile.flags
-    c.compile.visibility === :hidden || return flags
-    any(f -> startswith(f, "-fvisibility="), flags) && return flags
-    return vcat(flags, "-fvisibility=hidden")
+    if c.compile.visibility === :hidden && !any(f -> startswith(f, "-fvisibility="), flags)
+        flags = vcat(flags, "-fvisibility=hidden")
+    end
+    return dwarf_version_flags(flags; windows)
+end
+
+"""
+    dwarf_version_flags(flags; windows) -> Vector{String}
+
+`flags`, with `-gdwarf-5` after them on Windows unless they name a DWARF version
+themselves (`-gdwarf-4`, `-gdwarf`).
+
+The metadata is read from DWARF, and what it reads assumes version 5, clang's
+default on Linux. Its default for a mingw target is 4, which has no
+`DW_AT_deleted` and no `DW_AT_defaulted`: a deleted copy constructor looked
+callable, a class that can be neither copied nor moved was passed by value, and
+a deleted constructor was planned into the forced unit (2026-11-28, the first
+full run on Windows since those facts were read). Other hosts are left as they
+are: the flag would change every compile fingerprint there and nothing else.
+"""
+function dwarf_version_flags(flags::AbstractVector{<:AbstractString}; windows::Bool = Sys.iswindows())
+    windows || return flags
+    any(f -> occursin(r"^-gdwarf(-\d+)?$", f), flags) && return flags
+    return vcat(flags, "-gdwarf-5")
 end
 
 """Should run parallel compilation?"""

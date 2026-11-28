@@ -11,6 +11,7 @@
 # =============================================================================
 
 using Test
+using Libdl
 using RepliBuild
 
 isdefined(@__MODULE__, :TestSupport) ||
@@ -69,11 +70,12 @@ if requires("forced inline constructors, live", :libJLCS, :clangxx)
 
     @testset "the build ran a second pass for the unit" begin
         @test occursin(r"ctors: 5 inline constructor\(s\) of 4 class\(es\) declared in headers and defined nowhere", build_log)
-        @test count("link: libinlinector.so", build_log) == 2
+        @test count("link: libinlinector." * Libdl.dlext, build_log) == 2
         unit = joinpath(INLINE_CTOR_DIR, ".replibuild_cache", "replibuild_ctors.cpp")
         @test isfile(unit)
         text = read(unit, String)
-        @test occursin("#include \"$(joinpath(inc, "inline_ctor.h"))\"", text)
+        # A C++ include path is written with `/` on every host.
+        @test occursin("#include \"$(replace(joinpath(inc, "inline_ctor.h"), '\\' => '/'))\"", text)
         @test occursin("template void replibuild_force::ctor<ic::Plain, int, int>(void*, int, int);", text)
         @test occursin("template void replibuild_force::ctor<ic::Abs, int>(void*, int);", text)
         @test !occursin("Defined", text) && !occursin("Priv", text) && !occursin("Del", text)

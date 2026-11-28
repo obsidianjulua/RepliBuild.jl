@@ -267,8 +267,11 @@ C/C++ source → DependencyResolver → Discovery → Compiler (clang → per-fi
   define (`-z defs` makes that a link error). On Windows it runs build.sh through MSYS2's
   `bash.exe -l` with `MSYSTEM=CLANG64`, which is a CLANG64 shell from any
   process; `src/mlir/windows_build.jl` is that command's one copy (the doctor's
-  advice uses it too). Tier 3 alone is the whole
-  product for C.
+  advice uses it too). Its "already built" answer asks the library for its
+  dialect ABI in a child process (`usable_library`), never by opening it in the
+  build process: a library of another dialect is built again, and Windows will
+  not overwrite a DLL a process has open (`test_deps_build_gate.jl`). Tier 3
+  alone is the whole product for C.
 - Julia's bundled libLLVM and system libLLVM coexist in one process. The GDB JIT
   descriptor resolves to Julia's copy; this is correct, do not "fix" it.
 - **The doctor judges the LLVM `build.sh` builds against: the bare
@@ -466,7 +469,7 @@ If you are asked to work on it:
   `check_library`; the doctor reports it). **Bump it with any change to what
   Julia generates for the dialect or calls in it** (an op, an attribute or
   statement, a thunk convention, a C API signature), together with
-  `src/mlir/VERSION` (the binary's own version, a new major), a rebuilt and
+  `src/mlir/JLCS_VERSION` (the binary's own version, a new major), a rebuilt and
   republished artifact and `Artifacts.toml`: a published library of the old
   number is refused from that commit on. **An ABI bump is published from its
   own branch, before the merge** (2026-11-20): the pkg suite's Linux cells
@@ -485,7 +488,7 @@ If you are asked to work on it:
   first. (`test_jlcs_abi_version.jl`,
   devtests `test_jlcs_abi_live.jl`.)
   **The library's soname is the dialect's: `libJLCS.so.<ABI_VERSION>`**
-  (2026-11-25, a link to `libJLCS.so.<VERSION>`; `VERSION`'s major is
+  (2026-11-25, a link to `libJLCS.so.<VERSION>`; `JLCS_VERSION`'s major is
   `ABI_VERSION`, and CMake refuses anything else). `add_llvm_library` gives
   a shared library LLVM's version as its soname (`libJLCS.so.23.1`,
   `libJLCS.so.23.1jl` from `LLVM_full_jll`), so the dialect's CMake sets its
@@ -2460,7 +2463,10 @@ evidence for it is a run on plain calls.
   `-nostdlib` with the C bucket's clang and linker, so a thunk must stay
   loads, stores and one call (anything that makes LLVM ask the C runtime for
   a function would be an undefined symbol; `test_rust_thunks_live.jl` reads
-  `NEEDED` and the undefined symbols). A stage that writes no library
+  `NEEDED` and the undefined symbols). A DLL must name an entry point and
+  MinGW's lld has no switch for none, so on Windows the link also compiles
+  `RustThunks.AOT_DLL_ENTRY`, a `DllMainCRTStartup` that does nothing
+  (`_aot_link_args`, `test_rust_thunks.jl`). A stage that writes no library
   (no libJLCS, no `llc`: `MLIRNative.emit_object` starts it) is a JIT
   wrapper and never a failed wrap; an older thunks library is removed first.
   The module bakes the file's hash, and `RustRuntime` uses the file only
@@ -2749,6 +2755,33 @@ changes:
 - libc++ ABI tags (`size[abi:…]()`) and `exclude_from_explicit_instantiation` shape the
   STL path. Anchor `basic_string` matches.
 - LLP64: `long` is 4 bytes. Use `C_LONG_MLIR`/`C_WCHAR_MLIR` (`test_llp64_widths.jl`).
+- **A Windows compile asks for DWARF 5** (`ConfigurationManager.dwarf_version_flags`,
+  in `get_compile_flags`, so in the compile fingerprint, and in GraphBuild's
+  `_compile_args`), unless the project names a version. clang's default for a
+  mingw target is 4, which has no `DW_AT_deleted` and no `DW_AT_defaulted`: a
+  deleted copy constructor looked callable and a class that can be neither
+  copied nor moved was passed by value (2026-11-28). A fact read from DWARF
+  must exist in the version every host emits; other hosts keep their default,
+  since the flag there would only move every fingerprint.
+  (`test_dwarf_version_flag.jl`; live, `test_byvalue_class_live.jl` and
+  `test_inline_ctors_live.jl`.)
+- **An open handle keeps the file, and its folder.** `for l in eachline(path)`
+  left by `break` or `return` holds the file until the iterator is collected,
+  and a `dlopen` with no `dlclose` holds the DLL: Linux unlinks either, Windows
+  deletes neither, and `clean` then fails on the folder. Read through
+  `open(path) do io … eachline(io)`, and a test closes what it opened before a
+  child builds the same project (`hub_sweep.jl`'s `sweep_generators`, which made
+  every Windows sweep's `clean` fail; `test_defining_headers_live.jl`).
+- **The C++ runtime is libc++ here, and a test that spells libstdc++'s answer
+  is red.** Its names are `std::__1::…`, its members `__data_`/`__size_` where
+  libstdc++ has `_M_len`/`_M_str`, a `string_view` is {pointer, length} and a
+  `tuple` keeps its elements in order, and no name carries `[abi:cxx11]`. Find
+  a record by what it is and build it by field type
+  (`test/stress_test/verify.jl`). The same goes for a library's file name
+  (`Libdl.dlext`), a C path (`/`), and `long`. A weak alias is `T` in a MinGW
+  DLL's symbol table and absent from its export directory, so it is not API
+  here (`test_alias_signatures_live.jl`), and `clang`'s `__clang_vtable`
+  placeholder member sits on different classes.
 - ORC deadlocks on unresolved symbols, so the LTO path has
   `_lto_unresolved_symbols`. There is no `dlsym` in a Windows process.
 - JIT `.pdata` is registered with `RtlAddFunctionTable` in the dialect-owned LLJIT
@@ -2781,6 +2814,11 @@ changes:
   tracked TOML.
 - Windows filesystems fold case. Any file named after a C identifier goes through a
   case-safe name (`Slicer.slice_file_stem`); `LUA_YIELD` and `lua_yield` collided.
+  A file in a directory the dialect compiles with `-I` (`src/mlir`,
+  `src/mlir/IR`) is never named like a C++ standard header in any case:
+  `src/mlir/VERSION` was libc++'s `<version>`, and no translation unit of
+  libJLCS compiled on Windows (2026-11-28; the file is `JLCS_VERSION`).
+  (`test_windows_port.jl`.)
 - PE has no RUNPATH. `[link] link_dirs` DLLs are opened before the library, at the
   build's load check and in the wrapper's `__init__` (`_link_dir_dlls`,
   `_link_dir_preload_snippet`).

@@ -47,11 +47,11 @@ end
         @testset "parse + accessor" begin
             c = _cfg(dir, "a.toml", "flags = [\"-O2\"]\n")
             @test c.compile.visibility === :default
-            @test CM.get_compile_flags(c) == ["-O2"]
+            @test CM.get_compile_flags(c; windows = false) == ["-O2"]
 
             h = _cfg(dir, "b.toml", "flags = [\"-O2\"]\nvisibility = \"hidden\"\n")
             @test h.compile.visibility === :hidden
-            @test CM.get_compile_flags(h) == ["-O2", "-fvisibility=hidden"]
+            @test CM.get_compile_flags(h; windows = false) == ["-O2", "-fvisibility=hidden"]
 
             # Case-insensitive, like the other Symbol-valued keys.
             u = _cfg(dir, "c.toml", "visibility = \"HIDDEN\"\n")
@@ -63,7 +63,7 @@ end
             # [compile] flags before the key existed. That must keep working.
             legacy = _cfg(dir, "d.toml", "flags = [\"-O2\", \"-fvisibility=hidden\"]\n")
             @test legacy.compile.visibility === :default
-            @test CM.get_compile_flags(legacy) == ["-O2", "-fvisibility=hidden"]
+            @test CM.get_compile_flags(legacy; windows = false) == ["-O2", "-fvisibility=hidden"]
 
             # Key AND matching raw flag: one flag, not two.
             both = _cfg(dir, "e.toml",

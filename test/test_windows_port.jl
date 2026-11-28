@@ -545,4 +545,52 @@ const LE = RepliBuild.LLVMEnvironment
             @test true
         end
     end
+
+    # A filesystem that folds case finds `src/mlir/VERSION` for libc++'s
+    # `#include <version>`, because the dialect compiles with `-I src/mlir`:
+    # every translation unit failed in `<tuple>` and libJLCS could not be built
+    # on Windows at all (2026-11-28; the file is `JLCS_VERSION` now). No file
+    # in a directory the dialect's CMake puts on the include path may be named
+    # like a C++ standard header, in any case.
+    @testset "no dialect file shadows a standard header under case folding" begin
+        std_headers = Set(split("""
+            algorithm any array atomic barrier bit bitset charconv chrono codecvt
+            compare complex concepts condition_variable coroutine debugging deque
+            exception execution expected filesystem flat_map flat_set format
+            forward_list fstream functional future generator hazard_pointer
+            initializer_list inplace_vector iomanip ios iosfwd iostream istream
+            iterator latch limits linalg list locale map mdspan memory
+            memory_resource mutex new numbers numeric optional ostream print queue
+            random ranges ratio rcu regex scoped_allocator semaphore set
+            shared_mutex source_location span spanstream sstream stack stacktrace
+            stdexcept stdfloat stop_token streambuf string string_view strstream
+            syncstream system_error text_encoding thread tuple type_traits
+            typeindex typeinfo unordered_map unordered_set utility valarray variant
+            vector version
+            cassert cctype cerrno cfenv cfloat cinttypes climits clocale cmath
+            csetjmp csignal cstdarg cstddef cstdint cstdio cstdlib cstring ctime
+            cuchar cwchar cwctype"""))
+        shadows(name) = lowercase(name) in std_headers
+        @test shadows("VERSION")            # the predicate sees the case that shipped
+        @test !shadows("JLCS_VERSION")
+        @test !shadows("ABI_VERSION")
+
+        mlir = joinpath(pkgdir(RepliBuild), "src", "mlir")
+        cmake = read(joinpath(mlir, "CMakeLists.txt"), String)
+        # The source directories CMake names in include_directories().
+        dirs = String[]
+        for m in eachmatch(r"include_directories\(\$\{CMAKE_CURRENT_SOURCE_DIR\}(/[^)\s]*)?\)", cmake)
+            sub = lstrip(something(m.captures[1], ""), '/')
+            push!(dirs, isempty(sub) ? mlir : normpath(joinpath(mlir, sub)))
+        end
+        @test mlir in dirs                  # the loop below is not vacuous
+        @test length(dirs) >= 2
+        checked = 0
+        for dir in dirs, name in readdir(dir)
+            checked += 1
+            shadows(name) && @error "shadows a C++ standard header on a case-folding filesystem" file = joinpath(dir, name)
+            @test !shadows(name)
+        end
+        @test checked > 10
+    end
 end

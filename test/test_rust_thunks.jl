@@ -173,3 +173,23 @@ end
     row["refusal"] = "for the test"
     @test RT.thunk(row, x.types) == "the function is refused: for the test"
 end
+
+# The thunks library is linked with no C runtime, so nothing defines the entry
+# point a DLL must name (MinGW's lld asks for `DllMainCRTStartup` and has no
+# switch for a library without one): on Windows the link failed, and every
+# wrapper fell back to the JIT (2026-11-28, the first run on a Windows box).
+# The link there also compiles an entry that does nothing.
+@testset "the thunks library's link: no C runtime, and a DLL's own entry point" begin
+    elf = RT._aot_link_args("out/libx_thunks.so", "out/rust_thunks.o")
+    @test elf[1:6] == ["-shared", "-fPIC", "-nostdlib", "-o", "out/libx_thunks.so", "out/rust_thunks.o"]
+    @test !any(a -> endswith(a, ".c"), elf)
+    pe = RT._aot_link_args("out/libx_thunks.dll", "out/rust_thunks.o"; entry = "out/rust_thunks_entry.c")
+    @test pe[1:7] == ["-shared", "-fPIC", "-nostdlib", "-o", "out/libx_thunks.dll", "out/rust_thunks.o",
+                      "out/rust_thunks_entry.c"]
+    # The same reproducible-link flags after either.
+    @test elf[7:end] == pe[8:end] == RepliBuild.Compiler._reproducible_link_flags()
+    # The entry: the name the linker asks for, and a load that goes on.
+    @test occursin(r"\bint DllMainCRTStartup\(void \*\w+, unsigned long \w+, void \*\w+\)", RT.AOT_DLL_ENTRY)
+    @test occursin("return 1;", RT.AOT_DLL_ENTRY)
+    @test !occursin("#include", RT.AOT_DLL_ENTRY)        # -nostdlib: it asks for no header's help
+end

@@ -17,7 +17,7 @@ Two numbers, both in `src/mlir`:
   library that reports another. Bump it with any change to what Julia
   generates for the dialect or calls in it (an op, an attribute, a thunk
   convention, a C API signature).
-- `VERSION`: the binary's own version (`3.0.1`), independent of RepliBuild's.
+- `JLCS_VERSION`: the binary's own version (`3.0.1`), independent of RepliBuild's.
   Bump it for every published build; a change of `ABI_VERSION` is a new major,
   and the major is always `ABI_VERSION` (CMake refuses anything else).
 
@@ -35,7 +35,7 @@ is wrapped again, and RepliBuild refuses one that was not
 RepliBuild downloads the library through the lazy `JLCS` entry of
 `Artifacts.toml`, from a release of this repository.
 
-1. Bump `src/mlir/VERSION` (and `ABI_VERSION` if the dialect's interface
+1. Bump `src/mlir/JLCS_VERSION` (and `ABI_VERSION` if the dialect's interface
    changed), and `version` in `yggdrasil/build_tarballs.jl` to match.
 2. Build, from an environment with BinaryBuilder on Julia 1.12:
    `julia +1.12 --project=<env> deps/jlcs_jll/build_tarballs.jl`

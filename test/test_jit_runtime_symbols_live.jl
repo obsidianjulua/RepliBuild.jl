@@ -23,7 +23,7 @@ isdefined(@__MODULE__, :TestSupport) ||
 using .TestSupport
 
 const _RSL_DIR = joinpath(@__DIR__, "stl_test")
-const _RSL_SO = joinpath(_RSL_DIR, "julia", "libstl_test.so")
+const _RSL_SO = joinpath(_RSL_DIR, "julia", "libstl_test." * Libdl.dlext)
 const _RSL_WRAPPER = joinpath(_RSL_DIR, "julia", "StlTest.jl")
 
 if requires("JIT runtime-library callees, live", :libJLCS, :clangxx)
@@ -32,7 +32,9 @@ if requires("JIT runtime-library callees, live", :libJLCS, :clangxx)
     C = RepliBuild.Compiler
     J = RepliBuild.JITManager
 
-    @testset "every undefined std:: symbol resolves through the handle, suffix cut" begin
+    # ELF: what the library leaves undefined is in its symbol table, and its
+    # handle reaches its dependencies. A DLL has neither (the arm below).
+    Sys.islinux() && @testset "every undefined std:: symbol resolves through the handle, suffix cut" begin
         m = read(`nm -gp $_RSL_SO`, String)
         d = read(`nm -gpC $_RSL_SO`, String)
         ml = C._nm_symbol_lines(m); dl = C._nm_symbol_lines(d)
@@ -67,6 +69,30 @@ if requires("JIT runtime-library callees, live", :libJLCS, :clangxx)
         end
     end
 
+    # PE: a handle resolves that DLL's own exports and nothing it imports
+    # (GetProcAddress), so the pre-flight binds nothing foreign there: a callee
+    # in the C runtime or in libc++.dll is unresolved and is dropped.
+    Sys.iswindows() && @testset "a DLL's handle resolves its own exports only" begin
+        own = C._runtime_symbol_names(_RSL_SO)
+        @test own !== nothing && !isempty(own)
+        mine = first(sort!(collect(own)), 3)
+        @test C._resolved_through_library(_RSL_SO, mine) == Set(mine)
+        @test !("malloc" in own)                      # imported, never exported
+        @test isempty(C._resolved_through_library(_RSL_SO, ["malloc"]))
+        h = Libdl.dlopen(_RSL_SO, Libdl.RTLD_NOW | Libdl.RTLD_LOCAL)
+        try
+            asked = String[]
+            (bound, unresolved) = J._preflight_callees(
+                n -> (push!(asked, n); Libdl.dlsym(h, n; throw_error = false)),
+                union(Set(["malloc"]), Set(mine)), own)
+            @test isempty(bound)
+            @test unresolved == ["malloc"]
+            @test asked == ["malloc"]                  # its own are ORC's, never asked
+        finally
+            Libdl.dlclose(h)
+        end
+    end
+
     @testset "the STL fixture's Tier 2 path through the pre-flighted engine" begin
         probe = """
         import RepliBuild
@@ -78,7 +104,7 @@ if requires("JIT runtime-library callees, live", :libJLCS, :clangxx)
         v = StlTest.create_std_vector_int()
         push!(v, Cint(4)); push!(v, Cint(6))
         check("vector_sum", StlTest.sum_vec(v) == 10, StlTest.sum_vec(v))
-        eng = only(e for e in RepliBuild.JITManager.GLOBAL_JIT.engines if endswith(e.binary_path, "libstl_test.so"))
+        eng = only(e for e in RepliBuild.JITManager.GLOBAL_JIT.engines if basename(e.binary_path) == $(repr(basename(_RSL_SO))))
         check("engine_up", eng.init_error === nothing && eng.jit_engine !== nothing, eng.init_error)
         println("PROBE_DONE")
         """

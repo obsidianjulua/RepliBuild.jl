@@ -12,6 +12,7 @@
 # =============================================================================
 
 using Test
+using Libdl
 using RepliBuild
 
 isdefined(@__MODULE__, :TestSupport) ||
@@ -72,7 +73,7 @@ if requires("C++ finalizers, live", :libJLCS, :clangxx)
     end
 
     @testset "an aliased destructor keeps its own name (-O2: Twig's D2 is Leaf's)" begin
-        so = joinpath(FINALIZER_DIR, "julia", "libfinalizers.so")
+        so = joinpath(FINALIZER_DIR, "julia", "libfinalizers." * Libdl.dlext)
         nm = read(`nm -gp --defined-only $so`, String)
         addr(sym) = (m = match(Regex("^(\\S+) [TW] " * sym * "\$", "m"), nm); m === nothing ? "" : m.captures[1])
         # The shape the fixture is built for: the two D2s share one address.
@@ -90,7 +91,7 @@ if requires("C++ finalizers, live", :libJLCS, :clangxx)
     end
 
     @testset "a class whose only destructor is D0 binds delete_, which frees (-O2: Sprout)" begin
-        so = joinpath(FINALIZER_DIR, "julia", "libfinalizers.so")
+        so = joinpath(FINALIZER_DIR, "julia", "libfinalizers." * Libdl.dlext)
         nm = read(`nm -gp --defined-only $so`, String)
         # The shape the fixture is built for: Sprout has a D0 and no D1/D2.
         @test occursin(r"^\S+ [TW] _ZN6SproutD0Ev$"m, nm)

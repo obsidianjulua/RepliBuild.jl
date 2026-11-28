@@ -213,7 +213,7 @@ jobs:
           path: |
             src/mlir/build/libJLCS.so*
             src/mlir/build/jlcs_llvm_version
-          key: libJLCS-${{ runner.arch }}-${{ steps.llvm.outputs.codename }}-llvm${{ steps.toolchain.outputs.llvm }}-${{ hashFiles('src/mlir/CMakeLists.txt', 'src/mlir/build.sh', 'src/mlir/ABI_VERSION', 'src/mlir/VERSION', 'src/mlir/*.td', 'src/mlir/IR/*.h', 'src/mlir/impl/*') }}
+          key: libJLCS-${{ runner.arch }}-${{ steps.llvm.outputs.codename }}-llvm${{ steps.toolchain.outputs.llvm }}-${{ hashFiles('src/mlir/CMakeLists.txt', 'src/mlir/build.sh', 'src/mlir/ABI_VERSION', 'src/mlir/JLCS_VERSION', 'src/mlir/*.td', 'src/mlir/IR/*.h', 'src/mlir/impl/*') }}
 
       - name: Build the JLCS dialect
         if: steps.jlcs.outputs.cache-hit != 'true'

@@ -69,7 +69,13 @@ if requires("memberless records, live", :libJLCS, :clangxx)
         for (k, bases) in (("Derived", ["Quad"]), ("P", String[]), ("PolyKid", ["Poly"]), ("VB", ["Poly", "Quad"]))
             @test (k, haskey(sd, k)) == (k, true)
             haskey(sd, k) || continue
-            @test (k, sd[k]["members"]) == (k, Any[])
+            # No member with a place in the object. Where the class is its
+            # vtable's home, clang adds the `__clang_vtable` placeholder, which
+            # has no offset; which classes those are differs by target
+            # (PolyKid and VB under mingw, neither on Linux).
+            placed = [m for m in sd[k]["members"] if get(m, "offset", nothing) !== nothing]
+            @test (k, placed) == (k, Any[])
+            @test all(m -> get(m, "name", "") == "__clang_vtable", sd[k]["members"])
             @test (k, [b["type"] for b in get(sd[k], "base_classes", Any[])]) == (k, bases)
             checked += 1
         end

@@ -123,7 +123,13 @@ if requires("a C++ library's classes without a system llvm-dwarfdump", :clangxx)
             @test_skip by_copy["jll"] == by_copy["system"]
         end
 
-        if have_jll
+        # `parse_vtables` also runs `nm`. Binutils_jll has no build for Windows,
+        # so there is no machine without a PATH to stand in for there: a
+        # wrapper's user has MSYS2's `nm`, and the two cases below need both
+        # tools bundled.
+        nm_bundled = withenv(() -> _BDD_T.tool_source("nm"), "REPLIBUILD_TOOLS" => "jll") === :jll
+        Sys.islinux() && @test nm_bundled
+        if have_jll && nm_bundled
             # A machine that only uses a wrapper: no LLVM, no binutils, no PATH.
             alone = withenv("REPLIBUILD_TOOLS" => "jll", "PATH" => "") do
                 @test Sys.which("llvm-dwarfdump") === nothing

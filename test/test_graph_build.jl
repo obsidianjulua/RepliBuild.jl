@@ -85,6 +85,13 @@ plan_error(f) = try f(); "" catch e; sprint(showerror, e) end
         g = gbgroup("C"; flags = ["-g0", "-fPIE"])
         args = GB._compile_args(g, gbsrc("x.c"), GB_OUT * "/x.ll"; windows = false)
         @test args[findfirst(==("-fPIE"), args) + 1:end][1:2] == ["-g", "-fPIC"]
+        # DWARF 5 on Windows, after `-g`, unless the group names a version
+        # (ConfigurationManager.dwarf_version_flags); other hosts keep their default.
+        @test !("-gdwarf-5" in args)
+        w = GB._compile_args(gbgroup("C"; flags = ["-O2"]), gbsrc("x.c"), GB_OUT * "/x.ll"; windows = true)
+        @test w[findfirst(==("-O2"), w) + 1:end][1:2] == ["-g", "-gdwarf-5"]
+        w4 = GB._compile_args(gbgroup("C"; flags = ["-g", "-gdwarf-4"]), gbsrc("x.c"), GB_OUT * "/x.ll"; windows = true)
+        @test !("-gdwarf-5" in w4) && ("-gdwarf-4" in w4)
     end
 
     @testset "the bucket is the library's: C only when every unit is C" begin
