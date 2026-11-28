@@ -54,28 +54,41 @@ copied into a Julia value. Three things are wrong with that today:
 - **A by-value pass lends where C++ moves**, and a value moved into a
   parameter can be used again afterwards.
 
-- [ ] The model is decided (John's call) and written into `CLAUDE.md`: what
+- [x] The model is decided (John's call) and written into `CLAUDE.md`: what
       holds such an object on the Julia side, what ends it, what a by-value
-      pass does to it.
-- [ ] No call hands Julia an object that is invalid where Julia holds it.
-- [ ] Such an object is ended once, or the wrapper says in words that it is
-      not.
-- [ ] Using a value after it was moved is an error, never a read of a dead
+      pass does to it. (John, 2026-11-27: "by value and whatever best
+      supports that". The object is held where C++ built it and ended by its
+      own destructor; a by-value pass copies where C++ can copy and moves
+      where it cannot.)
+- [x] No call hands Julia an object that is invalid where Julia holds it.
+      (Where the build's compiler described the type. The exceptions are
+      named in `CLAUDE.md` under Not Yet Built: a class defined in a source
+      file, a graph library, a class with a trivial destructor that points
+      into itself.)
+- [x] Such an object is ended once, or the wrapper says in words that it is
+      not. (A return the wrapper could not hold has a comment beside its
+      call and a line in the wrap report.)
+- [x] Using a value after it was moved is an error, never a read of a dead
       object.
-- [ ] A unit test and a live test for each rule, each negative-checked.
+- [x] A unit test and a live test for each rule, each negative-checked.
+      (`test_cxx_objects.jl`, `test_cxx_objects_live.jl`,
+      `test_ownership_unit.jl`, `test_ownership_unit_live.jl`.)
 - [ ] The Hub packages that return such types are wrapped again and their
       deep tests pass. The pull request counts them.
 
 ## 3. The type matrix
 
-Last measured 2026-11-24: 191 cases; 98 work, 31 are opaque handles, 20 take
-no plain Julia value, 5 are refused, 24 have nothing to pass, 10 are wrong, 3
-are errors, none kills the process.
+Measured 2026-11-27 with the ownership change: 193 cases; 111 work, 32 are
+opaque handles, 20 take no plain Julia value, 5 are refused, 22 have nothing
+to pass, 3 are errors, none is wrong, none kills the process. (2026-11-24:
+98 work, 10 wrong.)
 
 - [ ] Measured again on the release commit, on Linux. **No CRASH and no
-      WRONG.**
-- [ ] The three errors are fixed or explained in the document's reading.
-- [ ] `docs/updates/CPP_TYPE_MATRIX.md` is that measurement, with the reading
+      WRONG.** (True on the ownership pull request's commit; the box is
+      checked by the run on the release commit.)
+- [x] The three errors are fixed or explained in the document's reading.
+      (Explained: "The three errors". None is a wrong call.)
+- [x] `docs/updates/CPP_TYPE_MATRIX.md` is that measurement, with the reading
       brought up to date.
 
 Not a gate unless John says so: building a `std::function` from a Julia
@@ -107,6 +120,10 @@ function, which is most of the 24 cases with nothing to pass.
     byte buffer is passed there;
   - thread-local globals and the two by-value return fixes reach a package
     on a rebuild;
+  - after a rebuild, a C++ function that returns a container, a smart
+    pointer or a class with a destructor by value returns the object itself
+    (`x[]` is the bytes it used to return), and a by-value parameter gets a
+    copy;
   - `clean` keeps downloaded sources.
 - [ ] `CHANGELOG.md`'s section is compiled from the merged pull requests'
       `## Changelog` headings, after the sweep's own fixes have landed.
@@ -129,7 +146,7 @@ function, which is most of the 24 cases with nothing to pass.
 
 ## Decisions that are John's
 
-- The ownership model (section 2).
+- ~~The ownership model (section 2).~~ Decided 2026-11-27.
 - The version number.
 - boostmath's export-table check: the engine keeps hidden records out of the
   generated unit, or the recipe excludes them.

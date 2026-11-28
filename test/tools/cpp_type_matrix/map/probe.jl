@@ -22,7 +22,7 @@ case(MI, "pass by value") do
 end
 case(MI, "return by value") do
     r = M.map_make(4)
-    opaque((M.map_get(Ref(r), 3), M.map_get(Ref(r), 9), M.map_size_val(r)), (9, -1, 4), "comes back as its bytes, a $(describe(r)); lookups through Ref(r) are right")
+    opaque((M.map_get(Ref(r), 3), M.map_get(Ref(r), 9), M.map_size_val(r)), (9, -1, 4), "comes back as the C++ object, a $(describe(r)); lookups through Ref(r) are right")
 end
 case(MI, "intact after the return") do
     # The map's end marker is inside the map object, and the tree's root points
@@ -39,7 +39,7 @@ case(MS, "make") do
 end
 case(MS, "return by value") do
     r = fn(:smap_make)()
-    opaque((M.smap_get(Ref(r), "two"), M.smap_get(Ref(r), "six")), (2, -1), "its bytes; the key is a Julia String")
+    opaque((M.smap_get(Ref(r), "two"), M.smap_get(Ref(r), "six")), (2, -1), "the C++ object; the key is a Julia String")
 end
 
 const UM = "std::unordered_map<int, int>"
@@ -52,7 +52,7 @@ case(UM, "return by value") do
     # Every key: the bucket of the element the map's own list starts with is
     # reached through a pointer into the map object.
     r = M.umap_make(5)
-    opaque(ntuple(k -> M.umap_get(Ref(r), k - 1), 5), (10, 11, 12, 13, 14), "its bytes, a $(describe(r)); all 5 keys were found through Ref(r) on this run")
+    opaque(ntuple(k -> M.umap_get(Ref(r), k - 1), 5), (10, 11, 12, 13, 14), "the C++ object, a $(describe(r)); all 5 keys were found through Ref(r)")
 end
 
 case(UM, "intact after the return") do
@@ -68,7 +68,7 @@ case(SI, "make") do
 end
 case(SI, "return by value") do
     r = M.set_make(4)
-    opaque((M.set_has(Ref(r), 6), M.set_has(Ref(r), 5)), (1, 0), "its bytes")
+    opaque((M.set_has(Ref(r), 6), M.set_has(Ref(r), 5)), (1, 0), "the C++ object")
 end
 case(SI, "intact after the return") do
     r = M.set_make(4)

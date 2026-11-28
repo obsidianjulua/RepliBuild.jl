@@ -106,21 +106,39 @@ probe("std_string_is_a_julia_string") do p
     end
 end
 
-# A wide string is not decoded: it keeps its raw bytes, and the wrapper says why.
-probe("wstring_keeps_its_bytes") do p
-    check(p, "wide_str type", typeof(M.wide_str_abi_cxx11(3)), NTuple{32,UInt8})
+# A wide string is not read into a String, and the wrapper says why beside the
+# call. It is the C++ object, held where C++ built it (2026-11-27), so its
+# destructor runs: a thousand of them, short and on the heap, are ended.
+probe("wstring_is_held_not_decoded") do p
+    check(p, "wide_str type", typeof(M.wide_str_abi_cxx11(3)), RepliBuild.CxxObjects.Owned{NTuple{32,UInt8}})
     src = read(wrapper, String)
-    occursin(r"# std::string `basic_string<wchar_t[^`]*` returned as its raw bytes: its character type is `wchar_t`", src) ||
+    occursin(r"# std::string `basic_string<wchar_t[^`]*` returned as the C\+\+ object, not read into a String: its character type is `wchar_t`", src) ||
         push!(p, "no wchar_t reason beside wide_str's call")
+    for i in 1:1000
+        w = M.wide_str_abi_cxx11(i % 40)
+        isodd(i) && RepliBuild.release!(w)
+    end
+    GC.gc(true)
 end
 
-# The generated wrapper's own call: it allocates the buffer, calls the in-place
-# thunk, and returns the value, with the Julia return type it always had.
+# The generated wrapper's own call: it allocates the storage, calls the
+# in-place thunk, and returns that storage. `SelfRef` has a destructor, so it
+# is the object itself, held where C++ built it: its `self` is the address
+# Julia holds it at, and stays so. Returned as a copy of its bytes it pointed
+# at storage that was gone.
 probe("wrapper_call_site") do p
     r = M.make_self(9)
-    check(p, "make_self returns", typeof(r), M.SelfRef)
+    check(p, "make_self returns", typeof(r), RepliBuild.CxxObjects.Owned{M.SelfRef})
     check(p, "v, w", (r.v, r.w), (Int32(9), 4.5))
-    check(p, "self was set", r.self != C_NULL, true)
+    check(p, "self is where Julia holds it", UInt(r.self), UInt(pointer_from_objref(r)))
+    check(p, "C++ agrees", (M.self_ok(r), M.self_value(r)), (Int32(1), Int32(9)))
+    GC.gc(true)
+    check(p, "after a collection", (UInt(r.self) == UInt(pointer_from_objref(r)), M.self_ok(r)), (true, Int32(1)))
+    # By value, C++ copies it with its own constructor: the copy points at itself, and the original is whole.
+    c = copy(r)
+    check(p, "a copy points at itself", (UInt(c.self) == UInt(pointer_from_objref(c)), M.self_ok(c), M.self_value(c)),
+          (true, Int32(1), Int32(9)))
+    check(p, "the original is whole", M.self_ok(r), Int32(1))
 end
 
 # A wrapper generated before the change calls the old name with the old shape.

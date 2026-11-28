@@ -27,7 +27,7 @@ case(VI, "pass by value") do
 end
 case(VI, "return by value") do
     r = M.vec_make(4)
-    opaque((M.vec_sum_val(r), M.vec_sum_ref(Ref(r))), (10, 10), "comes back as its bytes, a $(describe(r)): it passes back by value and as Ref(r), and its elements cannot be read from Julia")
+    opaque((M.vec_sum_val(r), M.vec_sum_ref(Ref(r))), (10, 10), "comes back as the C++ object, a $(describe(r)): it passes back by value (a copy) and by reference, and its elements cannot be read from Julia")
 end
 
 const VD = "std::vector<double>"
@@ -37,7 +37,7 @@ case(VD, "make") do
 end
 case(VD, "return by value") do
     r = M.vecd_make(4)
-    opaque(M.vecd_sum(Ref(r)), 2.0, "its bytes")
+    opaque(M.vecd_sum(Ref(r)), 2.0, "the C++ object")
 end
 
 const VP = "std::vector<P2> (a library struct)"
@@ -48,7 +48,7 @@ case(VP, "make") do
 end
 case(VP, "return by value") do
     r = M.vecp_make(3)
-    opaque(M.vecp_sum(Ref(r)), 9, "its bytes")
+    opaque(M.vecp_sum(Ref(r)), 9, "the C++ object")
 end
 
 const VS = "std::vector<std::string>"
@@ -57,7 +57,7 @@ case(VS, "make") do
 end
 case(VS, "return by value") do
     r = fn(:vecs_make)(3)
-    opaque(M.vecs_total(Ref(r)), 6, "its bytes; the strings cannot be read from Julia")
+    opaque(M.vecs_total(Ref(r)), 6, "the C++ object; the strings cannot be read from Julia")
 end
 
 const VV = "std::vector<std::vector<int>>"
@@ -66,7 +66,7 @@ case(VV, "make") do
 end
 case(VV, "return by value") do
     r = M.vecv_make(3)
-    opaque(M.vecv_total(Ref(r)), 9, "its bytes")
+    opaque(M.vecv_total(Ref(r)), 9, "the C++ object")
 end
 
 const VB = "std::vector<bool>"
@@ -75,6 +75,6 @@ case(VB, "make") do
 end
 case(VB, "return by value") do
     r = M.vecb_make(5)
-    opaque(M.vecb_count(Ref(r)), 5, "its bytes, a $(describe(r))")
+    opaque(M.vecb_count(Ref(r)), 5, "the C++ object, a $(describe(r))")
 end
 done()

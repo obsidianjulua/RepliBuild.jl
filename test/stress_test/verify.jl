@@ -284,7 +284,8 @@ if MLIR_AVAILABLE
         # pointer and came back from RAX while the callee wrote XMM0; the
         # string_view was one pointer where the callee reads {len, ptr}.
         meta = RepliBuild._read_json(joinpath(@__DIR__, "julia", "compilation_metadata.json"))
-        @test meta["record_abi"]["Unit"] == Dict("byte_size" => "0x1", "pass" => "value", "empty" => true)
+        @test meta["record_abi"]["Unit"] == Dict("byte_size" => "0x1", "pass" => "value", "empty" => true,
+                                                 "scope" => "geom")    # (the namespace it is declared in, 2026-11-27)
 
         @test StressTest.geom_unit_scaled(StressTest.Unit(), 4, StressTest.Unit(), 2) == 42
         @test StressTest.geom_unit_make(7) === StressTest.Unit()     # void callee, singleton back

@@ -1,7 +1,8 @@
 #include <memory>
-struct UNode { int v; };
+#include "lib.hpp"
 static int g_live = 0;
-struct UCounted { int v; UCounted(int x) : v(x) { g_live++; } ~UCounted() { g_live--; } };
+UCounted::UCounted(int x) : v(x) { g_live++; }
+UCounted::~UCounted() { g_live--; }
 std::unique_ptr<UNode> up_make(int v) { return std::make_unique<UNode>(UNode{v}); }
 int up_read(const std::unique_ptr<UNode>& p) { return p ? p->v : -1; }
 int up_take(std::unique_ptr<UNode> p) { return p ? p->v : -1; }

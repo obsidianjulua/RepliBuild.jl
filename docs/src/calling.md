@@ -511,22 +511,85 @@ shapes_total_area(v)                  # double total_area(const std::vector<doub
 `std::vector`, `std::string`, `std::map` and `std::unordered_map` are
 supported this way.
 
-### Containers passed by value
+### Objects returned by value
 
-A function that returns a `std::vector<int>` by value (or a map, a set, a
-`shared_ptr`) returns the container object as raw bytes. Pass that value back
-to a function that takes the container by value, or wrap it in a `Ref` for one
-that takes a reference:
+A function that returns a `std::vector<int>` by value (or a map, a list, a
+`unique_ptr`, a `shared_ptr`, or a library class with a destructor) returns
+the C++ object itself. Julia holds it where C++ built it, and runs its
+destructor when the object is collected:
 
 ```julia
-v = M.vec_iota(5)            # std::vector<int> vec_iota(int)
-M.vec_sum_val(v)             # int vec_sum_val(std::vector<int>): 10
-M.vec_sum(Ref(v))            # int vec_sum(const std::vector<int>&)
+v = M.own_iota(5)            # std::vector<int> iota(int)
+M.own_sum(v)                 # long sum(const std::vector<int>&): 10
+M.own_append(v, 7)           # void append(std::vector<int>&, int): writes into v
+M.own_sum(v)                 # 17
 ```
 
-No copy is made when you pass it by value: the function works on your
-container's storage. A function that changes its by-value argument (grows it,
-or moves from it) can leave your value unusable.
+It passes wherever the function takes a reference or a pointer to that type.
+`Ref(v)` passes the same object, so code written for earlier wrappers keeps
+working.
+
+Julia's collector does not see the memory a C++ object owns. Release a large
+one when you are finished with it, instead of waiting for collection:
+
+```julia
+RepliBuild.release!(v)       # runs the destructor now
+M.own_sum(v)                 # ERROR: this C++ `vector<int, …>` was released, and is no longer an object.
+```
+
+A library class comes back the same way. Its fields read as they do on the
+struct, and its methods take it as their object:
+
+```julia
+t = M.own_Shape_tracked(shape, 17)    # Tracked Shape::tracked(int) const
+M.own_Tracked_value(t)                # int Tracked::value() const: 17
+```
+
+A type with nothing to end (plain data, or a class whose destructor does
+nothing) is returned as a plain Julia struct, as before.
+
+RepliBuild learns what a type needs from the compiler, in a small file it
+compiles with your library. That file has to be able to name the type, which
+it can for anything a header declares and for standard types. A class
+defined only in a `.cpp` file is out of its reach: an object of it (or a
+smart pointer to it) comes back as raw bytes that nothing ends, the wrapper
+says so in a comment beside the call, and `wrap` lists such functions.
+Declare the class in a header to fix that.
+
+### Objects passed by value
+
+Where a function takes such a type by value, it gets a **copy**, made by the
+type's own copy constructor, and your object stays yours:
+
+```julia
+v = M.own_iota(100)
+M.own_Shape_keep(shape, v)   # long Shape::keep(std::vector<int>): the library keeps its copy
+M.own_sum(v)                 # 4950: v is untouched
+```
+
+`copy(v)` makes a second object the same way.
+
+To hand the object over without copying it, say so. The call takes it, as
+`f(std::move(v))` does in C++, and the object is spent:
+
+```julia
+M.own_Shape_keep(shape, RepliBuild.move(v))
+M.own_sum(v)                 # ERROR: this C++ `vector<int, …>` was moved into a C++ call, which took it, …
+```
+
+A type C++ cannot copy (`std::unique_ptr`, a class with a deleted copy
+constructor) is always moved, with or without `move`:
+
+```julia
+b = M.own_Shape_boxed(shape, 77)      # std::unique_ptr<Tracked>
+M.own_Shape_adopt(shape, b)           # int Shape::adopt(std::unique_ptr<Tracked>): 77
+RepliBuild.isalive(b)                 # false
+```
+
+These rules need a package built with a RepliBuild newer than 4.6. A wrapper
+made from an older build returns such an object as its raw bytes and lends
+those bytes to a by-value parameter. Build the package again to get the
+behaviour above.
 
 ## Standard types passed by value
 
@@ -546,9 +609,9 @@ r = M.minmax_pair(3.0, 1.5)           # std::pair<double, double>
 (r.first, r.second)                   # (1.5, 3.0)
 ```
 
-A library class returned by value comes back as a Julia struct holding its
-bytes. Its destructor is not run. For a class that owns resources, prefer the
-pointer-returning functions.
+A library class with a destructor is returned as the object itself
+([Objects returned by value](@ref)). Any other class returned by value comes
+back as a Julia struct holding its bytes.
 
 ## Exceptions
 

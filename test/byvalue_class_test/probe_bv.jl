@@ -75,15 +75,23 @@ probe("copy_keeps_the_callers") do p
     check(p, "tally (2 copies, 2 destructors)", M.tally(), 202)
 end
 
-# A move-only class: one move, one destructor, and the resource ends once.
-# Passed as its bytes, the caller's object was freed with nothing moved.
+# A move-only class: one move, and the resource ends once. Two destructors
+# run, as in C++: the temporary's when the call returns, and the moved-from
+# object's, which the caller ends (Julia, since 2026-11-27: the object is
+# spent, and using it again is an error). Passed as its bytes, the caller's
+# object was freed with nothing moved.
 probe("move_consumes_once") do p
     u = M.make_uniq(7)
     l0 = M.live()
     M.reset_tally()
     check(p, "consume_uniq", M.consume_uniq(u), 7)
     check(p, "live dropped by", l0 - M.live(), 1)
-    check(p, "tally (1 move, 1 destructor)", M.tally(), 11)
+    check(p, "tally (1 move, 2 destructors)", M.tally(), 12)
+    check(p, "the object is spent", RepliBuild.isalive(u), false)
+    msg = refusal(() -> M.consume_uniq(u))
+    occursin("was moved into a C++ call", msg) || push!(p, "consuming it again: $(first(msg, 160))")
+    finalize(u)
+    check(p, "collected afterwards: nothing more", (M.tally(), l0 - M.live()), (12, 1))
 end
 
 probe("no_copy_no_move_is_refused") do p
@@ -112,9 +120,16 @@ probe("defaulted_copy_is_bytes") do p
     check(p, "tally (1 destructor)", M.tally(), 1)
 end
 
-probe("implicit_nontrivial_copy_is_refused") do p
+# An implicit copy constructor that is not trivial and that no code of the
+# library uses has no symbol, and the call was refused for it. The build's
+# ownership unit copies one of each class it asks about, so the compiler now
+# defines it (2026-11-27): the temporary is made by it, and ended.
+probe("implicit_nontrivial_copy_is_made") do p
     h = M.make_holder(4)
-    check_refused(p, "take_holder", refusal(() -> M.take_holder(h)), "implicit and not trivial")
+    l0 = M.live()
+    check(p, "take_holder, twice", (M.take_holder(h), M.take_holder(h)), (4, 4))
+    check(p, "live", M.live() - l0, 0)
+    check(p, "the caller's object is whole", RepliBuild.isalive(h), true)
 end
 
 # The object holds its own address. Its copy constructor sets that; its bytes
@@ -175,7 +190,7 @@ probe("namespaced_move") do p
     M.reset_tally()
     check(p, "ns::consume_nuniq", M.ns_consume_nuniq(u), 22)
     check(p, "live dropped by", l0 - M.live(), 1)
-    check(p, "tally", M.tally(), 11)
+    check(p, "tally (1 move, 2 destructors)", M.tally(), 12)
 end
 
 probe("template_class") do p
@@ -194,7 +209,7 @@ probe("shared_name_is_refused") do p
 end
 
 # Two temporaries in one call, a scalar between them: a copy and a move, each
-# ended once.
+# ended once, and the moved-from object ended by its caller.
 probe("two_temporaries") do p
     r = M.make_res(5)
     u = M.make_uniq(7)
@@ -202,7 +217,8 @@ probe("two_temporaries") do p
     M.reset_tally()
     check(p, "take_both", M.take_both(r, 10, u), 57)
     check(p, "live dropped by", l0 - M.live(), 1)
-    check(p, "tally (1 copy, 1 move, 2 destructors)", M.tally(), 112)
+    check(p, "tally (1 copy, 1 move, 3 destructors)", M.tally(), 113)
+    check(p, "the copied one is whole, the moved one spent", (RepliBuild.isalive(r), RepliBuild.isalive(u)), (true, false))
 end
 
 println("PROBE_DONE")

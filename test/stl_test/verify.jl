@@ -53,12 +53,17 @@ using .StlTest
 
     # ── 3. make_ints (returns std::vector<int> by value) ────────────────────
     @testset "make_ints" begin
-        # This exercises Tier 2 JIT for struct-return
-        # Returns NTuple{24, UInt8} (raw vector bytes)
+        # This exercises Tier 2 JIT for struct-return. The vector has to be
+        # ended, so it is the C++ object, held where C++ built it (2026-11-27);
+        # `raw[]` is its bytes.
         raw = StlTest.make_ints(Cint(5))
-        @test raw isa NTuple{24, UInt8}
+        @test raw isa RepliBuild.CxxObjects.Owned{NTuple{24, UInt8}}
         # A populated vector has non-zero bytes (data pointer, size, capacity)
-        @test any(!=(0x00), raw)
+        @test any(!=(0x00), raw[])
+        # The library reads it where it is, by reference, and by value (a copy).
+        @test StlTest.sum_vec(raw) == 15
+        RepliBuild.release!(raw)
+        @test !RepliBuild.isalive(raw)
     end
 
     # ── 4. sum_vec (takes const std::vector<int>&) ──────────────────────────
@@ -130,7 +135,7 @@ using .StlTest
         @test v[1].x == 3 && v[2].y == 8
         @test StlTest.sum_pts_x(v) == 7
         raw = StlTest.make_pts(Cint(3))
-        @test raw isa NTuple{24, UInt8}
+        @test raw isa RepliBuild.CxxObjects.Owned{NTuple{24, UInt8}}
     end
 
     # ── 7. map_lookup (takes const std::map<int,int>&) ───────────────────────

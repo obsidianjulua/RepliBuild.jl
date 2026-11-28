@@ -100,7 +100,11 @@ if requires("pointer arguments of a Tier 2 call, live", :libJLCS, :clangxx)
         @test occursin(pa("Cstring", "s"), body("cstr_len"))               # `char*` is a C string
         @test occursin(pa("Cstring", "s"), body("overloaded_ptr"))
         @test occursin(pa("Ptr{$jm.Opaque}", "v"), body("vec_sum"))
-        @test occursin(pa("$jm.ByValue{NTuple{24, UInt8}}", "v"), body("vec_sum_val"))
+        # A container by value: the build asked its compiler about the type, so the
+        # wrapper makes the temporary C++ would (`CxxObjects.byvalue`, which asks
+        # `pointer_arg` what `v` may be) and never lends the caller's bytes.
+        @test occursin(r"_rb_v1 = RepliBuild\.CxxObjects\.byvalue\(NTuple\{24, UInt8\}, _RB_OWN_\d+, LIBRARY_PATH, v\)", body("vec_sum_val"))
+        @test occursin("finally RepliBuild.CxxObjects.settle!(_rb_v1) end", body("vec_sum_val"))
         @test occursin(pa("Ptr{$jm.Opaque}", "s") * ", " * pa("Cstring", "x"), body("str_append"))
         # A `std::string` the wrapper builds is not a pointer argument of the caller's.
         @test occursin("RepliBuild.StdStrings.string_arg(s, ", body("str_size_ref"))
