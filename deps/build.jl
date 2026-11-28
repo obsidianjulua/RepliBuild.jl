@@ -69,19 +69,55 @@ function advise(reason::AbstractString; detail::AbstractString = "")
     exit(0)
 end
 
-# Already built AND still loadable.
+# The dialect ABI of this tree's sources: the file libJLCS is compiled with
+# (src/mlir/CMakeLists.txt) and RepliBuild reads (JLCSLibrary.ABI_VERSION).
+# `nothing` when it cannot be read; then no library is judged by it.
+function expected_abi()
+    try
+        return parse(Int, strip(read(joinpath(MLIR_DIR, "ABI_VERSION"), String)))
+    catch
+        return nothing
+    end
+end
+
+# What the library at LIB_PATH says its dialect ABI is: `nothing` when it does
+# not load, 0 when it loads and has no `jlcs_abi_version` (built before
+# RepliBuild checked one). The same reading as JLCSLibrary.library_abi_version.
+#
+# Asked in a child process, never here: this process may be about to build
+# over the file, and Windows will not overwrite a DLL that a process has open.
+function library_abi()
+    code = """
+    L = Base.Libc.Libdl
+    h = L.dlopen(ARGS[1], L.RTLD_LAZY; throw_error = false)
+    h === nothing && exit(3)
+    f = L.dlsym(h, :jlcs_abi_version; throw_error = false)
+    print(f === nothing ? 0 : Int(ccall(f, Cint, ())))
+    """
+    try
+        out = read(`$(Base.julia_cmd()) --startup-file=no -e $code $LIB_PATH`, String)
+        return tryparse(Int, strip(out))
+    catch
+        return nothing
+    end
+end
+
+# Already built, still loadable, AND this tree's dialect.
 #
 # Existence alone is not enough, and this is the case that bites on a rolling
 # distro: libJLCS.so links libMLIR.so.<version>, so an LLVM upgrade leaves a
 # file that is present, correct-looking, and impossible to dlopen. Asking the
 # loader is the only check that distinguishes "built" from "built against an
 # LLVM that is gone".
+#
+# Loading is not enough either. A checkout that moved to a newer dialect keeps
+# the library built from the older one, which loads and which RepliBuild then
+# refuses (JLCSLibrary.verify_abi!); the doctor's advice for that is
+# `Pkg.build`, so this script must not answer "already built".
 function usable_library()
     isfile(LIB_PATH) || return false
-    try
-        Base.Libc.Libdl.dlopen(LIB_PATH, Base.Libc.Libdl.RTLD_LAZY)
-        return true
-    catch
+    got = library_abi()
+    if got === nothing
         # On Windows the same failure has a second cause: the DLLs it imports
         # (libLLVM, libc++) are in CLANG64's bin, which must be on PATH.
         why = Sys.iswindows() ? "LLVM upgraded, or C:\\msys64\\clang64\\bin not on PATH?" :
@@ -89,6 +125,13 @@ function usable_library()
         @info "RepliBuild: existing $(basename(LIB_PATH)) does not load ($why)."
         return false
     end
+    want = expected_abi()
+    if want !== nothing && got != want
+        said = got == 0 ? "has no dialect ABI version" : "speaks dialect ABI $got"
+        @info "RepliBuild: existing $(basename(LIB_PATH)) $said; this RepliBuild speaks dialect ABI $want."
+        return false
+    end
+    return true
 end
 
 haveit(prog) = Sys.which(prog) !== nothing
@@ -191,7 +234,10 @@ function main()
 
     # A prebuilt library needs no system LLVM or MLIR. `REPLIBUILD_JLCS=local`
     # asks for the local build instead (the choice RepliBuild itself reads).
-    if lowercase(get(ENV, "REPLIBUILD_JLCS", "")) != "local" && prebuilt_library()
+    # A local build that is there and unusable is built again: RepliBuild
+    # takes the local file before the artifact (JLCSLibrary._decide), so
+    # fetching the prebuilt one beside it would change nothing.
+    if !isfile(LIB_PATH) && lowercase(get(ENV, "REPLIBUILD_JLCS", "")) != "local" && prebuilt_library()
         return println("RepliBuild: using the prebuilt JLCS dialect (no system LLVM/MLIR needed).")
     end
 

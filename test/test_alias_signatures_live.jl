@@ -19,6 +19,7 @@
 # =============================================================================
 
 using Test
+using Libdl
 using RepliBuild
 
 isdefined(@__MODULE__, :TestSupport) ||
@@ -93,11 +94,23 @@ end
     @test isfile(wrapper)
     code = read(wrapper, String)
 
+    # A weak alias is a symbol of an ELF library's dynamic table. MinGW's lld
+    # leaves one out of a DLL's export directory (it is `T` in the COFF symbol
+    # table and nothing can bind it), so on Windows `al_scaled` is not the
+    # library's API and has no row and no wrapper. What the loader binds decides.
+    lib = joinpath(jdir, "libaliassig." * Libdl.dlext)
+    exported = RepliBuild.Compiler._runtime_symbol_names(lib)
+    @test exported !== nothing && "al_name" in exported
+    weak_exported = exported !== nothing && "al_scaled" in exported
+    Sys.islinux() && @test weak_exported
+    @test haskey(fns, "al_scaled") == weak_exported
+
     @testset "the metadata: an alias has its aliasee's signature" begin
         @test meta["alias_signatures"] === true
         checked = 0
         for (alias, real) in (("al_name", "al_real"), ("al_scaled", "al_scaled_real"),
                               ("al_pair", "al_pair_real"), ("al_wide", "al_wide_real"))
+            (alias == "al_scaled" && !weak_exported) && continue
             a, r = fns[alias], fns[real]
             @test (alias, get(a, "alias_of", nothing)) == (alias, real)
             @test (alias, a["return_type_source"], a["parameters_source"]) == (alias, "dwarf", "dwarf")
@@ -109,7 +122,7 @@ end
             @test !haskey(r, "alias_of")
             checked += 1
         end
-        @test checked == 4
+        @test checked == 3 + weak_exported
         # A DIE with no prototype: the return type is DWARF's.
         @test fns["al_old_style"]["return_type_source"] == "dwarf"
         @test !haskey(fns["al_old_style"], "alias_of")
@@ -120,7 +133,11 @@ end
 
     @testset "the wrapper: a typed call for each alias, a refusal for the rest" begin
         @test occursin("ccall((:al_name, LIBRARY_PATH), Cint, (Cint,), x_c)", _alias_sig_body(code, "al_name"))
-        @test occursin("ccall((:al_scaled, LIBRARY_PATH), Cdouble, (Cdouble, Cint,)", _alias_sig_body(code, "al_scaled"))
+        if weak_exported
+            @test occursin("ccall((:al_scaled, LIBRARY_PATH), Cdouble, (Cdouble, Cint,)", _alias_sig_body(code, "al_scaled"))
+        else
+            @test !occursin("al_scaled,", code) && !occursin("function al_scaled(", code)
+        end
         @test occursin("ccall((:al_pair, LIBRARY_PATH), AlPair, (Cdouble, Cdouble,)", _alias_sig_body(code, "al_pair"))
         @test occursin("ccall((:al_old_style, LIBRARY_PATH), Cint, (), )", _alias_sig_body(code, "al_old_style"))
         u = _alias_sig_body(code, "al_undescribed")
@@ -130,9 +147,11 @@ end
     end
 
     @testset "every function, live" begin
-        _alias_sig_live(wrapper, "c", ["alias_takes_its_argument", "weak_alias_floating_and_integer",
-                                       "alias_returns_a_record", "alias_with_a_stack_argument",
-                                       "no_prototype_still_called", "no_debug_information_is_refused"])
+        cases = ["alias_takes_its_argument", "weak_alias_floating_and_integer",
+                 "alias_returns_a_record", "alias_with_a_stack_argument",
+                 "no_prototype_still_called", "no_debug_information_is_refused"]
+        weak_exported || filter!(!=("weak_alias_floating_and_integer"), cases)
+        _alias_sig_live(wrapper, "c", cases)
     end
 end
 

@@ -98,7 +98,9 @@ if requires("narrow integer arguments through a thunk, live", :libJLCS, :clangxx
         @test decl("_ZN2na10full_valueENS_4FullE") == "i32"
         @test decl("_ZN2na8u8_valueEh") == "i32"
         @test decl("_ZN2na10bool_valueEb") == "i32"
-        @test decl("_ZN2na3mixElNS_4KindEatbdNS_5LevelE") == "i64, i32, i32, i32, i32, f64, i32"
+        # The first parameter is a `long`: 64 bits on LP64, 32 on Win64 (LLP64).
+        @test decl("_ZN2na3mixElNS_4KindEatbdNS_5LevelE") ==
+              "$(RepliBuild.C_LONG_MLIR), i32, i32, i32, i32, f64, i32"
         # No enum crosses as a record: none in a declaration or a call (the
         # module's header still aliases each enum for use as a record MEMBER).
         crossing = filter(l -> occursin("func.func", l) || occursin("_call", l) || occursin("jlcs.vcall", l), split(ir, '\n'))

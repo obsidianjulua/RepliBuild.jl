@@ -395,6 +395,9 @@ function _compile_args(grp::CompileGroup, source::String, ir_file::String; windo
     args = String["-S", "-emit-llvm"]
     append!(args, grp.flags)
     _has_full_debug_info(grp.flags) || push!(args, "-g")
+    # After `-g`: the version, where the host's default is below 5 and the
+    # group names none (ConfigurationManager.dwarf_version_flags).
+    args = ConfigurationManager.dwarf_version_flags(args; windows)
     (windows || _is_pic(grp.flags)) || push!(args, "-fPIC")
     for inc in grp.includes
         p = _posix(inc.path)

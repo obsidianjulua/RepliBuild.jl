@@ -92,7 +92,11 @@ if requires("constructor/destructor variants and virtual dispatch, live", :libJL
         end
         @test !haskey(fns, "_ZN6SketchC1Ev") && !haskey(fns, "_ZN5PlainC1Ei")
         sd = md["struct_definitions"]
-        @test all(c -> get(sd[c], "members", nothing) == [], ("Dog", "Puppy", "Duck", "Mallard"))
+        # No member with a place in the object: clang's `__clang_vtable`
+        # placeholder (no offset) is there where the class is its vtable's
+        # home, and which classes those are differs by target.
+        placed(c) = [m for m in get(sd[c], "members", Any[nothing]) if m === nothing || get(m, "offset", nothing) !== nothing]
+        @test all(c -> isempty(placed(c)), ("Dog", "Puppy", "Duck", "Mallard"))
         @test get(fns["_ZNK3Dog4rankEv"], "is_noexcept", false) == true
         # Bird has a DIE in each of the two units, and one is a declaration.
         dump = read(RepliBuild.Tools.tool_cmd(`llvm-dwarfdump --debug-info $library`), String)

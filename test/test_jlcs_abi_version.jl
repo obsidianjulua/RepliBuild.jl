@@ -97,10 +97,10 @@ end
     @test occursin("install_license", build(ygg))
 
     # The dialect's version is its own, and the Yggdrasil literal is it.
-    version = strip(read(joinpath(_AV_MLIR, "VERSION"), String))
+    version = strip(read(joinpath(_AV_MLIR, "JLCS_VERSION"), String))
     @test VersionNumber(version) isa VersionNumber
     @test occursin("version = v\"$version\"", ygg)
-    @test occursin("joinpath(REPO, \"src\", \"mlir\", \"VERSION\")", here)
+    @test occursin("joinpath(REPO, \"src\", \"mlir\", \"JLCS_VERSION\")", here)
 
     # Yggdrasil builds from a pinned commit of the repository, never a path:
     # the commit of the dialect's own release tag, which its build checks the

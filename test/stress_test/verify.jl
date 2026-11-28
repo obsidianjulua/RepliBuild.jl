@@ -294,11 +294,17 @@ if MLIR_AVAILABLE
         # `std::string_view` was a trap here, a toolchain record with no layout
         # in the metadata. The library passes it by value, so its layout is kept
         # (2026-11-08) and it crosses as {len, ptr} in two INTEGER registers.
-        svk = "basic_string_view<char, std::char_traits<char> >"
+        # The key and the layout are the C++ library's own: libstdc++ spells it
+        # `std::char_traits` and lays it out {length, pointer}; libc++ spells
+        # `std::__1::char_traits` and lays it out {pointer, length}. So the
+        # record is found by what it is, and built by field type.
+        svk = only(k for k in keys(meta["struct_definitions"]) if startswith(k, "basic_string_view<char, "))
         @test get(meta["struct_definitions"][svk], "toolchain", false) == true
+        SV = only(methods(StressTest.geom_name_length)).sig.parameters[2]
+        @test fieldcount(SV) == 2 && count(T -> T <: Ptr, fieldtypes(SV)) == 1
         name = "hello"
         GC.@preserve name begin
-            sv = StressTest.basic_string_view_char_std_char_traits_char(sizeof(name), pointer(name))
+            sv = SV((T <: Ptr ? T(pointer(name)) : T(sizeof(name)) for T in fieldtypes(SV))...)
             @test StressTest.geom_name_length(sv) == 5
         end
 

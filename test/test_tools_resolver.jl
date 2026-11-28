@@ -249,7 +249,16 @@ end
     for name in ("nm", "readelf", "objdump")
         out, code = RepliBuild.BuildBridge.execute(name, ["--version"])
         @test code == 0
-        @test RepliBuild.Compiler._is_gnu_binutils(out)
+        # What the program `Tools` chose prints, whichever copy that is. The
+        # JLL's is GNU binutils. A system copy is what the machine has: under
+        # MSYS2 CLANG64, the supported Windows host, `nm`, `readelf` and
+        # `objdump` on PATH are LLVM's, and the build finds a GNU dumper by
+        # its own route (`Compiler._dumper_candidates`). Asserting GNU for
+        # every source was the CI runner's answer, where PATH's are MinGW's.
+        own = _TR._probe(_TR.tool_cmd(`$(_TR.tool_path(name)) --version`))
+        @test own !== nothing
+        @test own !== nothing && strip(out) == strip(own)
+        _TR.tool_source(name) === :jll && @test RepliBuild.Compiler._is_gnu_binutils(out)
     end
     out, code = RepliBuild.BuildBridge.execute("cmake", ["--version"]; use_llvm_env = false)
     @test code == 0
